@@ -1,0 +1,8 @@
+{
+    "name": "Settings Mixins",
+    "author": "Community",
+    "version": "1.0.0",
+    "api": 8,
+    "description": "Composable, reusable bundles of print settings that can be combined in any profile.",
+    "i18n-catalog": "cura"
+}
