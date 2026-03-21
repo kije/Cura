@@ -80,95 +80,85 @@ Effective settings resolution:
 
 ### 1. Mixin Storage Format
 
-Mixins are `InstanceContainer` files stored in
+Mixin definitions are stored as **JSON files** in
 `~/.local/share/cura/<version>/setting_mixins/` (or the platform equivalent).
 
-```ini
-; ~/.local/share/cura/5.x/setting_mixins/petg_general.inst.cfg
-[general]
-version = 4
-name = PETG General
-definition = fdmprinter
-
-[metadata]
-type = setting_mixin
-scope = global
-description = Common speed and cooling settings for PETG
-tags = petg;material;cooling
-author = User
-color = #FF6B35
-
-[values]
-material_print_temperature = 230
-material_bed_temperature = 80
-speed_print = 50
-speed_infill = 60
-speed_wall = 40
-speed_wall_0 = 35
-cool_fan_speed = 50
-cool_fan_speed_max = 80
-cool_fan_full_at_height = 0.6
+```json
+// ~/.local/share/cura/5.x/setting_mixins/a1b2c3d4e5f6.json
+{
+  "id": "a1b2c3d4e5f6",
+  "name": "PETG General",
+  "description": "Common speed and cooling settings for PETG",
+  "scope": "global",
+  "color": "#FF6B35",
+  "tags": ["petg", "material", "cooling"],
+  "settings": {
+    "material_print_temperature": 230,
+    "material_bed_temperature": 80,
+    "speed_print": 50,
+    "speed_infill": 60,
+    "speed_wall": 40,
+    "speed_wall_0": 35,
+    "cool_fan_speed": 50,
+    "cool_fan_speed_max": 80,
+    "cool_fan_full_at_height": 0.6
+  }
+}
 ```
 
 **Fields**:
-- `type = setting_mixin` - distinguishes from other container types
-- `scope` - either `global` or `extruder` (determines where settings apply)
+- `id` - unique identifier (auto-generated 12-char hex)
+- `name` - user-facing display name
+- `scope` - either `"global"` or `"extruder"` (determines where settings apply)
 - `description` - user-facing description shown in UI
-- `tags` - searchable/filterable tags
-- `color` - optional color for visual identification in the UI
-
-Per-extruder mixin example:
-```ini
-[metadata]
-type = setting_mixin
-scope = extruder
-description = Disable supports, enable overhang compensation
-```
+- `tags` - searchable/filterable tags array
+- `color` - hex color for visual identification in the UI
+- `settings` - key-value map of setting overrides
 
 ### 2. Mixin Activation & Composition
 
-The plugin tracks which mixins are active and their order via metadata on the
-QualityChanges container:
-
-```ini
-; Inside the quality_changes container metadata:
-setting_mixins = ["petg_general", "no_supports", "fine_detail_walls"]
-setting_mixins_order = ["petg_general", "no_supports", "fine_detail_walls"]
-```
-
-**Composition algorithm** (executed whenever mixins change):
+The list of mixins that a profile "includes" is stored as **metadata on the
+profile's own QualityChanges container**. This means the includes list is a
+property of each profile — different profiles carry different mixin recipes,
+and switching profiles automatically switches the active mixin set.
 
 ```python
-def compose_mixins(quality_changes: InstanceContainer,
-                   active_mixins: List[InstanceContainer],
-                   original_profile_values: Dict[str, Any]) -> None:
-    """
-    Recompute the QualityChanges container from:
-    1. Original profile values (the base custom profile, before mixins)
-    2. Active mixins in order (later = higher priority)
-    """
-    # Start with original profile values
-    merged = dict(original_profile_values)
+# Metadata key on QualityChanges containers:
+INCLUDES_METADATA_KEY = "setting_mixin_includes"
 
-    # Layer each mixin on top, in order
-    for mixin in active_mixins:
-        for key in mixin.getAllKeys():
-            merged[key] = mixin.getProperty(key, "value")
-
-    # Write merged result into quality_changes
-    quality_changes.clear()
-    for key, value in merged.items():
-        quality_changes.setProperty(key, "value", value)
+# Value is a JSON array of mixin IDs, in priority order:
+# '["petg_general", "no_supports", "fine_detail_walls"]'
 ```
 
-**Key detail**: The plugin must separately store the "original" profile values
-(the user's manual quality_changes settings that are NOT from mixins) so that
-toggling mixins on/off doesn't destroy manual customizations. This is stored
-in a sidecar file:
+Reading/writing includes:
+```python
+MixinManager.read_includes(quality_changes_container) -> List[str]
+MixinManager.write_includes(quality_changes_container, mixin_ids: List[str])
+```
 
+**Built-in profiles** use the empty QualityChanges singleton, which cannot
+carry metadata. When the user first adds a mixin to a built-in profile, the
+plugin auto-creates a custom quality_changes profile (e.g., "Fine (with
+mixins)") and activates it, so that mixin includes can be stored.
+
+**Composition algorithm** (executed whenever mixins change or profiles switch):
+
+Mixin values are applied to the **UserChanges** container (index 0). The
+manager tracks which keys it wrote (`_applied_values` dict per stack) so that
+manual user overrides are detected and preserved when re-applying:
+
+```python
+def apply_to_stack(self, stack, quality_changes_container):
+    # 1. Remove previously-applied mixin keys (only if user hasn't overridden)
+    # 2. Compute merged values from profile's includes (later wins)
+    # 3. Apply merged values, skipping user-overridden keys
+    # 4. Track what we applied for next cycle
 ```
-~/.local/share/cura/<version>/setting_mixins/_profile_originals/<profile_id>.json
-```
+
+This approach means:
+- User manual changes (in UserChanges) are always preserved
+- No sidecar files needed — the original QualityChanges values are untouched
+- Toggling/reordering mixins cleanly updates only the mixin-managed keys
 
 ### 3. Conflict Resolution
 
@@ -219,25 +209,14 @@ When a user manually changes a setting in the settings panel:
 
 ```
 plugins/SettingsMixins/
-├── plugin.json
+├── plugin.json                    # Plugin metadata (api 8)
 ├── __init__.py                    # Plugin registration
-├── SettingsMixinsExtension.py     # Main Extension class
-├── MixinManager.py                # Core logic: storage, composition, ordering
-├── MixinContainer.py              # Thin wrapper around InstanceContainer
-├── models/
-│   ├── MixinListModel.py          # QML model: available mixins
-│   ├── ActiveMixinsModel.py       # QML model: active mixin stack
-│   └── MixinConflictsModel.py     # QML model: conflict details
-├── resources/
-│   └── qml/
-│       ├── MixinPanel.qml         # Main mixin panel (sidebar integration)
-│       ├── MixinEditor.qml        # Create/edit mixin dialog
-│       ├── MixinListItem.qml      # Draggable mixin row
-│       ├── ConflictDialog.qml     # Conflict review dialog
-│       └── MixinImportExport.qml  # Import/export dialog
-└── tests/
-    ├── test_mixin_manager.py
-    └── test_composition.py
+├── SettingsMixinsExtension.py     # QObject + Extension: QML API, editor state
+├── MixinManager.py                # Core logic: CRUD, includes, composition
+└── resources/
+    └── qml/
+        ├── MixinMainWindow.qml    # Main management window (UM.Dialog)
+        └── MixinEditorDialog.qml  # Create/edit mixin dialog
 ```
 
 ### 6. UI Design
@@ -373,29 +352,34 @@ the plugin applies them to all enabled extruders.
 
 ### 8. Persistence & Profile Integration
 
-**Active mixin state** is stored as metadata on the QualityChanges group:
+**Active mixin state** is stored as metadata directly on each QualityChanges
+container via the `setting_mixin_includes` metadata key:
 
-```json
-{
-  "setting_mixins": {
-    "global": ["petg_general", "fine_detail_walls"],
-    "extruder_0": ["no_supports"],
-    "extruder_1": []
-  }
-}
+```
+# On the global QualityChanges container:
+qualityChanges.getMetaDataEntry("setting_mixin_includes")
+→ '["petg_general", "fine_detail_walls"]'
+
+# On an extruder's QualityChanges container:
+extruderQualityChanges.getMetaDataEntry("setting_mixin_includes")
+→ '["no_supports"]'
 ```
 
-**When saving a profile** ("Save as new profile"):
-- The plugin hooks into the save flow
-- The mixin references are saved as metadata
-- The composed values are written into QualityChanges (so the profile works
-  even without the plugin)
+This means:
+- **The includes list travels WITH the profile** — switching profiles
+  automatically switches the active mixin set
+- Each profile (global and per-extruder) carries its own includes
+- No separate preferences or sidecar files needed
+
+**Built-in profiles** use the empty QualityChanges singleton which cannot
+store metadata. The plugin auto-creates a custom profile copy when the user
+first adds a mixin, showing a notification in the UI.
 
 **When loading a profile** with mixin metadata:
-- If the plugin is installed, it reconstitutes the mixin stack and allows
-  editing
-- If the plugin is NOT installed, the profile just works as a flat
-  QualityChanges profile (graceful degradation)
+- If the plugin is installed, it reads includes and applies the mixin
+  composition
+- If the plugin is NOT installed, the metadata is simply ignored — the
+  UserChanges values from the last session remain (graceful degradation)
 
 ### 9. Minimal Core Changes Needed
 
@@ -489,11 +473,12 @@ reasonable Phase 0 if the full approach is too complex initially.
 
 | Aspect | Design Decision |
 |---|---|
-| Storage | InstanceContainer files with `type=setting_mixin` |
-| Composition target | QualityChanges container (index 1) |
-| Conflict resolution | Ordered list, later items win |
+| Mixin storage | JSON files in `setting_mixins/` directory |
+| Includes storage | Metadata on QualityChanges container (`setting_mixin_includes`) |
+| Application target | UserChanges container (index 0), tracking applied keys |
+| Conflict resolution | Ordered list, later items win (CSS cascade) |
 | Scope | Both global and per-extruder |
-| UI location | Collapsible panel in Custom Print Setup |
-| Core changes | 1 optional change for setting origin indicators |
-| Degradation | Profiles work without plugin (flat QualityChanges) |
-| File format | `.inst.cfg` / `.cura_mixin` for export |
+| UI location | Extensions menu → Settings Mixins (UM.Dialog window) |
+| Core changes | None required — pure plugin |
+| Degradation | Metadata ignored without plugin; UserChanges values persist |
+| File format | `.json` / `.cura_mixin` for export |

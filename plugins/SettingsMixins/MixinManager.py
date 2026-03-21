@@ -1,11 +1,15 @@
 import json
 import os
-import shutil
 import uuid
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from UM.Logger import Logger
 from UM.Resources import Resources
+
+
+# Metadata key used on QualityChanges containers to store the ordered list
+# of mixin IDs that this profile "includes".
+INCLUDES_METADATA_KEY = "setting_mixin_includes"
 
 
 class MixinDefinition:
@@ -53,24 +57,28 @@ class MixinDefinition:
 class MixinManager:
     """Manages mixin definitions and their application to the container stack.
 
-    Mixins are stored as JSON files in the user data directory.
-    Active mixin configurations (which mixins are enabled, their order) are
-    stored in Cura preferences keyed by machine ID.
+    Mixin *definitions* are stored as JSON files in the user data directory.
 
-    Mixin values are applied to the UserChanges container (index 0) in the
-    container stack. The manager tracks which keys were set by mixins vs.
-    manually by the user, so that user overrides are preserved on re-apply.
+    The list of mixins that a profile "includes" is stored as metadata on the
+    profile's QualityChanges container:
+
+        qualityChanges.getMetaDataEntry("setting_mixin_includes")
+        → '["petg_general", "no_supports"]'   (JSON array of mixin IDs, ordered)
+
+    This means the includes list travels WITH the profile — different profiles
+    can include different mixins, and switching profiles automatically switches
+    the active mixin set.
+
+    Mixin values are applied to the UserChanges container (index 0).  The
+    manager tracks which keys it wrote so that manual user overrides are
+    preserved when re-applying.
     """
 
     def __init__(self) -> None:
-        self._mixins: Dict[str, MixinDefinition] = {}  # id -> definition
+        self._mixins: Dict[str, MixinDefinition] = {}  # id → definition
         self._storage_path = ""
 
-        # Per-machine active mixin state
-        # Stored in preferences as JSON: {machine_id: {"global": [mixin_ids], "extruder_0": [ids], ...}}
-        self._active_mixins: Dict[str, Dict[str, List[str]]] = {}
-
-        # Track what keys we applied and what values we set, per stack ID
+        # Track what keys we applied and what values we set, per stack ID.
         # {stack_id: {setting_key: value_we_set}}
         self._applied_values: Dict[str, Dict[str, Any]] = {}
 
@@ -83,7 +91,7 @@ class MixinManager:
             os.makedirs(self._storage_path, exist_ok=True)
         return self._storage_path
 
-    # ── CRUD Operations ────────────────────────────────────────────────
+    # ── Mixin Definition CRUD ──────────────────────────────────────────
 
     def load_all_mixins(self) -> None:
         """Load all mixin definitions from the storage directory."""
@@ -164,13 +172,6 @@ class MixinManager:
             Logger.log("e", "Failed to delete mixin file %s: %s", filepath, str(e))
 
         del self._mixins[mixin_id]
-
-        # Remove from all active configurations
-        for machine_id, scopes in self._active_mixins.items():
-            for scope_key, mixin_ids in scopes.items():
-                if mixin_id in mixin_ids:
-                    mixin_ids.remove(mixin_id)
-
         return True
 
     def get_mixin(self, mixin_id: str) -> Optional[MixinDefinition]:
@@ -179,15 +180,46 @@ class MixinManager:
     def get_all_mixins(self) -> List[MixinDefinition]:
         return sorted(self._mixins.values(), key=lambda m: m.name.lower())
 
-    # ── Active Mixin Management ────────────────────────────────────────
+    # ── Profile Includes (stored on QualityChanges container) ──────────
 
-    def get_active_mixin_ids(self, machine_id: str, scope_key: str = "global") -> List[str]:
-        """Get the ordered list of active mixin IDs for a machine/scope."""
-        return list(self._active_mixins.get(machine_id, {}).get(scope_key, []))
+    @staticmethod
+    def read_includes(quality_changes_container: Any) -> List[str]:
+        """Read the ordered mixin-ID list from a QualityChanges container.
 
-    def get_active_mixins(self, machine_id: str, scope_key: str = "global") -> List[MixinDefinition]:
-        """Get the ordered list of active MixinDefinitions for a machine/scope."""
-        ids = self.get_active_mixin_ids(machine_id, scope_key)
+        Returns an empty list when the container is the empty singleton or
+        has no includes metadata.
+        """
+        from cura.Settings.cura_empty_instance_containers import isEmptyContainer
+        if isEmptyContainer(quality_changes_container.getId()):
+            return []
+
+        raw = quality_changes_container.getMetaDataEntry(INCLUDES_METADATA_KEY, "")
+        if not raw:
+            return []
+        try:
+            ids = json.loads(raw)
+            if isinstance(ids, list):
+                return [str(i) for i in ids]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return []
+
+    @staticmethod
+    def write_includes(quality_changes_container: Any, mixin_ids: List[str]) -> None:
+        """Write the ordered mixin-ID list to a QualityChanges container."""
+        from cura.Settings.cura_empty_instance_containers import isEmptyContainer
+        if isEmptyContainer(quality_changes_container.getId()):
+            Logger.log("w", "Cannot write mixin includes to the empty quality_changes container")
+            return
+
+        quality_changes_container.setMetaDataEntry(
+            INCLUDES_METADATA_KEY,
+            json.dumps(mixin_ids),
+        )
+
+    def get_includes_for_container(self, quality_changes_container: Any) -> List[MixinDefinition]:
+        """Resolve the includes list on a container to MixinDefinition objects."""
+        ids = self.read_includes(quality_changes_container)
         result = []
         for mixin_id in ids:
             mixin = self._mixins.get(mixin_id)
@@ -195,62 +227,62 @@ class MixinManager:
                 result.append(mixin)
         return result
 
-    def set_active_mixin_ids(self, machine_id: str, scope_key: str,
-                             mixin_ids: List[str]) -> None:
-        """Set the ordered list of active mixin IDs for a machine/scope."""
-        if machine_id not in self._active_mixins:
-            self._active_mixins[machine_id] = {}
-        self._active_mixins[machine_id][scope_key] = list(mixin_ids)
-
-    def add_active_mixin(self, machine_id: str, scope_key: str, mixin_id: str) -> None:
-        """Add a mixin to the end (highest priority) of the active list."""
-        ids = self.get_active_mixin_ids(machine_id, scope_key)
+    def add_include(self, quality_changes_container: Any, mixin_id: str) -> None:
+        """Append a mixin to the profile's includes list."""
+        ids = self.read_includes(quality_changes_container)
         if mixin_id not in ids:
             ids.append(mixin_id)
-            self.set_active_mixin_ids(machine_id, scope_key, ids)
+            self.write_includes(quality_changes_container, ids)
 
-    def remove_active_mixin(self, machine_id: str, scope_key: str, mixin_id: str) -> None:
-        """Remove a mixin from the active list."""
-        ids = self.get_active_mixin_ids(machine_id, scope_key)
+    def remove_include(self, quality_changes_container: Any, mixin_id: str) -> None:
+        """Remove a mixin from the profile's includes list."""
+        ids = self.read_includes(quality_changes_container)
         if mixin_id in ids:
             ids.remove(mixin_id)
-            self.set_active_mixin_ids(machine_id, scope_key, ids)
+            self.write_includes(quality_changes_container, ids)
 
-    def move_active_mixin(self, machine_id: str, scope_key: str,
-                          old_index: int, new_index: int) -> None:
-        """Move a mixin within the active list (reorder)."""
-        ids = self.get_active_mixin_ids(machine_id, scope_key)
+    def move_include(self, quality_changes_container: Any,
+                     old_index: int, new_index: int) -> None:
+        """Reorder a mixin within the profile's includes list."""
+        ids = self.read_includes(quality_changes_container)
         if 0 <= old_index < len(ids) and 0 <= new_index < len(ids):
             mixin_id = ids.pop(old_index)
             ids.insert(new_index, mixin_id)
-            self.set_active_mixin_ids(machine_id, scope_key, ids)
+            self.write_includes(quality_changes_container, ids)
+
+    def remove_mixin_from_all_profiles(self, mixin_id: str) -> None:
+        """Remove a deleted mixin from every QualityChanges container that references it."""
+        from UM.Settings.ContainerRegistry import ContainerRegistry
+        registry = ContainerRegistry.getInstance()
+        for container in registry.findContainers(type="quality_changes"):
+            ids = self.read_includes(container)
+            if mixin_id in ids:
+                ids.remove(mixin_id)
+                self.write_includes(container, ids)
 
     # ── Composition ────────────────────────────────────────────────────
 
-    def compute_merged_values(self, machine_id: str,
-                              scope_key: str = "global") -> Dict[str, Any]:
-        """Compute the merged setting values from all active mixins.
+    def compute_merged_values(self, quality_changes_container: Any) -> Dict[str, Any]:
+        """Compute merged setting values from the profile's included mixins.
 
-        Later mixins in the list override earlier ones.
+        Later mixins in the includes list override earlier ones.
         Returns {setting_key: final_value}.
         """
         merged: Dict[str, Any] = {}
-        for mixin in self.get_active_mixins(machine_id, scope_key):
+        for mixin in self.get_includes_for_container(quality_changes_container):
             for key, value in mixin.settings.items():
                 merged[key] = value
         return merged
 
-    def compute_conflicts(self, machine_id: str,
-                          scope_key: str = "global") -> List[Dict[str, Any]]:
-        """Find settings that are set by multiple active mixins.
+    def compute_conflicts(self, quality_changes_container: Any) -> List[Dict[str, Any]]:
+        """Find settings defined by multiple included mixins with different values.
 
-        Returns a list of conflict dicts:
-        [{"key": str, "sources": [{"mixin_id": str, "mixin_name": str,
-                                    "value": Any, "is_active": bool}]}]
+        Returns:
+            [{"key": str, "sources": [{"mixin_id", "mixin_name", "mixin_color",
+                                        "value", "is_active": bool}]}]
         """
-        # Collect all sources per key
         key_sources: Dict[str, List[Dict[str, Any]]] = {}
-        active_mixins = self.get_active_mixins(machine_id, scope_key)
+        active_mixins = self.get_includes_for_container(quality_changes_container)
 
         for i, mixin in enumerate(active_mixins):
             for key, value in mixin.settings.items():
@@ -264,57 +296,46 @@ class MixinManager:
                     "index": i,
                 })
 
-        # Filter to only conflicting keys (multiple sources with different values)
         conflicts = []
         for key, sources in key_sources.items():
             if len(sources) < 2:
                 continue
-            unique_values = set()
-            for s in sources:
-                unique_values.add(str(s["value"]))
+            unique_values = {str(s["value"]) for s in sources}
             if len(unique_values) < 2:
-                continue  # Same value from multiple mixins is not a real conflict
+                continue
 
-            # Mark which source is active (last one wins)
             for s in sources:
                 s["is_active"] = False
             sources[-1]["is_active"] = True
-
             conflicts.append({"key": key, "sources": sources})
 
         return conflicts
 
-    def apply_to_stack(self, stack: Any, machine_id: str,
-                       scope_key: str = "global") -> Set[str]:
-        """Apply active mixins to a container stack's UserChanges.
+    def apply_to_stack(self, stack: Any, quality_changes_container: Any) -> Set[str]:
+        """Apply the profile's included mixins to a stack's UserChanges.
 
-        Returns the set of keys that were applied.
+        Returns the set of setting keys that were applied.
         """
         stack_id = stack.getId()
         user_changes = stack.userChanges
 
-        # Determine which keys were previously applied by us
         prev_applied = self._applied_values.get(stack_id, {})
 
         # Remove previously-applied mixin keys (only if user hasn't overridden)
         for key, our_value in prev_applied.items():
             current_value = user_changes.getProperty(key, "value")
-            # If the current value matches what we set, remove it (it's mixin-managed)
-            # If it differs, the user manually changed it — leave it
             if current_value is not None and self._values_equal(current_value, our_value):
                 try:
                     user_changes.removeInstance(key)
                 except Exception:
-                    pass  # Key may already be removed
+                    pass
 
-        # Compute new merged values
-        merged = self.compute_merged_values(machine_id, scope_key)
+        # Compute new merged values from the profile's includes
+        merged = self.compute_merged_values(quality_changes_container)
 
         # Apply merged values, skipping user-overridden keys
         new_applied: Dict[str, Any] = {}
         for key, value in merged.items():
-            # Check if user has a manual override (a value in UserChanges that
-            # we didn't set, or that they changed after we set it)
             current_value = user_changes.getProperty(key, "value")
             was_ours = key in prev_applied
             user_overrode = (
@@ -324,7 +345,6 @@ class MixinManager:
             )
 
             if user_overrode:
-                # User manually changed this — don't overwrite
                 Logger.log("d", "Skipping mixin key %s (user override)", key)
                 continue
 
@@ -350,15 +370,10 @@ class MixinManager:
 
         self._applied_values.pop(stack_id, None)
 
-    def get_setting_origin(self, machine_id: str, scope_key: str,
+    def get_setting_origin(self, quality_changes_container: Any,
                            setting_key: str) -> Optional[Dict[str, str]]:
-        """Determine which mixin (if any) provides a given setting's value.
-
-        Returns {"mixin_id": str, "mixin_name": str, "mixin_color": str}
-        or None if not from a mixin.
-        """
-        active_mixins = self.get_active_mixins(machine_id, scope_key)
-        # Last mixin with this key wins
+        """Determine which included mixin provides a given setting's value."""
+        active_mixins = self.get_includes_for_container(quality_changes_container)
         for mixin in reversed(active_mixins):
             if setting_key in mixin.settings:
                 return {
@@ -367,39 +382,6 @@ class MixinManager:
                     "mixin_color": mixin.color,
                 }
         return None
-
-    def get_user_overrides(self, stack: Any, machine_id: str,
-                           scope_key: str = "global") -> List[str]:
-        """Get list of setting keys where user has overridden a mixin value."""
-        stack_id = stack.getId()
-        applied = self._applied_values.get(stack_id, {})
-        merged = self.compute_merged_values(machine_id, scope_key)
-        user_changes = stack.userChanges
-
-        overrides = []
-        for key in merged:
-            if key not in applied:
-                # We tried to apply but it was already overridden
-                current = user_changes.getProperty(key, "value")
-                if current is not None:
-                    overrides.append(key)
-        return overrides
-
-    # ── Persistence (preferences) ──────────────────────────────────────
-
-    def save_active_config(self, preferences: Any) -> None:
-        """Save active mixin configuration to Cura preferences."""
-        data = json.dumps(self._active_mixins)
-        preferences.setValue("settings_mixins/active_config", data)
-
-    def load_active_config(self, preferences: Any) -> None:
-        """Load active mixin configuration from Cura preferences."""
-        raw = preferences.getValue("settings_mixins/active_config")
-        if raw:
-            try:
-                self._active_mixins = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                self._active_mixins = {}
 
     # ── Import / Export ────────────────────────────────────────────────
 
@@ -421,7 +403,6 @@ class MixinManager:
         try:
             with open(source_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Generate a new ID to avoid collisions
             data["id"] = str(uuid.uuid4()).replace("-", "")[:12]
             mixin = MixinDefinition.from_dict(data)
             self._mixins[mixin.id] = mixin

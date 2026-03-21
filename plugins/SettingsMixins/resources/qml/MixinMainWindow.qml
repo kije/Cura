@@ -94,6 +94,45 @@ UM.Dialog
                             font: UM.Theme.getFont("medium_bold")
                         }
 
+                        // Profile info bar
+                        Rectangle
+                        {
+                            Layout.fillWidth: true
+                            height: profileInfoRow.height + 10
+                            color: manager.hasCustomProfile ? "#E8F5E9" : "#FFF3CD"
+                            border.color: manager.hasCustomProfile ? "#C8E6C9" : "#FFEAA7"
+                            border.width: 1
+                            radius: UM.Theme.getSize("default_radius").width
+
+                            RowLayout
+                            {
+                                id: profileInfoRow
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.margins: 8
+                                spacing: 8
+
+                                UM.ColorImage
+                                {
+                                    source: UM.Theme.getIcon(manager.hasCustomProfile ? "CheckCircle" : "Information")
+                                    width: 16; height: 16
+                                    color: manager.hasCustomProfile ? "#2E7D32" : "#856404"
+                                }
+
+                                UM.Label
+                                {
+                                    text: manager.hasCustomProfile
+                                        ? catalog.i18nc("@info", "Profile: %1").arg(manager.currentProfileName)
+                                        : catalog.i18nc("@info", "Built-in profile. Adding a mixin will create a custom copy.")
+                                    font: UM.Theme.getFont("default")
+                                    color: manager.hasCustomProfile ? "#2E7D32" : "#856404"
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+
                         UM.Label
                         {
                             text: catalog.i18nc("@info", "Use arrows to reorder. Later mixins override earlier ones on conflict.")
@@ -348,6 +387,7 @@ UM.Dialog
                                 {
                                     target: manager
                                     function onMixinLibraryChanged() { libraryList.model = libraryList.filteredLibrary() }
+                                    function onProfileStateChanged() { libraryList.model = libraryList.filteredLibrary() }
                                 }
 
                                 delegate: Rectangle
