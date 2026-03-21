@@ -67,6 +67,11 @@ class SettingsMixinsExtension(QObject, Extension):
 
         self._current_scope_key = "global"  # "global" or "extruder_N"
 
+        # True if CuraContainerStack.setQualityChanges() supports wrapper preservation.
+        # Detected at startup. When False, the plugin still works but re-installs
+        # the wrapper after every profile switch (brief unresolved flash possible).
+        self._has_core_wrapper_support = False
+
         # Pending setting key from context menu "Add to Mixin..."
         self._pending_setting_key: Optional[str] = None
 
@@ -89,6 +94,15 @@ class SettingsMixinsExtension(QObject, Extension):
     def _on_engine_created(self) -> None:
         app = CuraApplication.getInstance()
         self._manager.load_all_mixins()
+
+        # Detect whether the core wrapper-preservation change is present.
+        # We check if CuraContainerStack.setQualityChanges uses getattr-based
+        # duck typing to detect wrapper containers.
+        self._has_core_wrapper_support = self._detect_core_wrapper_support()
+        if self._has_core_wrapper_support:
+            Logger.log("i", "SettingsMixins: core wrapper support detected — wrappers preserved during profile switches")
+        else:
+            Logger.log("i", "SettingsMixins: core wrapper support NOT detected — using signal-based re-wrapping fallback")
 
         machine_manager = app.getMachineManager()
         machine_manager.globalContainerChanged.connect(self._on_machine_changed)
@@ -829,6 +843,21 @@ class SettingsMixinsExtension(QObject, Extension):
 
     # ── Internal Methods ────────────────────────────────────────────────
 
+    @staticmethod
+    def _detect_core_wrapper_support() -> bool:
+        """Check if CuraContainerStack.setQualityChanges() preserves wrapper containers.
+
+        Inspects the method source for the duck-typing ``getattr(..., "setWrappedQualityChanges")``
+        pattern. Returns True if the core change is present, False otherwise.
+        """
+        import inspect
+        from cura.Settings.CuraContainerStack import CuraContainerStack
+        try:
+            source = inspect.getsource(CuraContainerStack.setQualityChanges)
+            return "setWrappedQualityChanges" in source
+        except (OSError, TypeError):
+            return False
+
     def _register_context_menu(self) -> None:
         """Register 'Add to Mixin...' in the settings right-click context menu."""
         app = CuraApplication.getInstance()
@@ -943,6 +972,9 @@ class SettingsMixinsExtension(QObject, Extension):
         self._emit_all_changed()
 
     def _on_profile_changed(self) -> None:
+        # Without the core wrapper-preservation change, the wrapper was destroyed
+        # by setQualityChanges() before this signal fires. _apply_all_mixins()
+        # will detect that and re-install fresh wrappers — this is the fallback path.
         self._apply_all_mixins()
         self.profileStateChanged.emit()
         self._emit_all_changed()
@@ -964,19 +996,19 @@ class SettingsMixinsExtension(QObject, Extension):
         if not global_stack:
             return
 
-        # Check if any active stack has a mixin wrapper
+        # Find the source profile's mixin includes. Works whether the wrapper
+        # is still installed (core change present) or was already destroyed (fallback).
         source_includes: List[str] = []
         source_mixin_keys: set = set()
         for stack in [global_stack] + global_stack.extruderList:
             current_qc = stack.qualityChanges
-            if isinstance(current_qc, MixinQualityChangesContainer):
-                raw_qc = current_qc.wrappedQualityChanges
-                includes = self._manager.read_includes(raw_qc)
-                if includes:
-                    source_includes = includes
-                    # Collect all mixin setting keys
-                    for mixin in self._manager.get_includes_for_container(raw_qc):
-                        source_mixin_keys |= set(mixin.settings.keys())
+            # Unwrap to get the real QC, whether wrapped or not
+            raw_qc = self._manager.unwrap_quality_changes(current_qc)
+            includes = self._manager.read_includes(raw_qc)
+            if includes:
+                source_includes = includes
+                for mixin in self._manager.get_includes_for_container(raw_qc):
+                    source_mixin_keys |= set(mixin.settings.keys())
                 break
 
         if not source_includes or not source_mixin_keys:
