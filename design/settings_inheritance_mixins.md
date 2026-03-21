@@ -239,11 +239,19 @@ def setQualityChanges(self, new_quality_changes, postpone_emit=False):
     if isinstance(current, MixinQualityChangesContainer):
         # Update the wrapped container, keep the mixin wrapper in place
         current.setWrappedQualityChanges(new_quality_changes)
+        # MixinManager will read active_mixins from new_quality_changes metadata
+        # and call setMixins() accordingly
         if not postpone_emit:
             self.containersChanged.emit(current)
     else:
         self.replaceContainer(_ContainerIndexes.QualityChanges, new_quality_changes, postpone_emit)
 ```
+
+After `setQualityChanges()`, the `MixinManager` reacts (via signal) and:
+1. Reads `active_mixins` from the new QualityChanges metadata
+2. Resolves mixin IDs to mixin containers via `MixinRegistry`
+3. Calls `wrapper.setMixins(resolved_mixins)` to update the overlay
+4. If no mixins are referenced, unwraps the container
 
 #### `clearUserContainers()` — "Reset User Changes"
 
@@ -334,57 +342,91 @@ class MixinRegistry:
 
 ## Mixin Configuration Persistence
 
-The list of active mixins (which mixins are included and their order) is stored as metadata on
-the **machine stack** (GlobalStack), keyed per quality profile:
+The list of active mixins is stored as **metadata on the QualityChanges container** itself.
+Each profile carries its own mixin references:
 
-```python
-# Metadata entry on the machine stack:
-{
-    "active_mixins": {
-        "quality_profile_id_1": ["mixin_petg_general", "mixin_retraction_conservative"],
-        "quality_profile_id_2": ["mixin_petg_general"],
-        ...
-    }
-}
+```ini
+[metadata]
+type = quality_changes
+quality_type = normal
+setting_version = 23
+active_mixins = ["mixin_petg_general", "mixin_retraction_conservative"]
 ```
 
-This allows:
-- Different quality profiles to have different active mixins
-- Mixin configuration survives profile switching
-- Persistence via existing machine stack serialization
+This means:
+- **Each profile declares its own mixins** — switching profiles automatically switches mixins
+- **Saving a new profile inherits the mixin list** — the `active_mixins` metadata is copied
+  to the new QualityChanges container, but mixin VALUES are NOT baked in
+- **Mixin references are portable** — exporting a profile includes the mixin IDs in metadata;
+  on import, if the referenced mixins exist, they are automatically applied
+- **No machine-level mixin state** — the machine doesn't need to track which mixins go with
+  which profile; the profile knows
+
+### What Gets Saved When Creating a New Profile
+
+When the user clicks "Create Profile from Current Settings" with mixins active:
+
+1. A new QualityChanges container is created
+2. **Only the wrapped (real) QualityChanges values + UserChanges are merged in** — mixin
+   values are excluded from the merge
+3. The `active_mixins` metadata from the source profile is **copied** to the new profile
+4. On activation, the MixinManager reads `active_mixins` and re-applies the mixin overlays
+
+```python
+# In QualityManagementModel.createQualityChanges():
+quality_changes_container = stack.qualityChanges
+if isinstance(quality_changes_container, MixinQualityChangesContainer):
+    # Copy mixin references to new profile metadata
+    mixin_ids = quality_changes_container.wrappedQualityChanges.getMetaDataEntry("active_mixins", [])
+    new_changes.setMetaDataEntry("active_mixins", mixin_ids)
+    # Merge only the real QualityChanges values (exclude mixin values)
+    quality_changes_container = quality_changes_container.wrappedQualityChanges
+container_manager._performMerge(new_changes, quality_changes_container, clear_settings=False)
+container_manager._performMerge(new_changes, stack.userChanges)
+```
+
+This way the new profile:
+- Contains only "real" custom profile values (not mixin values)
+- Automatically gets the same mixins applied at runtime
+- Stays in sync if the mixin definitions are later updated
 
 ## Lifecycle & Integration Points
 
 ### Startup
 
 1. `MixinRegistry.loadMixins()` — scan and load all available mixin definitions
-2. For each stack (global + extruders), check if there are active mixins for the current quality
-3. If yes, wrap the QualityChanges container with `MixinQualityChangesContainer` and apply mixins
+2. For each stack (global + extruders), read `active_mixins` from QualityChanges metadata
+3. If mixins are referenced, wrap QualityChanges with `MixinQualityChangesContainer` and apply
 
 ### Quality Profile Change
 
-1. `MachineManager._setQualityGroup()` sets new quality containers
+1. `MachineManager._setQualityGroup()` or `_setQualityChangesGroup()` sets new containers
 2. The overridden `setQualityChanges()` updates the wrapped container inside `MixinQualityChangesContainer`
-3. Look up active mixins for the new quality profile from machine metadata
-4. Call `mixinContainer.setMixins(new_mixin_list)` — triggers `propertyChanged` for all affected keys
+3. `MixinManager` reads `active_mixins` from the **new** QualityChanges container's metadata
+4. Calls `mixinContainer.setMixins(new_mixin_list)` — triggers `propertyChanged` for affected keys
+5. If the new profile has no mixins, the wrapper is unwrapped (removed)
 
 ### Mixin Add/Remove (User Action)
 
 1. User adds/removes a mixin via UI
 2. Call `mixinContainer.addMixin()` / `mixinContainer.removeMixin()` on affected stacks
-3. Update the `active_mixins` metadata on the machine stack
+3. Update the `active_mixins` metadata on the **QualityChanges container** (persisted with profile)
 4. `propertyChanged` signals propagate → UI updates automatically
 
 ### Profile Export
 
 When exporting a profile with mixins:
-- Standard `.curaprofile` export: only the QualityChanges are exported (mixins are separate)
-- Extended export (future): could bundle mixin definitions alongside the profile
+- Standard `.curaprofile` export: QualityChanges are exported with `active_mixins` in metadata
+  (mixin references only, not resolved values)
+- The mixin definitions themselves are NOT bundled in standard export
+- Extended export (future): could bundle mixin definitions alongside the profile in the ZIP
 
 ### Profile Import
 
-Standard import works unchanged — it imports QualityChanges containers. Mixins are managed
-separately and can be imported via their own mechanism.
+- Standard import restores QualityChanges with `active_mixins` metadata intact
+- On activation, `MixinManager` reads the mixin references and applies available mixins
+- If a referenced mixin is not installed, it is silently skipped (with a log warning)
+- User can install missing mixins separately
 
 ## MixinManager (Orchestrator)
 
@@ -439,7 +481,9 @@ class MixinManager(QObject):
     def _applyMixinsToStack(self, stack):
         """Apply or update mixins on a single stack."""
         current_qc = stack.qualityChanges
-        mixin_ids = self._getActiveMixinIds(stack)
+        # Read mixin references from QualityChanges metadata
+        raw_qc = current_qc.wrappedQualityChanges if isinstance(current_qc, MixinQualityChangesContainer) else current_qc
+        mixin_ids = raw_qc.getMetaDataEntry("active_mixins", [])
         mixins = [self._mixin_registry.getMixin(mid) for mid in mixin_ids if self._mixin_registry.getMixin(mid)]
 
         if not mixins:
@@ -482,13 +526,14 @@ class MixinManager(QObject):
 1. **Empty QualityChanges + Mixins**: Wrapper wraps `empty_quality_changes_container`, mixins
    still overlay. Works correctly — mixin values resolve, empty QC has no values to conflict.
 
-2. **Profile save ("Create Profile from Current Settings")**: Should save the QualityChanges
-   (without mixin values baked in). The wrapper's `serialize()` delegates to the wrapped
-   QualityChanges, so mixin values are excluded from serialization. ✓
+2. **Profile save ("Create Profile from Current Settings")**: Only real QualityChanges values +
+   UserChanges are merged into the new profile. Mixin values are excluded. The `active_mixins`
+   metadata is copied to the new profile so the same mixins are re-applied at runtime. ✓
 
 3. **3MF workspace export**: `ThreeMFWorkspaceWriter` iterates `stack.getContainers()` which
    returns `self._containers[1]` (the wrapper). The wrapper's `serialize()` delegates to
-   wrapped QualityChanges, so only real profile values are saved. ✓
+   wrapped QualityChanges, so only real profile values are saved. The `active_mixins` metadata
+   is included in the serialized output, preserving mixin references. ✓
 
 4. **Per-extruder mixins**: Each extruder stack gets its own `MixinQualityChangesContainer`.
    Mixins can be applied globally or per-extruder. The `active_mixins` metadata can be
