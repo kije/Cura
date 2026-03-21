@@ -51,6 +51,8 @@ class SettingsMixinsExtension(QObject, Extension):
     editingMixinChanged = pyqtSignal()
     editingSettingsChanged = pyqtSignal()
     profileStateChanged = pyqtSignal()  # has custom profile or not
+    changedSettingsChanged = pyqtSignal()
+    pendingSettingKeyChanged = pyqtSignal()
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         QObject.__init__(self, parent)
@@ -59,8 +61,13 @@ class SettingsMixinsExtension(QObject, Extension):
         self._manager = MixinManager()
         self._main_window = None
         self._sidebar_panel = None
+        self._mixin_picker_dialog = None
+        self._capture_dialog = None
 
         self._current_scope_key = "global"  # "global" or "extruder_N"
+
+        # Pending setting key from context menu "Add to Mixin..."
+        self._pending_setting_key: Optional[str] = None
 
         # Editor state
         self._editing_mixin_id: Optional[str] = None
@@ -88,6 +95,7 @@ class SettingsMixinsExtension(QObject, Extension):
         machine_manager.activeQualityChangesGroupChanged.connect(self._on_profile_changed)
 
         self._register_sidebar_panel()
+        self._register_context_menu()
         self._apply_all_mixins()
 
     # ── Helpers to get the current QualityChanges container ────────────
@@ -572,7 +580,298 @@ class SettingsMixinsExtension(QObject, Extension):
         """Open the mixin manager window (callable from QML sidebar panel)."""
         self._show_main_window()
 
+    # ── Slots: Context Menu & Capture ────────────────────────────────────
+
+    @pyqtProperty(str, notify=pendingSettingKeyChanged)
+    def pendingSettingKey(self) -> str:
+        return self._pending_setting_key or ""
+
+    @pyqtProperty(str, notify=pendingSettingKeyChanged)
+    def pendingSettingLabel(self) -> str:
+        if not self._pending_setting_key:
+            return ""
+        return self.getSettingLabel(self._pending_setting_key)
+
+    @pyqtProperty(str, notify=pendingSettingKeyChanged)
+    def pendingSettingValue(self) -> str:
+        if not self._pending_setting_key:
+            return ""
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return ""
+        value = global_stack.getProperty(self._pending_setting_key, "value")
+        return str(value) if value is not None else ""
+
+    def _on_add_to_mixin_triggered(self, kwargs: Dict[str, Any]) -> None:
+        """Called from the settings context menu 'Add to Mixin...'."""
+        key = kwargs.get("key", "")
+        if not key:
+            return
+        self._pending_setting_key = key
+        self.pendingSettingKeyChanged.emit()
+        self._show_mixin_picker()
+
+    @pyqtSlot(str)
+    def addPendingSettingToMixin(self, mixin_id: str) -> None:
+        """Add the pending setting (from context menu) to the specified mixin."""
+        if not self._pending_setting_key:
+            return
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return
+
+        value = global_stack.getProperty(self._pending_setting_key, "value")
+        if value is None:
+            return
+
+        mixin = self._manager.get_mixin(mixin_id)
+        if not mixin:
+            return
+
+        settings = dict(mixin.settings)
+        settings[self._pending_setting_key] = value
+        self._manager.update_mixin(mixin_id, settings=settings)
+
+        self._pending_setting_key = None
+        self.pendingSettingKeyChanged.emit()
+        self.mixinLibraryChanged.emit()
+        self._apply_all_mixins()
+        self._emit_all_changed()
+        Logger.log("i", "Added setting '%s' to mixin '%s'", self._pending_setting_key, mixin.name)
+
+    @pyqtSlot(str)
+    def addPendingSettingToNewMixin(self, name: str) -> None:
+        """Create a new mixin with the pending setting."""
+        if not self._pending_setting_key:
+            return
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return
+
+        value = global_stack.getProperty(self._pending_setting_key, "value")
+        if value is None:
+            return
+
+        color = MIXIN_COLORS[len(self._manager.get_all_mixins()) % len(MIXIN_COLORS)]
+        self._manager.create_mixin(
+            name=name.strip() or "New Mixin",
+            description="",
+            scope="global",
+            color=color,
+            settings={self._pending_setting_key: value},
+        )
+
+        self._pending_setting_key = None
+        self.pendingSettingKeyChanged.emit()
+        self.mixinLibraryChanged.emit()
+        self._apply_all_mixins()
+        self._emit_all_changed()
+
+    @pyqtSlot(result="QVariantList")
+    def getChangedSettings(self) -> List[Dict[str, Any]]:
+        """Get all non-default settings from the active stack for bulk capture.
+
+        Returns settings from UserChanges and QualityChanges containers.
+        """
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return []
+
+        results: List[Dict[str, Any]] = []
+        seen_keys: set = set()
+
+        # Collect from UserChanges (index 0)
+        user_changes = global_stack.userChanges
+        if user_changes:
+            for key in user_changes.getAllKeys():
+                value = user_changes.getProperty(key, "value")
+                if value is not None and key not in seen_keys:
+                    seen_keys.add(key)
+                    results.append({
+                        "key": key,
+                        "label": self.getSettingLabel(key),
+                        "value": str(value),
+                        "source": "user",
+                        "unit": self.getSettingUnit(key),
+                    })
+
+        # Collect from QualityChanges (index 1)
+        qc = global_stack.qualityChanges
+        if qc:
+            from cura.Settings.cura_empty_instance_containers import isEmptyContainer
+            if not isEmptyContainer(qc.getId()):
+                for key in qc.getAllKeys():
+                    value = qc.getProperty(key, "value")
+                    if value is not None and key not in seen_keys:
+                        seen_keys.add(key)
+                        results.append({
+                            "key": key,
+                            "label": self.getSettingLabel(key),
+                            "value": str(value),
+                            "source": "profile",
+                            "unit": self.getSettingUnit(key),
+                        })
+
+        # Also collect from active extruder
+        extruder_stack = self._get_active_extruder_stack()
+        if extruder_stack:
+            ext_user = extruder_stack.userChanges
+            if ext_user:
+                for key in ext_user.getAllKeys():
+                    value = ext_user.getProperty(key, "value")
+                    if value is not None and key not in seen_keys:
+                        seen_keys.add(key)
+                        results.append({
+                            "key": key,
+                            "label": self.getSettingLabel(key),
+                            "value": str(value),
+                            "source": "user (extruder)",
+                            "unit": self.getSettingUnit(key),
+                        })
+
+            ext_qc = extruder_stack.qualityChanges
+            if ext_qc:
+                from cura.Settings.cura_empty_instance_containers import isEmptyContainer
+                if not isEmptyContainer(ext_qc.getId()):
+                    for key in ext_qc.getAllKeys():
+                        value = ext_qc.getProperty(key, "value")
+                        if value is not None and key not in seen_keys:
+                            seen_keys.add(key)
+                            results.append({
+                                "key": key,
+                                "label": self.getSettingLabel(key),
+                                "value": str(value),
+                                "source": "profile (extruder)",
+                                "unit": self.getSettingUnit(key),
+                            })
+
+        results.sort(key=lambda r: r["label"])
+        return results
+
+    @pyqtSlot(str, "QVariantList")
+    def captureSettingsToMixin(self, mixin_id: str, keys: List[str]) -> None:
+        """Add multiple settings (by key) with their current values to a mixin."""
+        if not keys:
+            return
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return
+
+        mixin = self._manager.get_mixin(mixin_id)
+        if not mixin:
+            return
+
+        settings = dict(mixin.settings)
+        for key in keys:
+            # Try active stack first (resolves through the full stack)
+            value = global_stack.getProperty(key, "value")
+            # Also check extruder
+            extruder_stack = self._get_active_extruder_stack()
+            if extruder_stack:
+                ext_value = extruder_stack.getProperty(key, "value")
+                if ext_value is not None:
+                    value = ext_value
+            if value is not None:
+                settings[key] = value
+
+        self._manager.update_mixin(mixin_id, settings=settings)
+        self.mixinLibraryChanged.emit()
+        self._apply_all_mixins()
+        self._emit_all_changed()
+        Logger.log("i", "Captured %d settings to mixin '%s'", len(keys), mixin.name)
+
+    @pyqtSlot(str, "QVariantList")
+    def captureSettingsToNewMixin(self, name: str, keys: List[str]) -> None:
+        """Create a new mixin from a selection of current setting keys."""
+        if not keys:
+            return
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return
+
+        settings: Dict[str, Any] = {}
+        for key in keys:
+            value = global_stack.getProperty(key, "value")
+            extruder_stack = self._get_active_extruder_stack()
+            if extruder_stack:
+                ext_value = extruder_stack.getProperty(key, "value")
+                if ext_value is not None:
+                    value = ext_value
+            if value is not None:
+                settings[key] = value
+
+        if not settings:
+            return
+
+        color = MIXIN_COLORS[len(self._manager.get_all_mixins()) % len(MIXIN_COLORS)]
+        self._manager.create_mixin(
+            name=name.strip() or "New Mixin",
+            description="",
+            scope="global",
+            color=color,
+            settings=settings,
+        )
+        self.mixinLibraryChanged.emit()
+        self._apply_all_mixins()
+        self._emit_all_changed()
+        Logger.log("i", "Created new mixin '%s' with %d settings", name, len(settings))
+
+    @pyqtSlot()
+    def showCaptureDialog(self) -> None:
+        """Open the capture-settings-to-mixin dialog."""
+        self.changedSettingsChanged.emit()
+        self._show_capture_dialog()
+
     # ── Internal Methods ────────────────────────────────────────────────
+
+    def _register_context_menu(self) -> None:
+        """Register 'Add to Mixin...' in the settings right-click context menu."""
+        app = CuraApplication.getInstance()
+        menu_item = {
+            "name": "Add to Mixin...",
+            "icon_name": "Plus",
+            "actions": ["_on_add_to_mixin_triggered"],
+            "menu_item": self,
+        }
+        app.getCuraAPI().interface.settings.addContextMenuItem(menu_item)
+        Logger.log("i", "Settings Mixins context menu item registered")
+
+    def _show_mixin_picker(self) -> None:
+        """Show the mixin picker popup for 'Add to Mixin...' context menu action."""
+        if self._mixin_picker_dialog is None:
+            plugin_path = cast(
+                str,
+                PluginRegistry.getInstance().getPluginPath(self.getPluginId()),
+            )
+            qml_path = os.path.join(plugin_path, "resources", "qml", "MixinPickerDialog.qml")
+            self._mixin_picker_dialog = CuraApplication.getInstance().createQmlComponent(
+                qml_path, {"manager": self}
+            )
+        if self._mixin_picker_dialog:
+            self.mixinLibraryChanged.emit()
+            self._mixin_picker_dialog.show()
+
+    def _show_capture_dialog(self) -> None:
+        """Show the bulk capture dialog."""
+        if self._capture_dialog is None:
+            plugin_path = cast(
+                str,
+                PluginRegistry.getInstance().getPluginPath(self.getPluginId()),
+            )
+            qml_path = os.path.join(plugin_path, "resources", "qml", "CaptureSettingsDialog.qml")
+            self._capture_dialog = CuraApplication.getInstance().createQmlComponent(
+                qml_path, {"manager": self}
+            )
+        if self._capture_dialog:
+            self.changedSettingsChanged.emit()
+            self.mixinLibraryChanged.emit()
+            self._capture_dialog.show()
 
     def _register_sidebar_panel(self) -> None:
         """Register the collapsible mixin panel into the Custom Print Setup sidebar."""

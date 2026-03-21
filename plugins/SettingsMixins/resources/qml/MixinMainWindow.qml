@@ -527,6 +527,12 @@ UM.Dialog
 
                             Cura.SecondaryButton
                             {
+                                text: catalog.i18nc("@action:button", "Capture from Profile...")
+                                onClicked: manager.showCaptureDialog()
+                            }
+
+                            Cura.SecondaryButton
+                            {
                                 text: catalog.i18nc("@action:button", "Import...")
                                 onClicked: importDialog.open()
                             }

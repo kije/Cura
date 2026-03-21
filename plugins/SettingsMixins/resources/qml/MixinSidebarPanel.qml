@@ -300,7 +300,7 @@ Item
                     }
                 }
 
-                // Add mixin button row
+                // Button row
                 RowLayout
                 {
                     width: parent.width
@@ -308,9 +308,23 @@ Item
 
                     Cura.SecondaryButton
                     {
-                        text: catalog.i18nc("@action:button", "+ Add Mixin")
+                        text: catalog.i18nc("@action:button", "+ Add")
                         height: 24
                         onClicked: addMixinMenu.open()
+                    }
+
+                    Cura.SecondaryButton
+                    {
+                        text: catalog.i18nc("@action:button", "Capture...")
+                        height: 24
+                        onClicked: if (manager) manager.showCaptureDialog()
+
+                        UM.ToolTip
+                        {
+                            visible: parent.hovered
+                            targetPoint: Qt.point(parent.x, Math.round(parent.y + parent.height / 2))
+                            text: catalog.i18nc("@tooltip", "Capture changed settings from the current profile into a mixin")
+                        }
                     }
 
                     Item { Layout.fillWidth: true }
