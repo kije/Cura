@@ -58,6 +58,7 @@ class SettingsMixinsExtension(QObject, Extension):
 
         self._manager = MixinManager()
         self._main_window = None
+        self._sidebar_panel = None
 
         self._current_scope_key = "global"  # "global" or "extruder_N"
 
@@ -86,6 +87,7 @@ class SettingsMixinsExtension(QObject, Extension):
         machine_manager.activeQualityGroupChanged.connect(self._on_profile_changed)
         machine_manager.activeQualityChangesGroupChanged.connect(self._on_profile_changed)
 
+        self._register_sidebar_panel()
         self._apply_all_mixins()
 
     # ── Helpers to get the current QualityChanges container ────────────
@@ -565,7 +567,32 @@ class SettingsMixinsExtension(QObject, Extension):
                     break
         return results
 
+    @pyqtSlot()
+    def showManageWindow(self) -> None:
+        """Open the mixin manager window (callable from QML sidebar panel)."""
+        self._show_main_window()
+
     # ── Internal Methods ────────────────────────────────────────────────
+
+    def _register_sidebar_panel(self) -> None:
+        """Register the collapsible mixin panel into the Custom Print Setup sidebar."""
+        app = CuraApplication.getInstance()
+        plugin_path = cast(
+            str,
+            PluginRegistry.getInstance().getPluginPath(self.getPluginId()),
+        )
+        qml_path = os.path.join(plugin_path, "resources", "qml", "MixinSidebarPanel.qml")
+        self._sidebar_panel = app.createQmlComponent(qml_path, {"manager": self})
+        if self._sidebar_panel is None:
+            Logger.log("e", "Failed to create Settings Mixins sidebar panel")
+            return
+
+        panel_item = self._sidebar_panel.findChild(QObject, "settingsMixinsSidebarPanel")
+        if panel_item is None:
+            panel_item = self._sidebar_panel
+
+        app.addAdditionalComponent("customPrintSetup", panel_item)
+        Logger.log("i", "Settings Mixins sidebar panel registered")
 
     def _show_main_window(self) -> None:
         if self._main_window is None:

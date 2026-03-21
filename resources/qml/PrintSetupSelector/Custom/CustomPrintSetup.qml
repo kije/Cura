@@ -239,11 +239,53 @@ Item
         }
     }
 
+    // Additional components injected by plugins (e.g. Settings Mixins panel)
+    Column
+    {
+        id: additionalComponentsColumn
+        anchors
+        {
+            top: tabBar.visible ? tabBar.bottom : intent.bottom
+            topMargin: UM.Theme.getSize("narrow_margin").height
+            left: parent.left
+            leftMargin: parent.padding
+            right: parent.right
+            rightMargin: parent.padding
+        }
+        spacing: 0
+
+        // Reparent any components registered for "customPrintSetup"
+        Component.onCompleted: addAdditionalComponents()
+
+        Connections
+        {
+            target: CuraApplication
+            function onAdditionalComponentsChanged(areaId)
+            {
+                if (areaId == "customPrintSetup")
+                {
+                    additionalComponentsColumn.addAdditionalComponents()
+                }
+            }
+        }
+
+        function addAdditionalComponents()
+        {
+            if (CuraApplication.additionalComponents["customPrintSetup"] != undefined)
+            {
+                for (var component in CuraApplication.additionalComponents["customPrintSetup"])
+                {
+                    CuraApplication.additionalComponents["customPrintSetup"][component].parent = additionalComponentsColumn
+                }
+            }
+        }
+    }
+
     Rectangle
     {
         anchors
         {
-            top: tabBar.visible ? tabBar.bottom : intent.bottom
+            top: additionalComponentsColumn.bottom
             topMargin: -UM.Theme.getSize("default_lining").width
             left: parent.left
             leftMargin: parent.padding
@@ -258,10 +300,10 @@ Item
         border.width: UM.Theme.getSize("default_lining").width
 
         color: UM.Theme.getColor("main_background")
-        
+
         // Reduce opacity of the settings when the selected extruder is disabled
         opacity: Cura.MachineManager.activeStack != null && !Cura.MachineManager.activeStack.isEnabled ? 0.4 : 1.0
-        
+
         Cura.SettingView
         {
             anchors
