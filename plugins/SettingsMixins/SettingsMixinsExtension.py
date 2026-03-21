@@ -15,6 +15,7 @@ from UM.i18n import i18nCatalog
 from cura.CuraApplication import CuraApplication
 
 from .MixinManager import MixinDefinition, MixinManager
+from .MixinQualityChangesContainer import MixinQualityChangesContainer
 
 catalog = i18nCatalog("cura")
 
@@ -93,6 +94,9 @@ class SettingsMixinsExtension(QObject, Extension):
         machine_manager.globalContainerChanged.connect(self._on_machine_changed)
         machine_manager.activeQualityGroupChanged.connect(self._on_profile_changed)
         machine_manager.activeQualityChangesGroupChanged.connect(self._on_profile_changed)
+
+        # Listen for new containers to post-process "Create Profile from Current Settings"
+        ContainerRegistry.getInstance().containerAdded.connect(self._on_container_added)
 
         self._register_sidebar_panel()
         self._register_context_menu()
@@ -494,18 +498,11 @@ class SettingsMixinsExtension(QObject, Extension):
 
     @pyqtSlot(str)
     def deleteMixin(self, mixin_id: str) -> None:
-        # Clear applied values from stacks first
-        app = CuraApplication.getInstance()
-        global_stack = app.getGlobalContainerStack()
-        if global_stack:
-            self._manager.clear_from_stack(global_stack)
-            for extruder in global_stack.extruderList:
-                self._manager.clear_from_stack(extruder)
-
         # Remove from all profiles that reference it
         self._manager.remove_mixin_from_all_profiles(mixin_id)
         self._manager.delete_mixin(mixin_id)
 
+        # Re-apply mixins (will unwrap stacks that no longer have mixins)
         self._apply_all_mixins()
         self.mixinLibraryChanged.emit()
         self._emit_all_changed()
@@ -699,13 +696,14 @@ class SettingsMixinsExtension(QObject, Extension):
                         "unit": self.getSettingUnit(key),
                     })
 
-        # Collect from QualityChanges (index 1)
+        # Collect from QualityChanges (index 1) — unwrap to get real QC values only
         qc = global_stack.qualityChanges
-        if qc:
+        raw_qc = self._manager.unwrap_quality_changes(qc) if qc else None
+        if raw_qc:
             from cura.Settings.cura_empty_instance_containers import isEmptyContainer
-            if not isEmptyContainer(qc.getId()):
-                for key in qc.getAllKeys():
-                    value = qc.getProperty(key, "value")
+            if not isEmptyContainer(raw_qc.getId()):
+                for key in raw_qc.getAllKeys():
+                    value = raw_qc.getProperty(key, "value")
                     if value is not None and key not in seen_keys:
                         seen_keys.add(key)
                         results.append({
@@ -734,11 +732,12 @@ class SettingsMixinsExtension(QObject, Extension):
                         })
 
             ext_qc = extruder_stack.qualityChanges
-            if ext_qc:
+            raw_ext_qc = self._manager.unwrap_quality_changes(ext_qc) if ext_qc else None
+            if raw_ext_qc:
                 from cura.Settings.cura_empty_instance_containers import isEmptyContainer
-                if not isEmptyContainer(ext_qc.getId()):
-                    for key in ext_qc.getAllKeys():
-                        value = ext_qc.getProperty(key, "value")
+                if not isEmptyContainer(raw_ext_qc.getId()):
+                    for key in raw_ext_qc.getAllKeys():
+                        value = raw_ext_qc.getProperty(key, "value")
                         if value is not None and key not in seen_keys:
                             seen_keys.add(key)
                             results.append({
@@ -947,6 +946,62 @@ class SettingsMixinsExtension(QObject, Extension):
         self._apply_all_mixins()
         self.profileStateChanged.emit()
         self._emit_all_changed()
+
+    def _on_container_added(self, container: InstanceContainer) -> None:
+        """Post-process newly created quality_changes containers.
+
+        When "Create Profile from Current Settings" is used while mixins are active,
+        the new profile gets mixin values baked in via _performMerge. We clean those
+        out and copy the mixin includes metadata instead, so the new profile inherits
+        the mixin references without baking in their resolved values.
+        """
+        if container.getMetaDataEntry("type") != "quality_changes":
+            return
+
+        # Find the source profile's mixin includes by checking the active stacks
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return
+
+        # Check if any active stack has a mixin wrapper
+        source_includes: List[str] = []
+        source_mixin_keys: set = set()
+        for stack in [global_stack] + global_stack.extruderList:
+            current_qc = stack.qualityChanges
+            if isinstance(current_qc, MixinQualityChangesContainer):
+                raw_qc = current_qc.wrappedQualityChanges
+                includes = self._manager.read_includes(raw_qc)
+                if includes:
+                    source_includes = includes
+                    # Collect all mixin setting keys
+                    for mixin in self._manager.get_includes_for_container(raw_qc):
+                        source_mixin_keys |= set(mixin.settings.keys())
+                break
+
+        if not source_includes or not source_mixin_keys:
+            return
+
+        # Check if this new container has mixin-originated keys baked in
+        # (it will if it was created via _performMerge from our wrapper)
+        keys_to_remove = []
+        for key in list(container.getAllKeys()):
+            if key in source_mixin_keys:
+                # Only remove if the value matches a mixin value (not a real QC value)
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            try:
+                container.removeInstance(key, postpone_emit=True)
+            except Exception:
+                pass
+
+        # Copy the mixin includes metadata to the new profile
+        if not container.getMetaDataEntry("setting_mixin_includes"):
+            from .MixinManager import INCLUDES_METADATA_KEY
+            container.setMetaDataEntry(INCLUDES_METADATA_KEY, json.dumps(source_includes))
+            Logger.log("d", "Copied mixin includes to new profile '%s' and stripped %d baked-in mixin keys",
+                       container.getId(), len(keys_to_remove))
 
     def _emit_all_changed(self) -> None:
         self.activeMixinsChanged.emit()

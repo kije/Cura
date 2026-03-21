@@ -88,9 +88,21 @@ class CuraContainerStack(ContainerStack):
         """Set the quality changes container.
 
         :param new_quality_changes: The new quality changes container. It is expected to have a "type" metadata entry with the value "quality_changes".
+
+        If a wrapper container with a ``setWrappedQualityChanges`` method is currently
+        installed at this index (e.g. by the SettingsMixins plugin), the wrapper is
+        preserved and only its inner wrapped container is swapped.
         """
 
-        self.replaceContainer(_ContainerIndexes.QualityChanges, new_quality_changes, postpone_emit = postpone_emit)
+        current = self._containers[_ContainerIndexes.QualityChanges]
+        swap_method = getattr(current, "setWrappedQualityChanges", None)
+        if swap_method is not None and not hasattr(new_quality_changes, "setWrappedQualityChanges"):
+            # Current container is a wrapper — swap its inner container, keep the wrapper
+            swap_method(new_quality_changes)
+            if not postpone_emit:
+                self.containersChanged.emit(current)
+        else:
+            self.replaceContainer(_ContainerIndexes.QualityChanges, new_quality_changes, postpone_emit = postpone_emit)
 
     @pyqtProperty(QObject, fset = setQualityChanges, notify = pyqtContainersChanged)
     def qualityChanges(self) -> InstanceContainer:

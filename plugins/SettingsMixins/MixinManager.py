@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Set
 from UM.Logger import Logger
 from UM.Resources import Resources
 
+from .MixinQualityChangesContainer import MixinQualityChangesContainer
+
 
 # Metadata key used on QualityChanges containers to store the ordered list
 # of mixin IDs that this profile "includes".
@@ -77,10 +79,6 @@ class MixinManager:
     def __init__(self) -> None:
         self._mixins: Dict[str, MixinDefinition] = {}  # id → definition
         self._storage_path = ""
-
-        # Track what keys we applied and what values we set, per stack ID.
-        # {stack_id: {setting_key: value_we_set}}
-        self._applied_values: Dict[str, Dict[str, Any]] = {}
 
     @property
     def storage_path(self) -> str:
@@ -187,8 +185,13 @@ class MixinManager:
         """Read the ordered mixin-ID list from a QualityChanges container.
 
         Returns an empty list when the container is the empty singleton or
-        has no includes metadata.
+        has no includes metadata.  If a MixinQualityChangesContainer wrapper
+        is passed, reads from the wrapped (real) container.
         """
+        # Unwrap if needed
+        if isinstance(quality_changes_container, MixinQualityChangesContainer):
+            quality_changes_container = quality_changes_container.wrappedQualityChanges
+
         from cura.Settings.cura_empty_instance_containers import isEmptyContainer
         if isEmptyContainer(quality_changes_container.getId()):
             return []
@@ -207,6 +210,10 @@ class MixinManager:
     @staticmethod
     def write_includes(quality_changes_container: Any, mixin_ids: List[str]) -> None:
         """Write the ordered mixin-ID list to a QualityChanges container."""
+        # Unwrap if needed — always write to the real container
+        if isinstance(quality_changes_container, MixinQualityChangesContainer):
+            quality_changes_container = quality_changes_container.wrappedQualityChanges
+
         from cura.Settings.cura_empty_instance_containers import isEmptyContainer
         if isEmptyContainer(quality_changes_container.getId()):
             Logger.log("w", "Cannot write mixin includes to the empty quality_changes container")
@@ -312,63 +319,78 @@ class MixinManager:
         return conflicts
 
     def apply_to_stack(self, stack: Any, quality_changes_container: Any) -> Set[str]:
-        """Apply the profile's included mixins to a stack's UserChanges.
+        """Apply the profile's included mixins as a virtual overlay at container index 1.
+
+        Instead of writing mixin values to UserChanges, this wraps the QualityChanges
+        container with a MixinQualityChangesContainer that overlays mixin values at
+        runtime. The original QualityChanges container is preserved inside the wrapper.
 
         Returns the set of setting keys that were applied.
         """
-        stack_id = stack.getId()
-        user_changes = stack.userChanges
+        # Get the raw QualityChanges (unwrap if already wrapped)
+        current_qc = stack.qualityChanges
+        if isinstance(current_qc, MixinQualityChangesContainer):
+            raw_qc = current_qc.wrappedQualityChanges
+        else:
+            raw_qc = current_qc
 
-        prev_applied = self._applied_values.get(stack_id, {})
+        # Resolve mixin includes for this container
+        includes = self.get_includes_for_container(raw_qc)
+        mixin_ids = [m.id for m in includes]
+        mixin_settings = [m.settings for m in includes]
+        all_keys: Set[str] = set()
+        for s in mixin_settings:
+            all_keys |= set(s.keys())
 
-        # Remove previously-applied mixin keys (only if user hasn't overridden)
-        for key, our_value in prev_applied.items():
-            current_value = user_changes.getProperty(key, "value")
-            if current_value is not None and self._values_equal(current_value, our_value):
-                try:
-                    user_changes.removeInstance(key)
-                except Exception:
-                    pass
+        if not includes:
+            # No mixins — unwrap if currently wrapped
+            if isinstance(current_qc, MixinQualityChangesContainer):
+                current_qc.clearMixinOverlays()
+                self._unwrap_stack(stack)
+            return set()
 
-        # Compute new merged values from the profile's includes
-        merged = self.compute_merged_values(quality_changes_container)
+        if isinstance(current_qc, MixinQualityChangesContainer):
+            # Already wrapped — update the mixin overlays
+            current_qc.setMixinOverlays(mixin_ids, mixin_settings)
+        else:
+            # Wrap the QualityChanges with our virtual container
+            wrapper = MixinQualityChangesContainer(raw_qc)
+            wrapper.setMixinOverlays(mixin_ids, mixin_settings)
+            self._install_wrapper(stack, wrapper)
 
-        # Apply merged values, skipping user-overridden keys
-        new_applied: Dict[str, Any] = {}
-        for key, value in merged.items():
-            current_value = user_changes.getProperty(key, "value")
-            was_ours = key in prev_applied
-            user_overrode = (
-                current_value is not None
-                and was_ours
-                and not self._values_equal(current_value, prev_applied[key])
-            )
-
-            if user_overrode:
-                Logger.log("d", "Skipping mixin key %s (user override)", key)
-                continue
-
-            user_changes.setProperty(key, "value", value)
-            new_applied[key] = value
-
-        self._applied_values[stack_id] = new_applied
-        return set(new_applied.keys())
+        return all_keys
 
     def clear_from_stack(self, stack: Any) -> None:
-        """Remove all mixin-applied values from a stack's UserChanges."""
-        stack_id = stack.getId()
-        prev_applied = self._applied_values.get(stack_id, {})
-        user_changes = stack.userChanges
+        """Remove all mixin overlays from a stack, restoring the original QualityChanges."""
+        current_qc = stack.qualityChanges
+        if isinstance(current_qc, MixinQualityChangesContainer):
+            current_qc.clearMixinOverlays()
+            self._unwrap_stack(stack)
 
-        for key, our_value in prev_applied.items():
-            current_value = user_changes.getProperty(key, "value")
-            if current_value is not None and self._values_equal(current_value, our_value):
-                try:
-                    user_changes.removeInstance(key)
-                except Exception:
-                    pass
+    def _install_wrapper(self, stack: Any, wrapper: MixinQualityChangesContainer) -> None:
+        """Install a MixinQualityChangesContainer at index 1 of the stack.
 
-        self._applied_values.pop(stack_id, None)
+        We call the base ContainerStack.replaceContainer() (via super()) to bypass
+        the CuraContainerStack ID equality check, since the wrapper delegates getId()
+        to the wrapped container and would compare equal.
+        """
+        from UM.Settings.ContainerStack import ContainerStack
+        try:
+            ContainerStack.replaceContainer(stack, 1, wrapper)
+        except Exception as e:
+            Logger.log("e", "Failed to install mixin wrapper on stack %s: %s",
+                       stack.getId(), str(e))
+
+    def _unwrap_stack(self, stack: Any) -> None:
+        """Remove the wrapper and restore the original QualityChanges container."""
+        current_qc = stack.qualityChanges
+        if isinstance(current_qc, MixinQualityChangesContainer):
+            from UM.Settings.ContainerStack import ContainerStack
+            try:
+                ContainerStack.replaceContainer(stack, 1, current_qc.wrappedQualityChanges)
+            except Exception as e:
+                Logger.log("e", "Failed to unwrap mixin wrapper on stack %s: %s",
+                           stack.getId(), str(e))
 
     def get_setting_origin(self, quality_changes_container: Any,
                            setting_key: str) -> Optional[Dict[str, str]]:
@@ -415,11 +437,8 @@ class MixinManager:
     # ── Helpers ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _values_equal(a: Any, b: Any) -> bool:
-        """Compare setting values, handling type coercion."""
-        try:
-            if type(a) != type(b):
-                return str(a) == str(b)
-            return a == b
-        except (TypeError, ValueError):
-            return str(a) == str(b)
+    def unwrap_quality_changes(quality_changes_container: Any) -> Any:
+        """Return the raw QualityChanges container, unwrapping if needed."""
+        if isinstance(quality_changes_container, MixinQualityChangesContainer):
+            return quality_changes_container.wrappedQualityChanges
+        return quality_changes_container

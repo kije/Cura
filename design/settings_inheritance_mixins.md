@@ -504,22 +504,22 @@ class MixinManager(QObject):
 
 ## Files to Create/Modify
 
-### New Files
+### Plugin Files (plugins/SettingsMixins/)
 
 | File | Purpose |
 |------|---------|
-| `cura/Settings/MixinQualityChangesContainer.py` | Virtual container class |
-| `cura/Settings/MixinManager.py` | Orchestrator for mixin lifecycle |
-| `cura/Settings/MixinRegistry.py` | Mixin discovery and loading |
+| `MixinQualityChangesContainer.py` | Virtual container class (wraps QualityChanges + overlays) |
+| `MixinManager.py` | Mixin CRUD, composition, wrapper installation/removal |
+| `SettingsMixinsExtension.py` | QML bridge, signal handling, profile post-processing |
 
-### Modified Files
+### Core Changes (1 file only)
 
 | File | Change |
 |------|--------|
-| `cura/Settings/CuraContainerStack.py` | Override `setQualityChanges()` to handle wrapper |
-| `cura/Settings/ContainerManager.py` | `updateQualityChanges()` unwraps before merge |
-| `cura/CuraApplication.py` | Initialize `MixinManager` |
-| `cura/Settings/MachineManager.py` | Connect mixin signals, expose mixin API to QML |
+| `cura/Settings/CuraContainerStack.py` | `setQualityChanges()` uses duck typing to preserve wrapper containers. Checks for `setWrappedQualityChanges` method via `getattr()`. No plugin imports. |
+
+All other integration (profile creation post-processing, mixin application on
+profile/machine change, UI) is handled from the plugin via signals.
 
 ## Edge Cases
 
