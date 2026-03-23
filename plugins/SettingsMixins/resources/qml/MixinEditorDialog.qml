@@ -13,8 +13,8 @@ Dialog
 {
     id: editorDialog
     title: manager.editingMixinId !== "" ? catalog.i18nc("@title:window", "Edit Mixin") : catalog.i18nc("@title:window", "Create New Mixin")
-    width: 650 * screenScaleFactor
-    height: 550 * screenScaleFactor
+    width: 700 * screenScaleFactor
+    height: 580 * screenScaleFactor
     anchors.centerIn: parent
     standardButtons: Dialog.NoButton
     modal: true
@@ -237,6 +237,8 @@ Dialog
                     border.width: 1
                     border.color: UM.Theme.getColor("lining")
 
+                    property bool isExpr: modelData.isExpression
+
                     MouseArea
                     {
                         id: settingMouseArea
@@ -253,11 +255,12 @@ Dialog
                         anchors.margins: 8
                         spacing: 8
 
+                        // ── Setting label ──
                         UM.Label
                         {
                             text: manager.getSettingLabel(modelData.key)
                             font: UM.Theme.getFont("default")
-                            Layout.preferredWidth: parent.width * 0.4
+                            Layout.preferredWidth: parent.width * 0.35
                             elide: Text.ElideRight
 
                             ToolTip.text: modelData.key
@@ -272,22 +275,209 @@ Dialog
                             }
                         }
 
+                        // ── Literal value field (visible when NOT expression) ──
                         Cura.TextField
                         {
+                            id: literalField
                             Layout.fillWidth: true
-                            text: modelData.value
-                            onEditingFinished: manager.setEditingSetting(modelData.key, text)
+                            visible: !isExpr
+                            text: isExpr ? "" : modelData.value
+                            onEditingFinished: manager.setEditingSettingLiteral(modelData.key, text)
                         }
 
+                        // ── Expression field (visible when IS expression) ──
+                        Cura.TextField
+                        {
+                            id: expressionField
+                            Layout.fillWidth: true
+                            visible: isExpr
+                            text: isExpr ? modelData.value : ""
+                            font.family: "monospace"
+
+                            onTextChanged:
+                            {
+                                exprDebounce.restart()
+                                // Autocomplete: extract last word
+                                var lastWord = text.replace(/.*[\s+\-*\/%(),.'"]/,"")
+                                if (lastWord.length >= 2)
+                                {
+                                    exprAutocompleteList.model = manager.searchSettings(lastWord)
+                                    if (exprAutocompleteList.count > 0)
+                                        exprAutocompletePopup.open()
+                                    else
+                                        exprAutocompletePopup.close()
+                                }
+                                else
+                                {
+                                    exprAutocompletePopup.close()
+                                }
+                            }
+
+                            onEditingFinished:
+                            {
+                                manager.setEditingSettingExpression(modelData.key, text)
+                                exprAutocompletePopup.close()
+                            }
+
+                            Keys.onEscapePressed: exprAutocompletePopup.close()
+
+                            // Debounce timer for live preview
+                            Timer
+                            {
+                                id: exprDebounce
+                                interval: 300
+                                repeat: false
+                                onTriggered:
+                                {
+                                    var result = manager.evaluateExpression(expressionField.text)
+                                    exprPreview.hasError = !result.success
+                                    if (result.success)
+                                        exprPreview.text = "= " + result.value
+                                    else
+                                        exprPreview.text = result.error ? result.error : "Error"
+                                }
+                            }
+
+                            // Autocomplete popup
+                            Popup
+                            {
+                                id: exprAutocompletePopup
+                                y: expressionField.height + 2
+                                x: 0
+                                width: expressionField.width
+                                height: Math.min(150, exprAutocompleteList.count * 28 + 8)
+                                padding: 4
+                                closePolicy: Popup.CloseOnPressOutside | Popup.CloseOnEscape
+
+                                background: Rectangle
+                                {
+                                    color: UM.Theme.getColor("main_background")
+                                    border.width: 1
+                                    border.color: UM.Theme.getColor("lining")
+                                    radius: UM.Theme.getSize("default_radius").width
+                                }
+
+                                ListView
+                                {
+                                    id: exprAutocompleteList
+                                    anchors.fill: parent
+                                    clip: true
+
+                                    delegate: Rectangle
+                                    {
+                                        width: exprAutocompleteList.width
+                                        height: 26
+                                        color: acMouseArea.containsMouse ? UM.Theme.getColor("action_button_hovered") : "transparent"
+                                        radius: 2
+
+                                        MouseArea
+                                        {
+                                            id: acMouseArea
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            onClicked:
+                                            {
+                                                // Replace the last partial word with the selected key
+                                                var curText = expressionField.text
+                                                var replaced = curText.replace(/[a-zA-Z_][a-zA-Z0-9_]*$/, modelData.key)
+                                                expressionField.text = replaced
+                                                exprAutocompletePopup.close()
+                                                expressionField.forceActiveFocus()
+                                            }
+                                        }
+
+                                        RowLayout
+                                        {
+                                            anchors.fill: parent
+                                            anchors.margins: 4
+                                            spacing: 6
+
+                                            UM.Label
+                                            {
+                                                text: modelData.key
+                                                font.family: "monospace"
+                                                font.pointSize: UM.Theme.getFont("small").pointSize
+                                                Layout.fillWidth: true
+                                                elide: Text.ElideRight
+                                            }
+
+                                            UM.Label
+                                            {
+                                                text: modelData.label
+                                                font: UM.Theme.getFont("small")
+                                                color: UM.Theme.getColor("text_detail")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── f(x) toggle button ──
+                        Rectangle
+                        {
+                            id: fxToggle
+                            width: 32; height: 24
+                            radius: UM.Theme.getSize("default_radius").width
+                            color: isExpr
+                                ? UM.Theme.getColor("action_button_active")
+                                : (fxMouse.containsMouse ? UM.Theme.getColor("action_button_hovered") : UM.Theme.getColor("action_button"))
+                            border.width: 1
+                            border.color: isExpr
+                                ? UM.Theme.getColor("action_button_active_border")
+                                : UM.Theme.getColor("action_button_border")
+
+                            UM.Label
+                            {
+                                anchors.centerIn: parent
+                                text: "f(x)"
+                                font: UM.Theme.getFont("small")
+                                color: isExpr ? UM.Theme.getColor("action_button_active_text") : UM.Theme.getColor("action_button_text")
+                            }
+
+                            MouseArea
+                            {
+                                id: fxMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: manager.toggleSettingExpression(modelData.key)
+                            }
+
+                            ToolTip.text: isExpr
+                                ? catalog.i18nc("@info:tooltip", "Switch to literal value")
+                                : catalog.i18nc("@info:tooltip", "Switch to expression (reference other settings)")
+                            ToolTip.visible: fxMouse.containsMouse
+                            ToolTip.delay: 500
+                        }
+
+                        // ── Unit / Live preview ──
                         UM.Label
                         {
-                            text: manager.getSettingUnit(modelData.key)
+                            id: exprPreview
+                            property bool hasError: false
+                            Layout.preferredWidth: 50
                             font: UM.Theme.getFont("default")
-                            color: UM.Theme.getColor("text_detail")
-                            Layout.preferredWidth: 40
-                            visible: manager.getSettingUnit(modelData.key) !== ""
+                            color: isExpr
+                                ? (hasError ? UM.Theme.getColor("error") : UM.Theme.getColor("text_detail"))
+                                : UM.Theme.getColor("text_detail")
+                            text: isExpr ? "" : manager.getSettingUnit(modelData.key)
+                            visible: manager.getSettingUnit(modelData.key) !== "" || isExpr
+                            elide: Text.ElideRight
+
+                            Component.onCompleted:
+                            {
+                                // Trigger initial preview for expression settings
+                                if (isExpr && modelData.value !== "")
+                                {
+                                    var result = manager.evaluateExpression(modelData.value)
+                                    hasError = !result.success
+                                    text = result.success ? ("= " + result.value) : (result.error ? result.error : "Error")
+                                }
+                            }
                         }
 
+                        // ── Remove button ──
                         UM.SimpleButton
                         {
                             width: 20; height: 20
