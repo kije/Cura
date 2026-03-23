@@ -522,7 +522,13 @@ class SettingsMixinsExtension(QObject, Extension):
         }
 
     def _evaluate_expression_internal(self, expression: str) -> Dict[str, Any]:
-        """Internal expression evaluation. Returns {"success", "raw_value", "error"}."""
+        """Internal expression evaluation. Returns {"success", "raw_value", "error"}.
+
+        Injects other literal settings from the current editing mixin as
+        additional_variables so that expressions can reference sibling mixin
+        values (e.g. an expression for outer_wall_inset can use the mixin's
+        own wall_line_width_0 value rather than the profile's).
+        """
         from UM.Settings.SettingFunction import SettingFunction
 
         if not expression.strip():
@@ -537,8 +543,14 @@ class SettingsMixinsExtension(QObject, Extension):
         if stack is None:
             return {"success": False, "raw_value": None, "error": "No active stack"}
 
+        # Collect literal values from the editing mixin to use as overrides
+        additional_variables = {}
+        for key, value in self._editing_settings.items():
+            if not is_expression(value):
+                additional_variables[key] = value
+
         try:
-            value = func(stack)
+            value = func(stack, additional_variables=additional_variables)
             if value is None:
                 return {"success": False, "raw_value": None, "error": "Expression evaluated to None"}
             return {"success": True, "raw_value": value}
