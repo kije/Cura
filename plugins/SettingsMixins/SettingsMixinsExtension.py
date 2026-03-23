@@ -703,6 +703,49 @@ class SettingsMixinsExtension(QObject, Extension):
                     break
         return results
 
+    # Built-in functions and operators available in expressions
+    _EXPRESSION_BUILTINS = [
+        {"key": "math.ceil()",       "label": "Round up to integer",            "unit": "", "type": "function"},
+        {"key": "math.floor()",      "label": "Round down to integer",          "unit": "", "type": "function"},
+        {"key": "math.sqrt()",       "label": "Square root",                    "unit": "", "type": "function"},
+        {"key": "math.log()",        "label": "Natural logarithm",             "unit": "", "type": "function"},
+        {"key": "math.pi",           "label": "Pi constant (3.14159...)",      "unit": "", "type": "constant"},
+        {"key": "round()",           "label": "Round to N decimal places",     "unit": "", "type": "function"},
+        {"key": "max()",             "label": "Maximum of values",             "unit": "", "type": "function"},
+        {"key": "min()",             "label": "Minimum of values",             "unit": "", "type": "function"},
+        {"key": "abs()",             "label": "Absolute value",                "unit": "", "type": "function"},
+        {"key": "int()",             "label": "Convert to integer",            "unit": "", "type": "function"},
+        {"key": "float()",           "label": "Convert to float",              "unit": "", "type": "function"},
+        {"key": "resolveOrValue('')", "label": "Resolve or get value of setting", "unit": "", "type": "operator"},
+        {"key": "extruderValue(, '')", "label": "Get value from specific extruder", "unit": "", "type": "operator"},
+        {"key": "extruderValues('')", "label": "Get values from all extruders",    "unit": "", "type": "operator"},
+        {"key": "defaultExtruderPosition()", "label": "Default extruder position", "unit": "", "type": "operator"},
+    ]
+
+    @pyqtSlot(str, result="QVariantList")
+    def searchExpressionCompletions(self, query: str) -> List[Dict[str, str]]:
+        """Search both setting keys and built-in functions/operators for autocomplete."""
+        if len(query) < 2:
+            return []
+
+        query_lower = query.lower()
+        results = []
+
+        # Search built-in functions first
+        for builtin in self._EXPRESSION_BUILTINS:
+            if query_lower in builtin["key"].lower() or query_lower in builtin["label"].lower():
+                results.append(builtin)
+
+        # Then search settings
+        settings = self.searchSettings(query)
+        for s in settings:
+            s["type"] = "setting"
+            results.append(s)
+            if len(results) >= 25:
+                break
+
+        return results
+
     @pyqtSlot()
     def showManageWindow(self) -> None:
         """Open the mixin manager window (callable from QML sidebar panel)."""

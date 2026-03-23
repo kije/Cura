@@ -315,10 +315,10 @@ Dialog
                             {
                                 exprDebounce.restart()
                                 // Autocomplete: extract last word
-                                var lastWord = text.replace(/.*[\s+\-*\/%(),.'"]/,"")
+                                var lastWord = text.replace(/.*[\s+\-*\/%(),'"]/,"")
                                 if (lastWord.length >= 2)
                                 {
-                                    exprAutocompleteList.model = manager.searchSettings(lastWord)
+                                    exprAutocompleteList.model = manager.searchExpressionCompletions(lastWord)
                                     if (exprAutocompleteList.count > 0)
                                         exprAutocompletePopup.open()
                                     else
@@ -379,6 +379,8 @@ Dialog
                                         color: acMouseArea.containsMouse ? UM.Theme.getColor("action_button_hovered") : "transparent"
                                         radius: 2
 
+                                        property bool isBuiltin: modelData.type !== "setting"
+
                                         MouseArea
                                         {
                                             id: acMouseArea
@@ -388,7 +390,11 @@ Dialog
                                             {
                                                 // Replace the last partial word with the selected key
                                                 var curText = expressionField.text
-                                                var replaced = curText.replace(/[a-zA-Z_][a-zA-Z0-9_]*$/, modelData.key)
+                                                // For builtins containing dots, also replace the prefix before dot
+                                                var pattern = isBuiltin
+                                                    ? /[a-zA-Z_][a-zA-Z0-9_.]*$/
+                                                    : /[a-zA-Z_][a-zA-Z0-9_]*$/
+                                                var replaced = curText.replace(pattern, modelData.key)
                                                 expressionField.text = replaced
                                                 exprAutocompletePopup.close()
                                                 expressionField.forceActiveFocus()
@@ -400,6 +406,22 @@ Dialog
                                             anchors.fill: parent
                                             anchors.margins: 4
                                             spacing: 6
+
+                                            // Type badge for builtins
+                                            Rectangle
+                                            {
+                                                visible: isBuiltin
+                                                width: 18; height: 14
+                                                radius: 2
+                                                color: UM.Theme.getColor("action_button_active")
+                                                UM.Label
+                                                {
+                                                    anchors.centerIn: parent
+                                                    text: modelData.type === "function" ? "fn" : (modelData.type === "operator" ? "op" : "c")
+                                                    font.pointSize: UM.Theme.getFont("small").pointSize - 1
+                                                    color: UM.Theme.getColor("action_button_active_text")
+                                                }
+                                            }
 
                                             UM.Label
                                             {
