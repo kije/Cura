@@ -6,7 +6,32 @@ from typing import Any, Dict, List, Optional, Set
 from UM.Logger import Logger
 from UM.Resources import Resources
 
+from UM.Settings.SettingFunction import SettingFunction
+
 from .MixinQualityChangesContainer import MixinQualityChangesContainer
+
+
+def is_expression(value: Any) -> bool:
+    """Check if a setting value is an expression (string starting with '=')."""
+    return isinstance(value, str) and value.startswith("=")
+
+
+def get_expression_text(value: Any) -> str:
+    """Get the expression body (without '=' prefix). Returns '' for non-expressions."""
+    if is_expression(value):
+        return value[1:]
+    return ""
+
+
+def get_display_value(value: Any) -> str:
+    """Get a display-friendly string for a setting value.
+
+    For expressions, returns the expression text (without '=').
+    For literals, returns str(value).
+    """
+    if is_expression(value):
+        return value[1:]
+    return str(value)
 
 
 # Metadata key used on QualityChanges containers to store the ordered list
@@ -307,7 +332,7 @@ class MixinManager:
         for key, sources in key_sources.items():
             if len(sources) < 2:
                 continue
-            unique_values = {str(s["value"]) for s in sources}
+            unique_values = {get_display_value(s["value"]) for s in sources}
             if len(unique_values) < 2:
                 continue
 
@@ -317,6 +342,23 @@ class MixinManager:
             conflicts.append({"key": key, "sources": sources})
 
         return conflicts
+
+    @staticmethod
+    def _resolve_settings_for_overlay(settings: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new dict converting '='-prefixed expression strings to SettingFunction objects.
+
+        Literal values are copied as-is. The original dict is never mutated.
+        """
+        resolved: Dict[str, Any] = {}
+        for key, value in settings.items():
+            if is_expression(value):
+                try:
+                    resolved[key] = SettingFunction(get_expression_text(value))
+                except Exception as e:
+                    Logger.log("w", "Invalid expression for '%s': %s — skipping", key, str(e))
+            else:
+                resolved[key] = value
+        return resolved
 
     def apply_to_stack(self, stack: Any, quality_changes_container: Any) -> Set[str]:
         """Apply the profile's included mixins as a virtual overlay at container index 1.
@@ -337,7 +379,7 @@ class MixinManager:
         # Resolve mixin includes for this container
         includes = self.get_includes_for_container(raw_qc)
         mixin_ids = [m.id for m in includes]
-        mixin_settings = [m.settings for m in includes]
+        mixin_settings = [self._resolve_settings_for_overlay(m.settings) for m in includes]
         all_keys: Set[str] = set()
         for s in mixin_settings:
             all_keys |= set(s.keys())
