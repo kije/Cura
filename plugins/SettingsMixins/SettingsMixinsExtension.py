@@ -703,48 +703,179 @@ class SettingsMixinsExtension(QObject, Extension):
                     break
         return results
 
-    # Built-in functions and operators available in expressions
-    _EXPRESSION_BUILTINS = [
-        {"key": "math.ceil()",       "label": "Round up to integer",            "unit": "", "type": "function"},
-        {"key": "math.floor()",      "label": "Round down to integer",          "unit": "", "type": "function"},
-        {"key": "math.sqrt()",       "label": "Square root",                    "unit": "", "type": "function"},
-        {"key": "math.log()",        "label": "Natural logarithm",             "unit": "", "type": "function"},
-        {"key": "math.pi",           "label": "Pi constant (3.14159...)",      "unit": "", "type": "constant"},
-        {"key": "round()",           "label": "Round to N decimal places",     "unit": "", "type": "function"},
-        {"key": "max()",             "label": "Maximum of values",             "unit": "", "type": "function"},
-        {"key": "min()",             "label": "Minimum of values",             "unit": "", "type": "function"},
-        {"key": "abs()",             "label": "Absolute value",                "unit": "", "type": "function"},
-        {"key": "int()",             "label": "Convert to integer",            "unit": "", "type": "function"},
-        {"key": "float()",           "label": "Convert to float",              "unit": "", "type": "function"},
-        {"key": "resolveOrValue('')", "label": "Resolve or get value of setting", "unit": "", "type": "operator"},
-        {"key": "extruderValue(, '')", "label": "Get value from specific extruder", "unit": "", "type": "operator"},
-        {"key": "extruderValues('')", "label": "Get values from all extruders",    "unit": "", "type": "operator"},
-        {"key": "defaultExtruderPosition()", "label": "Default extruder position", "unit": "", "type": "operator"},
-    ]
+    # ── Expression Autocomplete (tokenizer-based) ─────────────────────
 
-    @pyqtSlot(str, result="QVariantList")
-    def searchExpressionCompletions(self, query: str) -> List[Dict[str, str]]:
-        """Search both setting keys and built-in functions/operators for autocomplete."""
-        if len(query) < 2:
-            return []
+    # Top-level names available in expression context
+    _TOPLEVEL_COMPLETIONS: Dict[str, Dict[str, str]] = {
+        "math":                      {"label": "Math module",                      "type": "module"},
+        "True":                      {"label": "Boolean true",                     "type": "constant"},
+        "False":                     {"label": "Boolean false",                    "type": "constant"},
+        "None":                      {"label": "None value",                       "type": "constant"},
+        "round":                     {"label": "Round to N decimal places",        "type": "function"},
+        "max":                       {"label": "Maximum of values",               "type": "function"},
+        "min":                       {"label": "Minimum of values",               "type": "function"},
+        "abs":                       {"label": "Absolute value",                  "type": "function"},
+        "int":                       {"label": "Convert to integer",              "type": "function"},
+        "float":                     {"label": "Convert to float",               "type": "function"},
+        "len":                       {"label": "Length of sequence",              "type": "function"},
+        "resolveOrValue":            {"label": "Resolve or get setting value",    "type": "operator"},
+        "extruderValue":             {"label": "Get value from extruder N",       "type": "operator"},
+        "extruderValues":            {"label": "Get values from all extruders",   "type": "operator"},
+        "defaultExtruderPosition":   {"label": "Default extruder position",       "type": "operator"},
+        "anyExtruderWithMaterial":    {"label": "Extruder with specific material", "type": "operator"},
+        "anyExtruderNrWithOrDefault": {"label": "Extruder nr with fallback",      "type": "operator"},
+        "valueFromContainer":        {"label": "Value from container at index",   "type": "operator"},
+        "extruderValueFromContainer": {"label": "Extruder value from container",  "type": "operator"},
+    }
 
-        query_lower = query.lower()
+    # Attributes available after "math."
+    _MATH_COMPLETIONS: Dict[str, Dict[str, str]] = {
+        "ceil":   {"label": "Round up to integer",        "type": "function"},
+        "floor":  {"label": "Round down to integer",      "type": "function"},
+        "sqrt":   {"label": "Square root",                "type": "function"},
+        "log":    {"label": "Natural logarithm",          "type": "function"},
+        "log2":   {"label": "Base-2 logarithm",           "type": "function"},
+        "log10":  {"label": "Base-10 logarithm",          "type": "function"},
+        "pow":    {"label": "Power (x^y)",                "type": "function"},
+        "exp":    {"label": "e raised to power",          "type": "function"},
+        "fabs":   {"label": "Absolute value (float)",     "type": "function"},
+        "pi":     {"label": "Pi (3.14159...)",            "type": "constant"},
+        "e":      {"label": "Euler's number (2.71828...)", "type": "constant"},
+        "inf":    {"label": "Infinity",                   "type": "constant"},
+        "radians": {"label": "Degrees to radians",        "type": "function"},
+        "degrees": {"label": "Radians to degrees",        "type": "function"},
+        "sin":    {"label": "Sine",                       "type": "function"},
+        "cos":    {"label": "Cosine",                     "type": "function"},
+        "tan":    {"label": "Tangent",                    "type": "function"},
+    }
+
+    @pyqtSlot(str, int, result="QVariantMap")
+    def searchExpressionCompletions(self, expression: str, cursor_pos: int) -> Dict[str, Any]:
+        """Tokenizer-based autocomplete for expressions.
+
+        Analyzes the expression up to the cursor position using Python's
+        tokenizer to determine what the user is typing (bare name, dotted
+        attribute access, etc.) and returns appropriate completions.
+
+        Returns {"prefix": str, "completions": [{key, label, type, unit}]}.
+        ``prefix`` is the text being completed (used by QML to know what to replace).
+        """
+        import io
+        import tokenize as _tokenize
+
+        if cursor_pos < 0:
+            cursor_pos = len(expression)
+        text_before_cursor = expression[:cursor_pos]
+
+        # Tokenize the expression up to cursor. Collect NAME and OP tokens.
+        tokens: List[tuple] = []
+        try:
+            gen = _tokenize.generate_tokens(io.StringIO(text_before_cursor).readline)
+            for tok in gen:
+                tokens.append(tok)
+        except _tokenize.TokenError:
+            pass  # Incomplete expression — expected
+        except Exception:
+            pass
+
+        if not tokens:
+            return {"prefix": "", "completions": []}
+
+        # Find the token context at cursor
+        # Last meaningful token(s) tell us what to complete
+        meaningful = [t for t in tokens if t.type not in (_tokenize.NEWLINE, _tokenize.NL,
+                                                           _tokenize.COMMENT, _tokenize.ENDMARKER,
+                                                           _tokenize.ENCODING)]
+        if not meaningful:
+            return {"prefix": "", "completions": []}
+
+        last = meaningful[-1]
+
+        # Case 1: cursor is right after "something." — attribute completion
+        if last.type == _tokenize.OP and last.string == ".":
+            # Find the name before the dot
+            if len(meaningful) >= 2 and meaningful[-2].type == _tokenize.NAME:
+                obj_name = meaningful[-2].string
+                return self._complete_attribute(obj_name, "")
+
+        # Case 2: "something.partial_name" — partial attribute completion
+        if (last.type == _tokenize.NAME and len(meaningful) >= 3 and
+                meaningful[-2].type == _tokenize.OP and meaningful[-2].string == "." and
+                meaningful[-3].type == _tokenize.NAME):
+            obj_name = meaningful[-3].string
+            return self._complete_attribute(obj_name, last.string)
+
+        # Case 3: bare name — complete top-level names + settings
+        if last.type == _tokenize.NAME:
+            return self._complete_toplevel(last.string)
+
+        # Case 4: cursor after operator/paren — no partial text, no completions yet
+        return {"prefix": "", "completions": []}
+
+    def _complete_attribute(self, obj_name: str, partial: str) -> Dict[str, Any]:
+        """Complete attributes of a known object (e.g. 'math.')."""
+        attr_map: Dict[str, Dict[str, str]] = {}
+        if obj_name == "math":
+            attr_map = self._MATH_COMPLETIONS
+
+        if not attr_map:
+            return {"prefix": partial, "completions": []}
+
+        partial_lower = partial.lower()
         results = []
+        for name, info in sorted(attr_map.items()):
+            if partial_lower and not name.lower().startswith(partial_lower):
+                continue
+            results.append({
+                "key": name,
+                "label": info["label"],
+                "type": info["type"],
+                "unit": "",
+                "insertText": name + ("()" if info["type"] == "function" else ""),
+            })
+            if len(results) >= 20:
+                break
 
-        # Search built-in functions first
-        for builtin in self._EXPRESSION_BUILTINS:
-            if query_lower in builtin["key"].lower() or query_lower in builtin["label"].lower():
-                results.append(builtin)
+        return {"prefix": partial, "completions": results}
 
-        # Then search settings
-        settings = self.searchSettings(query)
+    def _complete_toplevel(self, partial: str) -> Dict[str, Any]:
+        """Complete top-level names (builtins, operators, settings)."""
+        if len(partial) < 2:
+            return {"prefix": partial, "completions": []}
+
+        partial_lower = partial.lower()
+        results: List[Dict[str, str]] = []
+
+        # Built-in functions and operators
+        for name, info in sorted(self._TOPLEVEL_COMPLETIONS.items()):
+            if name.lower().startswith(partial_lower):
+                insert = name
+                if info["type"] == "function":
+                    insert = name + "()"
+                elif info["type"] == "operator":
+                    insert = name + "()"
+                results.append({
+                    "key": name,
+                    "label": info["label"],
+                    "type": info["type"],
+                    "unit": "",
+                    "insertText": insert,
+                })
+
+        # Settings (setting keys can also appear as bare names)
+        settings = self.searchSettings(partial)
         for s in settings:
-            s["type"] = "setting"
-            results.append(s)
+            results.append({
+                "key": s["key"],
+                "label": s["label"],
+                "type": "setting",
+                "unit": s.get("unit", ""),
+                "insertText": s["key"],
+            })
             if len(results) >= 25:
                 break
 
-        return results
+        return {"prefix": partial, "completions": results}
 
     @pyqtSlot()
     def showManageWindow(self) -> None:

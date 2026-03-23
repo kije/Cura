@@ -311,18 +311,19 @@ Dialog
                             text: isExpr ? modelData.value : ""
                             font.family: "monospace"
 
+                            property string acPrefix: ""
+
                             onTextChanged:
                             {
                                 exprDebounce.restart()
-                                // Autocomplete: extract last word
-                                var lastWord = text.replace(/.*[\s+\-*\/%(),'"]/,"")
-                                if (lastWord.length >= 2)
+                                // Tokenizer-based autocomplete
+                                var result = manager.searchExpressionCompletions(text, cursorPosition)
+                                acPrefix = result.prefix !== undefined ? result.prefix : ""
+                                var completions = result.completions !== undefined ? result.completions : []
+                                if (completions.length > 0)
                                 {
-                                    exprAutocompleteList.model = manager.searchExpressionCompletions(lastWord)
-                                    if (exprAutocompleteList.count > 0)
-                                        exprAutocompletePopup.open()
-                                    else
-                                        exprAutocompletePopup.close()
+                                    exprAutocompleteList.model = completions
+                                    exprAutocompletePopup.open()
                                 }
                                 else
                                 {
@@ -388,14 +389,15 @@ Dialog
                                             hoverEnabled: true
                                             onClicked:
                                             {
-                                                // Replace the last partial word with the selected key
+                                                // Replace the prefix at cursor with the completion's insertText
                                                 var curText = expressionField.text
-                                                // For builtins containing dots, also replace the prefix before dot
-                                                var pattern = isBuiltin
-                                                    ? /[a-zA-Z_][a-zA-Z0-9_.]*$/
-                                                    : /[a-zA-Z_][a-zA-Z0-9_]*$/
-                                                var replaced = curText.replace(pattern, modelData.key)
-                                                expressionField.text = replaced
+                                                var pos = expressionField.cursorPosition
+                                                var prefix = expressionField.acPrefix
+                                                var insertText = modelData.insertText !== undefined ? modelData.insertText : modelData.key
+                                                var before = curText.substring(0, pos - prefix.length)
+                                                var after = curText.substring(pos)
+                                                expressionField.text = before + insertText + after
+                                                expressionField.cursorPosition = before.length + insertText.length
                                                 exprAutocompletePopup.close()
                                                 expressionField.forceActiveFocus()
                                             }
