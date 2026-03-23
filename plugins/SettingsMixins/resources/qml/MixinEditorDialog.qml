@@ -239,6 +239,23 @@ Dialog
 
                     property bool isExpr: modelData.isExpression
 
+                    function updateExpressionPreview()
+                    {
+                        if (isExpr && expressionField.text !== "")
+                        {
+                            var result = manager.evaluateExpression(expressionField.text)
+                            exprPreview.hasError = !result.success
+                            exprPreview.text = result.success ? ("= " + result.value) : (result.error ? result.error : "Error")
+                        }
+                    }
+
+                    // Re-evaluate expression preview when any sibling setting changes
+                    Connections
+                    {
+                        target: manager
+                        function onEditingSettingsChanged() { updateExpressionPreview() }
+                    }
+
                     MouseArea
                     {
                         id: settingMouseArea
@@ -327,15 +344,7 @@ Dialog
                                 id: exprDebounce
                                 interval: 300
                                 repeat: false
-                                onTriggered:
-                                {
-                                    var result = manager.evaluateExpression(expressionField.text)
-                                    exprPreview.hasError = !result.success
-                                    if (result.success)
-                                        exprPreview.text = "= " + result.value
-                                    else
-                                        exprPreview.text = result.error ? result.error : "Error"
-                                }
+                                onTriggered: updateExpressionPreview()
                             }
 
                             // Autocomplete popup
@@ -465,16 +474,7 @@ Dialog
                             visible: manager.getSettingUnit(modelData.key) !== "" || isExpr
                             elide: Text.ElideRight
 
-                            Component.onCompleted:
-                            {
-                                // Trigger initial preview for expression settings
-                                if (isExpr && modelData.value !== "")
-                                {
-                                    var result = manager.evaluateExpression(modelData.value)
-                                    hasError = !result.success
-                                    text = result.success ? ("= " + result.value) : (result.error ? result.error : "Error")
-                                }
-                            }
+                            Component.onCompleted: updateExpressionPreview()
                         }
 
                         // ── Remove button ──
