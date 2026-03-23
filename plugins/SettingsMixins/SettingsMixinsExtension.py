@@ -14,7 +14,7 @@ from UM.i18n import i18nCatalog
 
 from cura.CuraApplication import CuraApplication
 
-from .MixinManager import MixinDefinition, MixinManager
+from .MixinManager import MixinDefinition, MixinManager, is_expression, get_expression_text, get_display_value
 from .MixinQualityChangesContainer import MixinQualityChangesContainer
 
 catalog = i18nCatalog("cura")
@@ -65,6 +65,7 @@ class SettingsMixinsExtension(QObject, Extension):
         self._mixin_picker_dialog = None
         self._capture_dialog = None
 
+        self._quick_apply_dialog = None
         self._current_scope_key = "global"  # "global" or "extruder_N"
 
         # True if CuraContainerStack.setQualityChanges() supports wrapper preservation.
@@ -84,6 +85,10 @@ class SettingsMixinsExtension(QObject, Extension):
         self._editing_settings: Dict[str, Any] = {}
 
         self.setMenuName(catalog.i18nc("@item:inmenu", "Settings Mixins"))
+        self.addMenuItem(
+            catalog.i18nc("@item:inmenu", "Apply Mixins to Profile..."),
+            self._show_quick_apply_dialog,
+        )
         self.addMenuItem(
             catalog.i18nc("@item:inmenu", "Manage Mixins"),
             self._show_main_window,
@@ -112,6 +117,7 @@ class SettingsMixinsExtension(QObject, Extension):
         # Listen for new containers to post-process "Create Profile from Current Settings"
         ContainerRegistry.getInstance().containerAdded.connect(self._on_container_added)
 
+        self._patch_user_changes_model()
         self._register_sidebar_panel()
         self._register_context_menu()
         self._apply_all_mixins()
@@ -302,7 +308,7 @@ class SettingsMixinsExtension(QObject, Extension):
         raw = self._manager.compute_conflicts(qc)
         for conflict in raw:
             for source in conflict["sources"]:
-                source["value"] = str(source["value"])
+                source["value"] = get_display_value(source["value"])
         return raw
 
     @pyqtProperty(int, notify=conflictsChanged)
@@ -353,11 +359,16 @@ class SettingsMixinsExtension(QObject, Extension):
         return self._editing_color
 
     @pyqtProperty("QVariantList", notify=editingSettingsChanged)
-    def editingSettings(self) -> List[Dict[str, str]]:
-        return [
-            {"key": k, "value": str(v)}
-            for k, v in sorted(self._editing_settings.items())
-        ]
+    def editingSettings(self) -> List[Dict[str, Any]]:
+        result = []
+        for k, v in sorted(self._editing_settings.items()):
+            expr = is_expression(v)
+            result.append({
+                "key": k,
+                "value": get_expression_text(v) if expr else str(v),
+                "isExpression": expr,
+            })
+        return result
 
     # ── Slots: Active Mixin Management ──────────────────────────────────
 
@@ -457,9 +468,95 @@ class SettingsMixinsExtension(QObject, Extension):
         self.editingMixinChanged.emit()
 
     @pyqtSlot(str, str)
-    def setEditingSetting(self, key: str, value: str) -> None:
+    def setEditingSettingLiteral(self, key: str, value: str) -> None:
+        """Store a literal (non-expression) value for an editing setting."""
         self._editing_settings[key] = self._parse_setting_value(value)
         self.editingSettingsChanged.emit()
+
+    @pyqtSlot(str, str)
+    def setEditingSettingExpression(self, key: str, expression: str) -> None:
+        """Store an expression value for an editing setting (with '=' prefix)."""
+        self._editing_settings[key] = "=" + expression
+        self.editingSettingsChanged.emit()
+
+    @pyqtSlot(str, result=bool)
+    def isSettingExpression(self, key: str) -> bool:
+        """Check if an editing setting is currently in expression mode."""
+        return is_expression(self._editing_settings.get(key))
+
+    @pyqtSlot(str, result=bool)
+    def toggleSettingExpression(self, key: str) -> bool:
+        """Toggle a setting between literal and expression mode.
+
+        Literal → Expression: wraps current value as expression text.
+        Expression → Literal: evaluates expression, stores result. Returns False if eval fails.
+        """
+        value = self._editing_settings.get(key)
+        if value is None:
+            return False
+
+        if is_expression(value):
+            # Expression → Literal: evaluate and store result
+            result = self._evaluate_expression_internal(get_expression_text(value))
+            if not result["success"]:
+                return False
+            self._editing_settings[key] = result["raw_value"]
+        else:
+            # Literal → Expression: use current value as initial expression text
+            self._editing_settings[key] = "=" + str(value)
+
+        self.editingSettingsChanged.emit()
+        return True
+
+    @pyqtSlot(str, result="QVariantMap")
+    def evaluateExpression(self, expression: str) -> Dict[str, Any]:
+        """Evaluate an expression against the current scope's container stack.
+
+        Returns {"success": bool, "value": str, "error": str}.
+        """
+        result = self._evaluate_expression_internal(expression)
+        return {
+            "success": result["success"],
+            "value": str(result["raw_value"]) if result["success"] else "",
+            "error": result.get("error", ""),
+        }
+
+    def _evaluate_expression_internal(self, expression: str) -> Dict[str, Any]:
+        """Internal expression evaluation. Returns {"success", "raw_value", "error"}."""
+        from UM.Settings.SettingFunction import SettingFunction
+
+        if not expression.strip():
+            return {"success": False, "raw_value": None, "error": "Empty expression"}
+
+        try:
+            func = SettingFunction(expression)
+        except Exception as e:
+            return {"success": False, "raw_value": None, "error": str(e)}
+
+        stack = self._get_evaluation_stack()
+        if stack is None:
+            return {"success": False, "raw_value": None, "error": "No active stack"}
+
+        try:
+            value = func(stack)
+            if value is None:
+                return {"success": False, "raw_value": None, "error": "Expression evaluated to None"}
+            return {"success": True, "raw_value": value}
+        except Exception as e:
+            return {"success": False, "raw_value": None, "error": str(e)}
+
+    def _get_evaluation_stack(self) -> Any:
+        """Get the container stack appropriate for the current editing scope."""
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if not global_stack:
+            return None
+
+        if self._editing_scope == "extruder":
+            extruder_stack = self._get_active_extruder_stack()
+            return extruder_stack if extruder_stack else global_stack
+
+        return global_stack
 
     @pyqtSlot(str)
     def removeEditingSetting(self, key: str) -> None:
@@ -487,6 +584,14 @@ class SettingsMixinsExtension(QObject, Extension):
     def saveEditingMixin(self) -> None:
         if not self._editing_name.strip():
             return
+
+        # Warn about invalid expressions at save time
+        for key, value in self._editing_settings.items():
+            if is_expression(value):
+                result = self._evaluate_expression_internal(get_expression_text(value))
+                if not result["success"]:
+                    Logger.log("w", "Mixin '%s': expression for '%s' failed evaluation: %s",
+                               self._editing_name.strip(), key, result.get("error", "unknown"))
 
         if self._editing_mixin_id:
             self._manager.update_mixin(
@@ -590,6 +695,11 @@ class SettingsMixinsExtension(QObject, Extension):
     def showManageWindow(self) -> None:
         """Open the mixin manager window (callable from QML sidebar panel)."""
         self._show_main_window()
+
+    @pyqtSlot()
+    def showQuickApplyDialog(self) -> None:
+        """Open the quick-apply dialog (callable from QML)."""
+        self._show_quick_apply_dialog()
 
     # ── Slots: Context Menu & Capture ────────────────────────────────────
 
@@ -870,6 +980,61 @@ class SettingsMixinsExtension(QObject, Extension):
         app.getCuraAPI().interface.settings.addContextMenuItem(menu_item)
         Logger.log("i", "Settings Mixins context menu item registered")
 
+    def _patch_user_changes_model(self) -> None:
+        """Monkey-patch UserChangesModel._update to include mixin reference rows.
+
+        When the 'Discard or Keep Changes' dialog shows, it displays all user-changed
+        settings via UserChangesModel. Since setting_mixin_includes is metadata (not a
+        setting), it doesn't appear. This patch appends a virtual row so users can see
+        that mixin references will be saved with the new profile.
+        """
+        try:
+            from cura.Machines.Models.UserChangesModel import UserChangesModel
+        except ImportError:
+            Logger.log("w", "SettingsMixins: Could not import UserChangesModel for patching")
+            return
+
+        manager = self._manager
+        original_update = UserChangesModel._update
+
+        def _patched_update(model_self: Any) -> None:
+            original_update(model_self)
+
+            app = CuraApplication.getInstance()
+            global_stack = app.getGlobalContainerStack()
+            if not global_stack:
+                return
+
+            # Collect mixin includes from all stacks
+            mixin_names: List[str] = []
+            for stack in [global_stack] + list(global_stack.extruderList):
+                qc = stack.qualityChanges
+                raw_qc = manager.unwrap_quality_changes(qc)
+                includes = manager.read_includes(raw_qc)
+                if includes:
+                    for mixin_id in includes:
+                        mixin = manager.get_mixin(mixin_id)
+                        if mixin:
+                            mixin_names.append(mixin.name)
+                    break
+
+            if not mixin_names:
+                return
+
+            items = list(model_self.items)
+            items.append({
+                "key": "setting_mixin_includes",
+                "label": catalog.i18nc("@label", "Setting Mixins"),
+                "user_value": ", ".join(mixin_names),
+                "original_value": catalog.i18nc("@label", "(none)"),
+                "extruder": "",
+                "category": catalog.i18nc("@label", "Mixins"),
+            })
+            model_self.setItems(items)
+
+        UserChangesModel._update = _patched_update
+        Logger.log("i", "SettingsMixins: Patched UserChangesModel to show mixin references")
+
     def _show_mixin_picker(self) -> None:
         """Show the mixin picker popup for 'Add to Mixin...' context menu action."""
         if self._mixin_picker_dialog is None:
@@ -920,6 +1085,26 @@ class SettingsMixinsExtension(QObject, Extension):
 
         app.addAdditionalComponent("customPrintSetup", panel_item)
         Logger.log("i", "Settings Mixins sidebar panel registered")
+
+    def _show_quick_apply_dialog(self) -> None:
+        """Open the quick-apply dialog for toggling mixins on the current profile."""
+        if self._quick_apply_dialog is None:
+            plugin_path = cast(
+                str,
+                PluginRegistry.getInstance().getPluginPath(self.getPluginId()),
+            )
+            qml_path = os.path.join(plugin_path, "resources", "qml", "QuickApplyDialog.qml")
+            self._quick_apply_dialog = CuraApplication.getInstance().createQmlComponent(
+                qml_path, {"manager": self}
+            )
+            if self._quick_apply_dialog is None:
+                Logger.log("e", "Failed to create Quick Apply Mixins dialog")
+                return
+
+        self.mixinLibraryChanged.emit()
+        self.profileStateChanged.emit()
+        self._emit_all_changed()
+        self._quick_apply_dialog.show()
 
     def _show_main_window(self) -> None:
         if self._main_window is None:
@@ -983,9 +1168,9 @@ class SettingsMixinsExtension(QObject, Extension):
         """Post-process newly created quality_changes containers.
 
         When "Create Profile from Current Settings" is used while mixins are active,
-        the new profile gets mixin values baked in via _performMerge. We clean those
-        out and copy the mixin includes metadata instead, so the new profile inherits
-        the mixin references without baking in their resolved values.
+        copy the mixin includes metadata to the new profile so that it inherits the
+        mixin references. Mixin values are NOT baked in because the wrapper's
+        getAllKeys() excludes mixin overlay keys from _performMerge iteration.
         """
         if container.getMetaDataEntry("type") != "quality_changes":
             return
@@ -996,44 +1181,23 @@ class SettingsMixinsExtension(QObject, Extension):
         if not global_stack:
             return
 
-        # Find the source profile's mixin includes. Works whether the wrapper
-        # is still installed (core change present) or was already destroyed (fallback).
         source_includes: List[str] = []
-        source_mixin_keys: set = set()
         for stack in [global_stack] + global_stack.extruderList:
             current_qc = stack.qualityChanges
-            # Unwrap to get the real QC, whether wrapped or not
             raw_qc = self._manager.unwrap_quality_changes(current_qc)
             includes = self._manager.read_includes(raw_qc)
             if includes:
                 source_includes = includes
-                for mixin in self._manager.get_includes_for_container(raw_qc):
-                    source_mixin_keys |= set(mixin.settings.keys())
                 break
 
-        if not source_includes or not source_mixin_keys:
+        if not source_includes:
             return
-
-        # Check if this new container has mixin-originated keys baked in
-        # (it will if it was created via _performMerge from our wrapper)
-        keys_to_remove = []
-        for key in list(container.getAllKeys()):
-            if key in source_mixin_keys:
-                # Only remove if the value matches a mixin value (not a real QC value)
-                keys_to_remove.append(key)
-
-        for key in keys_to_remove:
-            try:
-                container.removeInstance(key, postpone_emit=True)
-            except Exception:
-                pass
 
         # Copy the mixin includes metadata to the new profile
         if not container.getMetaDataEntry("setting_mixin_includes"):
             from .MixinManager import INCLUDES_METADATA_KEY
             container.setMetaDataEntry(INCLUDES_METADATA_KEY, json.dumps(source_includes))
-            Logger.log("d", "Copied mixin includes to new profile '%s' and stripped %d baked-in mixin keys",
-                       container.getId(), len(keys_to_remove))
+            Logger.log("d", "Copied mixin includes to new profile '%s'", container.getId())
 
     def _emit_all_changed(self) -> None:
         self.activeMixinsChanged.emit()
