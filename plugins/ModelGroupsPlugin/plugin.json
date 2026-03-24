@@ -1,0 +1,7 @@
+{
+    "name": "Model Groups",
+    "author": "Community",
+    "version": "1.0.0",
+    "api": 8,
+    "description": "Organize models into named groups and toggle them on/off for batch printing."
+}
