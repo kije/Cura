@@ -49,9 +49,11 @@ class ModelGroupsPlugin(QObject, Extension):
         self._nodes_model = ModelGroupNodesModel(self._manager)
         self._all_models_model = AllModelsModel(self._manager)
         self._selected_group_id: str = ""
+        self._context_menu = None
 
         CuraApplication.getInstance().fileCompleted.connect(self._onFileLoaded)
         CuraApplication.getInstance().getController().getScene().sceneChanged.connect(self._onSceneChanged)
+        CuraApplication.getInstance().engineCreatedSignal.connect(self._onEngineCreated)
 
     selectedGroupChanged = pyqtSignal()
     groupsChanged = pyqtSignal()
@@ -245,6 +247,37 @@ class ModelGroupsPlugin(QObject, Extension):
             if decorator is not None and not decorator.isModelGroupNodeEnabled():
                 return True
         return False
+
+    def _onEngineCreated(self) -> None:
+        """Inject hide/show items into the viewport context menu (MeshTools pattern)."""
+        main_window = CuraApplication.getInstance().getMainWindow()
+        if not main_window:
+            return
+
+        context_menu = None
+        for child in main_window.contentItem().children():
+            try:
+                test = child.handleVisibility  # Qt6 context menu detection
+                context_menu = child
+                break
+            except AttributeError:
+                pass
+
+        if not context_menu:
+            Logger.log("w", "ModelGroupsPlugin: Could not find the viewport context menu")
+            return
+
+        plugin_path = cast(str, PluginRegistry.getInstance().getPluginPath("ModelGroupsPlugin"))
+        qml_path = os.path.join(plugin_path, "ModelGroupsContextMenu.qml")
+        self._context_menu = CuraApplication.getInstance().createQmlComponent(
+            qml_path, {"manager": self}
+        )
+        if not self._context_menu:
+            Logger.log("w", "ModelGroupsPlugin: Could not create context menu QML component")
+            return
+
+        self._context_menu.moveToContextMenu(context_menu)
+        Logger.log("d", "ModelGroupsPlugin: Context menu items injected")
 
     def showPopup(self) -> None:
         if self._view is None:
