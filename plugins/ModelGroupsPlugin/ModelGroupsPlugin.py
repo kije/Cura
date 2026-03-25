@@ -51,6 +51,9 @@ class ModelGroupsPlugin(QObject, Extension):
         CuraApplication.getInstance().fileCompleted.connect(self._onFileLoaded)
         CuraApplication.getInstance().getController().getScene().sceneChanged.connect(self._onSceneChanged)
 
+        # Register this plugin instance on CuraApplication so QML can access it
+        CuraApplication.getInstance()._model_groups_plugin = self
+
     selectedGroupChanged = pyqtSignal()
     groupsChanged = pyqtSignal()
 
@@ -161,6 +164,94 @@ class ModelGroupsPlugin(QObject, Extension):
     def assignSelectedToCurrentGroup(self) -> None:
         if self._selected_group_id:
             self.assignSelectedToGroup(self._selected_group_id)
+
+    @pyqtSlot()
+    def hideSelectedModels(self) -> None:
+        """Hide all currently selected models (adds to an auto-created hidden group)."""
+        selected_nodes = Selection.getAllSelectedObjects()
+        if not selected_nodes:
+            return
+
+        # Create or get the default hidden group
+        hidden_group_id = self._getOrCreateHiddenGroup()
+
+        operation = GroupedOperation()
+        for node in selected_nodes:
+            if isinstance(node, CuraSceneNode) and node.getMeshData():
+                decorator = node.getDecorator(ModelGroupDecorator)
+                if decorator is None:
+                    # Assign to hidden group and disable
+                    operation.addOperation(AssignToGroupOperation(self._manager, node, hidden_group_id))
+                # Disable the individual node
+                operation.addOperation(ToggleNodeOperation(self._manager, node, False))
+
+        if operation.getNumChildrenOperations() > 0:
+            operation.push()
+
+    @pyqtSlot()
+    def showSelectedModels(self) -> None:
+        """Show all currently selected models."""
+        selected_nodes = Selection.getAllSelectedObjects()
+        if not selected_nodes:
+            return
+
+        operation = GroupedOperation()
+        for node in selected_nodes:
+            if isinstance(node, CuraSceneNode):
+                decorator = node.getDecorator(ModelGroupDecorator)
+                if decorator is not None and not decorator.isModelGroupNodeEnabled():
+                    operation.addOperation(ToggleNodeOperation(self._manager, node, True))
+
+        if operation.getNumChildrenOperations() > 0:
+            operation.push()
+
+    @pyqtSlot(int)
+    def toggleNodeVisibilityByIndex(self, index: int) -> None:
+        """Toggle visibility of a node by its index in the ObjectsModel."""
+        from cura.UI.ObjectsModel import ObjectsModel
+        app = CuraApplication.getInstance()
+        objects_model = None
+        # Find the ObjectsModel instance
+        for child in app.findChildren(ObjectsModel):
+            objects_model = child
+            break
+
+        if objects_model is None:
+            return
+
+        items = objects_model.items
+        if 0 <= index < len(items):
+            node = items[index]["node"]
+            decorator = node.getDecorator(ModelGroupDecorator)
+
+            if decorator is not None and not decorator.isModelGroupNodeEnabled():
+                # Currently hidden -> show it
+                operation = ToggleNodeOperation(self._manager, node, True)
+                operation.push()
+            else:
+                # Currently visible -> hide it
+                hidden_group_id = self._getOrCreateHiddenGroup()
+                op = GroupedOperation()
+                if decorator is None:
+                    op.addOperation(AssignToGroupOperation(self._manager, node, hidden_group_id))
+                op.addOperation(ToggleNodeOperation(self._manager, node, False))
+                op.push()
+
+    def _getOrCreateHiddenGroup(self) -> str:
+        """Get or create the default 'Hidden' group for quick hide/show."""
+        for group_id, group in self._manager.getGroups().items():
+            if group.name == "Hidden":
+                return group_id
+        return self._manager.createGroup("Hidden")
+
+    @pyqtSlot(result=bool)
+    def hasHiddenSelection(self) -> bool:
+        """Check if any selected node is hidden."""
+        for node in Selection.getAllSelectedObjects():
+            decorator = node.getDecorator(ModelGroupDecorator)
+            if decorator is not None and not decorator.isModelGroupNodeEnabled():
+                return True
+        return False
 
     def showPopup(self) -> None:
         if self._view is None:

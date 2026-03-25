@@ -141,6 +141,7 @@ Item
                     return contents.extrudersModel.getItem(model.extruder_number).color;
                 }
                 property bool showExtruderSwatches: machineExtruderCount.properties.value > 1
+                property bool nodeHidden: model.hidden !== undefined ? model.hidden : false
             }
         }
     }
