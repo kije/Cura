@@ -43,7 +43,7 @@ class AllModelsModel(ListModel):
 
     def _onSceneChanged(self, node) -> None:
         from UM.Scene.Camera import Camera
-        if not isinstance(node, Camera):
+        if not isinstance(node, Camera) and not self._manager.is_updating:
             self._update()
 
     def _update(self, *args) -> None:

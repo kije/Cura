@@ -10,6 +10,7 @@ from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
 from UM.Scene.SceneNode import SceneNode
 from UM.Signal import Signal
 
+from cura.Scene.ConvexHullDecorator import ConvexHullDecorator
 from cura.Scene.SliceableObjectDecorator import SliceableObjectDecorator
 
 from .ModelGroupDecorator import ModelGroupDecorator
@@ -29,7 +30,9 @@ class ModelGroupsManager:
 
     def __init__(self) -> None:
         self._groups: Dict[str, ModelGroup] = {}
-        self._stored_decorators: Dict[int, SliceableObjectDecorator] = {}
+        self._stored_sliceable_decorators: Dict[int, SliceableObjectDecorator] = {}
+        self._stored_convexhull_decorators: Dict[int, ConvexHullDecorator] = {}
+        self._updating: bool = False  # Guard against re-entrant scene change handling
 
         self.groupsChanged = Signal()
 
@@ -49,12 +52,15 @@ class ModelGroupsManager:
         if group_id not in self._groups:
             return
 
-        for node in self.getNodesInGroup(group_id):
-            self._enableNode(node)
-            node.removeDecorator(ModelGroupDecorator)
-            self._clearNodeMetadata(node)
-
-        del self._groups[group_id]
+        self._updating = True
+        try:
+            for node in self.getNodesInGroup(group_id):
+                self._enableNode(node)
+                node.removeDecorator(ModelGroupDecorator)
+                self._clearNodeMetadata(node)
+            del self._groups[group_id]
+        finally:
+            self._updating = False
         self.groupsChanged.emit()
 
     def renameGroup(self, group_id: str, name: str) -> None:
@@ -71,25 +77,28 @@ class ModelGroupsManager:
         if group is None:
             return None
 
-        previous_group_id = None
-        decorator = node.getDecorator(ModelGroupDecorator)
-        if decorator is not None:
-            previous_group_id = decorator.getModelGroupId()
-            if previous_group_id == group_id:
-                return previous_group_id
-            # Re-enable if the old group had it disabled
-            self._enableNode(node)
-        else:
-            decorator = ModelGroupDecorator()
-            node.addDecorator(decorator)
+        self._updating = True
+        try:
+            previous_group_id = None
+            decorator = node.getDecorator(ModelGroupDecorator)
+            if decorator is not None:
+                previous_group_id = decorator.getModelGroupId()
+                if previous_group_id == group_id:
+                    return previous_group_id
+                self._enableNode(node)
+            else:
+                decorator = ModelGroupDecorator()
+                node.addDecorator(decorator)
 
-        decorator.setModelGroupId(group_id)
-        decorator.setModelGroupNodeEnabled(True)
+            decorator.setModelGroupId(group_id)
+            decorator.setModelGroupNodeEnabled(True)
 
-        if not group.enabled:
-            self._disableNode(node)
+            if not group.enabled:
+                self._disableNode(node)
 
-        self._updateNodeMetadata(node)
+            self._updateNodeMetadata(node)
+        finally:
+            self._updating = False
         self.groupsChanged.emit()
         return previous_group_id
 
@@ -99,10 +108,14 @@ class ModelGroupsManager:
         if decorator is None:
             return None
 
-        old_group_id = decorator.getModelGroupId()
-        self._enableNode(node)
-        node.removeDecorator(ModelGroupDecorator)
-        self._clearNodeMetadata(node)
+        self._updating = True
+        try:
+            old_group_id = decorator.getModelGroupId()
+            self._enableNode(node)
+            node.removeDecorator(ModelGroupDecorator)
+            self._clearNodeMetadata(node)
+        finally:
+            self._updating = False
         self.groupsChanged.emit()
         return old_group_id
 
@@ -112,24 +125,26 @@ class ModelGroupsManager:
         if group is None or group.enabled == enabled:
             return []
 
-        group.enabled = enabled
-        affected_nodes = []
+        self._updating = True
+        try:
+            group.enabled = enabled
+            affected_nodes = []
 
-        for node in self.getNodesInGroup(group_id):
-            decorator = node.getDecorator(ModelGroupDecorator)
-            if decorator is None:
-                continue
+            for node in self.getNodesInGroup(group_id):
+                decorator = node.getDecorator(ModelGroupDecorator)
+                if decorator is None:
+                    continue
 
-            if enabled:
-                # Re-enable only if the node itself is also enabled
-                if decorator.isModelGroupNodeEnabled():
-                    self._enableNode(node)
-            else:
-                self._disableNode(node)
+                if enabled:
+                    if decorator.isModelGroupNodeEnabled():
+                        self._enableNode(node)
+                else:
+                    self._disableNode(node)
 
-            self._updateNodeMetadata(node)
-            affected_nodes.append(node)
-
+                self._updateNodeMetadata(node)
+                affected_nodes.append(node)
+        finally:
+            self._updating = False
         self.groupsChanged.emit()
         return affected_nodes
 
@@ -139,15 +154,19 @@ class ModelGroupsManager:
         if decorator is None:
             return
 
-        decorator.setModelGroupNodeEnabled(enabled)
-        group = self._groups.get(decorator.getModelGroupId())
+        self._updating = True
+        try:
+            decorator.setModelGroupNodeEnabled(enabled)
+            group = self._groups.get(decorator.getModelGroupId())
 
-        if enabled and (group is None or group.enabled):
-            self._enableNode(node)
-        elif not enabled:
-            self._disableNode(node)
+            if enabled and (group is None or group.enabled):
+                self._enableNode(node)
+            elif not enabled:
+                self._disableNode(node)
 
-        self._updateNodeMetadata(node)
+            self._updateNodeMetadata(node)
+        finally:
+            self._updating = False
         self.groupsChanged.emit()
 
     def isNodeEffectivelyEnabled(self, node: SceneNode) -> bool:
@@ -178,28 +197,47 @@ class ModelGroupsManager:
                 nodes.append(node)
         return nodes
 
+    @property
+    def is_updating(self) -> bool:
+        return self._updating
+
     def _disableNode(self, node: SceneNode) -> None:
-        decorator = node.getDecorator(SliceableObjectDecorator)
-        if decorator is not None:
-            self._stored_decorators[id(node)] = decorator
+        node_id = id(node)
+
+        # Store and remove SliceableObjectDecorator
+        sliceable = node.getDecorator(SliceableObjectDecorator)
+        if sliceable is not None:
+            self._stored_sliceable_decorators[node_id] = sliceable
             node.removeDecorator(SliceableObjectDecorator)
+
+        # Store and remove ConvexHullDecorator to prevent shadow rendering
+        convex_hull = node.getDecorator(ConvexHullDecorator)
+        if convex_hull is not None:
+            self._stored_convexhull_decorators[node_id] = convex_hull
+            node.removeDecorator(ConvexHullDecorator)
+
         node.setVisible(False)
         node.setSelectable(False)
-        self._emitSceneChanged(node)
 
     def _enableNode(self, node: SceneNode) -> None:
-        stored = self._stored_decorators.pop(id(node), None)
-        if stored is not None:
-            node.addDecorator(stored)
+        node_id = id(node)
+
+        # Restore SliceableObjectDecorator
+        stored_sliceable = self._stored_sliceable_decorators.pop(node_id, None)
+        if stored_sliceable is not None:
+            node.addDecorator(stored_sliceable)
         elif node.getDecorator(SliceableObjectDecorator) is None:
             node.addDecorator(SliceableObjectDecorator())
+
+        # Restore ConvexHullDecorator
+        stored_convex = self._stored_convexhull_decorators.pop(node_id, None)
+        if stored_convex is not None:
+            node.addDecorator(stored_convex)
+        elif node.getDecorator(ConvexHullDecorator) is None:
+            node.addDecorator(ConvexHullDecorator())
+
         node.setVisible(True)
         node.setSelectable(True)
-        self._emitSceneChanged(node)
-
-    def _emitSceneChanged(self, node: SceneNode) -> None:
-        scene = Application.getInstance().getController().getScene()
-        scene.sceneChanged.emit(node)
 
     def _updateNodeMetadata(self, node: SceneNode) -> None:
         decorator = node.getDecorator(ModelGroupDecorator)
@@ -228,45 +266,56 @@ class ModelGroupsManager:
         scene = Application.getInstance().getController().getScene()
         discovered_groups: Dict[str, ModelGroup] = {}
 
-        for node in DepthFirstIterator(scene.getRoot()):
-            group_id = node.metadata.get("model_groups_plugin:group_id")
-            if group_id is None:
-                continue
+        self._updating = True
+        try:
+            for node in DepthFirstIterator(scene.getRoot()):
+                group_id = node.metadata.get("model_groups_plugin:group_id")
+                if group_id is None:
+                    continue
 
-            group_name = node.metadata.get("model_groups_plugin:group_name", "Unnamed")
-            group_enabled_str = node.metadata.get("model_groups_plugin:group_enabled", "True")
-            node_enabled_str = node.metadata.get("model_groups_plugin:node_enabled", "True")
+                group_name = node.metadata.get("model_groups_plugin:group_name", "Unnamed")
+                group_enabled_str = node.metadata.get("model_groups_plugin:group_enabled", "True")
+                node_enabled_str = node.metadata.get("model_groups_plugin:node_enabled", "True")
 
-            group_enabled = group_enabled_str == "True"
-            node_enabled = node_enabled_str == "True"
+                group_enabled = group_enabled_str == "True"
+                node_enabled = node_enabled_str == "True"
 
-            if group_id not in discovered_groups:
-                discovered_groups[group_id] = ModelGroup(group_id, group_name, group_enabled)
+                if group_id not in discovered_groups:
+                    discovered_groups[group_id] = ModelGroup(group_id, group_name, group_enabled)
 
-            decorator = ModelGroupDecorator()
-            decorator.setModelGroupId(group_id)
-            decorator.setModelGroupNodeEnabled(node_enabled)
-            node.addDecorator(decorator)
+                decorator = ModelGroupDecorator()
+                decorator.setModelGroupId(group_id)
+                decorator.setModelGroupNodeEnabled(node_enabled)
+                node.addDecorator(decorator)
 
-            if not group_enabled or not node_enabled:
-                self._disableNode(node)
+                if not group_enabled or not node_enabled:
+                    self._disableNode(node)
 
-        self._groups.update(discovered_groups)
+            self._groups.update(discovered_groups)
+        finally:
+            self._updating = False
         if discovered_groups:
             self.groupsChanged.emit()
 
     def clear(self) -> None:
         """Clear all groups and re-enable all nodes."""
-        for group_id in list(self._groups.keys()):
-            for node in self.getNodesInGroup(group_id):
-                self._enableNode(node)
-                node.removeDecorator(ModelGroupDecorator)
-                self._clearNodeMetadata(node)
+        self._updating = True
+        try:
+            for group_id in list(self._groups.keys()):
+                for node in self.getNodesInGroup(group_id):
+                    self._enableNode(node)
+                    node.removeDecorator(ModelGroupDecorator)
+                    self._clearNodeMetadata(node)
 
-        self._groups.clear()
-        self._stored_decorators.clear()
+            self._groups.clear()
+            self._stored_sliceable_decorators.clear()
+            self._stored_convexhull_decorators.clear()
+        finally:
+            self._updating = False
         self.groupsChanged.emit()
 
     def handleNodeRemoved(self, node: SceneNode) -> None:
         """Clean up when a node is removed from the scene."""
-        self._stored_decorators.pop(id(node), None)
+        node_id = id(node)
+        self._stored_sliceable_decorators.pop(node_id, None)
+        self._stored_convexhull_decorators.pop(node_id, None)

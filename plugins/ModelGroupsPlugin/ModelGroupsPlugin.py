@@ -70,15 +70,15 @@ class ModelGroupsPlugin(QObject, Extension):
 
     def _onSceneChanged(self, node) -> None:
         """Handle node removal from scene - clean up group membership."""
+        if self._manager.is_updating:
+            return
         if node is None:
             return
-        scene = Application.getInstance().getController().getScene()
-        root = scene.getRoot()
 
-        # Check if any tracked nodes have been removed from the scene
-        for grouped_node in self._manager.getAllGroupedNodes():
-            if grouped_node.getParent() is None and grouped_node != root:
-                self._manager.handleNodeRemoved(grouped_node)
+        # Only check the specific node that changed, not all grouped nodes
+        decorator = node.getDecorator(ModelGroupDecorator)
+        if decorator is not None and node.getParent() is None:
+            self._manager.handleNodeRemoved(node)
 
     @pyqtProperty(QObject, constant=True)
     def groupsModel(self):
@@ -279,6 +279,7 @@ class ModelGroupsPlugin(QObject, Extension):
         self._context_menu.moveToContextMenu(context_menu)
         Logger.log("d", "ModelGroupsPlugin: Context menu items injected")
 
+    @pyqtSlot()
     def showPopup(self) -> None:
         if self._view is None:
             self._createView()
