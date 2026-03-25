@@ -18,6 +18,7 @@ from UM.i18n import i18nCatalog
 from cura.CuraApplication import CuraApplication
 from cura.Scene.CuraSceneNode import CuraSceneNode
 
+from .AllModelsModel import AllModelsModel
 from .ModelGroupDecorator import ModelGroupDecorator
 from .ModelGroupNodesModel import ModelGroupNodesModel
 from .ModelGroupsManager import ModelGroupsManager
@@ -46,13 +47,11 @@ class ModelGroupsPlugin(QObject, Extension):
         self._manager = ModelGroupsManager()
         self._groups_model = ModelGroupsModel(self._manager)
         self._nodes_model = ModelGroupNodesModel(self._manager)
+        self._all_models_model = AllModelsModel(self._manager)
         self._selected_group_id: str = ""
 
         CuraApplication.getInstance().fileCompleted.connect(self._onFileLoaded)
         CuraApplication.getInstance().getController().getScene().sceneChanged.connect(self._onSceneChanged)
-
-        # Register this plugin instance on CuraApplication so QML can access it
-        CuraApplication.getInstance()._model_groups_plugin = self
 
     selectedGroupChanged = pyqtSignal()
     groupsChanged = pyqtSignal()
@@ -86,6 +85,10 @@ class ModelGroupsPlugin(QObject, Extension):
     @pyqtProperty(QObject, constant=True)
     def nodesModel(self):
         return self._nodes_model
+
+    @pyqtProperty(QObject, constant=True)
+    def allModelsModel(self):
+        return self._all_models_model
 
     @pyqtProperty(str, notify=selectedGroupChanged)
     def selectedGroupId(self) -> str:
@@ -206,36 +209,26 @@ class ModelGroupsPlugin(QObject, Extension):
             operation.push()
 
     @pyqtSlot(int)
-    def toggleNodeVisibilityByIndex(self, index: int) -> None:
-        """Toggle visibility of a node by its index in the ObjectsModel."""
-        from cura.UI.ObjectsModel import ObjectsModel
-        app = CuraApplication.getInstance()
-        objects_model = None
-        # Find the ObjectsModel instance
-        for child in app.findChildren(ObjectsModel):
-            objects_model = child
-            break
-
-        if objects_model is None:
+    def toggleModelVisibility(self, model_index: int) -> None:
+        """Toggle visibility of a model by its index in the AllModelsModel."""
+        node = self._all_models_model.getNodeByIndex(model_index)
+        if node is None:
             return
 
-        items = objects_model.items
-        if 0 <= index < len(items):
-            node = items[index]["node"]
-            decorator = node.getDecorator(ModelGroupDecorator)
+        decorator = node.getDecorator(ModelGroupDecorator)
 
-            if decorator is not None and not decorator.isModelGroupNodeEnabled():
-                # Currently hidden -> show it
-                operation = ToggleNodeOperation(self._manager, node, True)
-                operation.push()
-            else:
-                # Currently visible -> hide it
-                hidden_group_id = self._getOrCreateHiddenGroup()
-                op = GroupedOperation()
-                if decorator is None:
-                    op.addOperation(AssignToGroupOperation(self._manager, node, hidden_group_id))
-                op.addOperation(ToggleNodeOperation(self._manager, node, False))
-                op.push()
+        if decorator is not None and not self._manager.isNodeEffectivelyEnabled(node):
+            # Currently hidden -> show it
+            operation = ToggleNodeOperation(self._manager, node, True)
+            operation.push()
+        else:
+            # Currently visible -> hide it
+            hidden_group_id = self._getOrCreateHiddenGroup()
+            op = GroupedOperation()
+            if decorator is None:
+                op.addOperation(AssignToGroupOperation(self._manager, node, hidden_group_id))
+            op.addOperation(ToggleNodeOperation(self._manager, node, False))
+            op.push()
 
     def _getOrCreateHiddenGroup(self) -> str:
         """Get or create the default 'Hidden' group for quick hide/show."""
@@ -261,6 +254,7 @@ class ModelGroupsPlugin(QObject, Extension):
                 return
         # Refresh data before showing
         self._groups_model._update()
+        self._all_models_model._update()
         self._view.show()
 
     def _createView(self) -> None:

@@ -17,11 +17,6 @@ from UM.i18n import i18nCatalog
 from cura.PrintOrderManager import PrintOrderManager
 from cura.Scene.CuraSceneNode import CuraSceneNode
 
-try:
-    from plugins.ModelGroupsPlugin.ModelGroupDecorator import ModelGroupDecorator
-except ImportError:
-    ModelGroupDecorator = None
-
 catalog = i18nCatalog("cura")
 
 
@@ -50,7 +45,6 @@ class ObjectsModel(ListModel):
     PerObjectSettingsCountRole = Qt.ItemDataRole.UserRole + 6
     MeshTypeRole = Qt.ItemDataRole.UserRole + 7
     ExtruderNumberRole = Qt.ItemDataRole.UserRole + 8
-    HiddenRole = Qt.ItemDataRole.UserRole + 9
 
     def __init__(self, parent = None) -> None:
         super().__init__(parent)
@@ -63,7 +57,6 @@ class ObjectsModel(ListModel):
         self.addRoleName(self.PerObjectSettingsCountRole, "per_object_settings_count")
         self.addRoleName(self.MeshTypeRole, "mesh_type")
         self.addRoleName(self.NodeRole, "node")
-        self.addRoleName(self.HiddenRole, "hidden")
 
         Application.getInstance().getController().getScene().sceneChanged.connect(self._updateSceneDelayed)
         Application.getInstance().getPreferences().preferenceChanged.connect(self._updateDelayed)
@@ -96,18 +89,9 @@ class ObjectsModel(ListModel):
     def _updateDelayed(self, *args) -> None:
         self._update_timer.start()
 
-    @staticmethod
-    def _isHiddenByModelGroups(node: SceneNode) -> bool:
-        """Check if a node is hidden by the ModelGroupsPlugin."""
-        if ModelGroupDecorator is None:
-            return False
-        decorator = node.getDecorator(ModelGroupDecorator)
-        return decorator is not None and not node.callDecoration("isSliceable")
-
     def _shouldNodeBeHandled(self, node: SceneNode) -> bool:
         is_group = bool(node.callDecoration("isGroup"))
-        is_hidden = self._isHiddenByModelGroups(node)
-        if not node.callDecoration("isSliceable") and not is_group and not is_hidden:
+        if not node.callDecoration("isSliceable") and not is_group:
             return False
 
         parent = node.getParent()
@@ -262,8 +246,7 @@ class ObjectsModel(ListModel):
                 "extruder_number": extruder_number,
                 "per_object_settings_count": per_object_settings_count,
                 "mesh_type": node_mesh_type,
-                "node": node,
-                "hidden": self._isHiddenByModelGroups(node),
+                "node": node
             })
 
         nodes = sorted(nodes, key=lambda n: n["name"] if not user_defined_print_order_enabled else n["node"].printOrder)

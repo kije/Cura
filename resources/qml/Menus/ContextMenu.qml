@@ -23,37 +23,6 @@ Cura.Menu
     Cura.MenuItem { action: Cura.Actions.paste; }
     Cura.MenuItem { action: Cura.Actions.multiplySelection; }
 
-    Cura.MenuSeparator { visible: UM.Selection.hasSelection }
-    Cura.MenuItem
-    {
-        id: hideModelItem
-        text: {
-            var mgr = CuraApplication.getModelGroupsManager()
-            if (mgr && mgr.hasHiddenSelection())
-            {
-                return catalog.i18nc("@action:inmenu", "Show Selected Model")
-            }
-            return catalog.i18nc("@action:inmenu", "Hide Selected Model")
-        }
-        enabled: UM.Selection.hasSelection
-        visible: UM.Selection.hasSelection
-        onTriggered:
-        {
-            var mgr = CuraApplication.getModelGroupsManager()
-            if (mgr)
-            {
-                if (mgr.hasHiddenSelection())
-                {
-                    mgr.showSelectedModels()
-                }
-                else
-                {
-                    mgr.hideSelectedModels()
-                }
-            }
-        }
-    }
-
     // Extruder selection - only visible if there is more than 1 extruder
     Cura.MenuSeparator { visible: base.shouldShowExtruders }
     Cura.MenuItem

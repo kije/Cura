@@ -1118,11 +1118,6 @@ class CuraApplication(QtApplication):
             self._object_manager = ObjectsModel(self)
         return self._object_manager
 
-    @pyqtSlot(result=QObject)
-    def getModelGroupsManager(self) -> Optional[QObject]:
-        """Get the ModelGroupsPlugin instance if available (used by QML for hide/show)."""
-        return getattr(self, "_model_groups_plugin", None)
-
     @pyqtSlot(str, result = "QVariantList")
     def getSupportedActionMachineList(self, definition_id: str) -> List["MachineAction"]:
         return self._machine_action_manager.getSupportedActions(self._machine_manager.getDefinitionByMachineId(definition_id))

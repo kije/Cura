@@ -56,53 +56,20 @@ Button
             visible: showExtruderSwatches && extruderColor != ""
         }
 
-        Button
-        {
-            id: hiddenToggle
-            anchors
-            {
-                left: showExtruderSwatches ? swatch.right : parent.left
-                leftMargin: showExtruderSwatches ? UM.Theme.getSize("narrow_margin").width : 0
-                verticalCenter: parent.verticalCenter
-            }
-            width: nodeHidden ? UM.Theme.getSize("standard_arrow").height + UM.Theme.getSize("narrow_margin").width : 0
-            height: parent.height
-            padding: 0
-            visible: nodeHidden
-            background: Item {}
-            contentItem: UM.ColorImage
-            {
-                source: UM.Theme.getIcon("View")
-                color: UM.Theme.getColor("text_scene")
-                opacity: 0.4
-            }
-            onClicked:
-            {
-                if (typeof CuraApplication.getModelGroupsManager === "function")
-                {
-                    var mgr = CuraApplication.getModelGroupsManager()
-                    if (mgr)
-                    {
-                        mgr.toggleNodeVisibilityByIndex(index)
-                    }
-                }
-            }
-        }
-
         UM.Label
         {
             id: buttonText
             anchors
             {
-                left: hiddenToggle.right
+                left: showExtruderSwatches ? swatch.right : parent.left
+                leftMargin: showExtruderSwatches ? UM.Theme.getSize("narrow_margin").width : 0
                 right: perObjectSettingsInfo.visible ? perObjectSettingsInfo.left : parent.right
                 verticalCenter: parent.verticalCenter
             }
             text: objectItemButton.text
             color: UM.Theme.getColor("text_scene")
-            opacity: (outsideBuildArea || nodeHidden) ? 0.4 : 1.0
+            opacity: (outsideBuildArea) ? 0.5 : 1.0
             visible: text != ""
-            font.strikeout: nodeHidden
             elide: Text.ElideRight
         }
 
