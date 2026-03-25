@@ -12,8 +12,6 @@ UM.Dialog
 {
     id: dialog
 
-    UM.I18nCatalog { id: catalog; name: "cura" }
-
     title: catalog.i18nc("@title:window", "Model Groups")
     width: 700 * screenScaleFactor
     height: 500 * screenScaleFactor
@@ -23,6 +21,7 @@ UM.Dialog
 
     Item
     {
+        UM.I18nCatalog { id: catalog; name: "cura" }
         id: base
         anchors.fill: parent
 

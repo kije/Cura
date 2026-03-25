@@ -210,9 +210,13 @@ class ModelGroupsManager:
             self._stored_sliceable_decorators[node_id] = sliceable
             node.removeDecorator(SliceableObjectDecorator)
 
-        # Store and remove ConvexHullDecorator to prevent shadow rendering
+        # Remove the convex hull shadow by clearing ConvexHullDecorator's hull node
         convex_hull = node.getDecorator(ConvexHullDecorator)
         if convex_hull is not None:
+            # Clear the visual hull node before removing the decorator
+            if hasattr(convex_hull, "_convex_hull_node") and convex_hull._convex_hull_node is not None:
+                convex_hull._convex_hull_node.setParent(None)
+                convex_hull._convex_hull_node = None
             self._stored_convexhull_decorators[node_id] = convex_hull
             node.removeDecorator(ConvexHullDecorator)
 
