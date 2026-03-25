@@ -94,17 +94,15 @@ UM.Dialog
                             elide: Text.ElideRight
                         }
 
-                        UM.ToolbarButton
+                        Button
                         {
-                            iconSource: UM.Theme.getIcon("Pen")
                             width: UM.Theme.getSize("small_button_icon").width
                             height: UM.Theme.getSize("small_button_icon").height
-                            toolItem: UM.ColorImage
+                            background: Item {}
+                            contentItem: UM.ColorImage
                             {
                                 source: UM.Theme.getIcon("Pen")
                                 color: UM.Theme.getColor("icon")
-                                width: parent.width
-                                height: parent.height
                             }
                             onClicked:
                             {
@@ -115,17 +113,15 @@ UM.Dialog
                             }
                         }
 
-                        UM.ToolbarButton
+                        Button
                         {
-                            iconSource: UM.Theme.getIcon("Cancel")
                             width: UM.Theme.getSize("small_button_icon").width
                             height: UM.Theme.getSize("small_button_icon").height
-                            toolItem: UM.ColorImage
+                            background: Item {}
+                            contentItem: UM.ColorImage
                             {
                                 source: UM.Theme.getIcon("Cancel")
                                 color: UM.Theme.getColor("icon")
-                                width: parent.width
-                                height: parent.height
                             }
                             onClicked: manager.deleteGroup(model.group_id)
                         }
@@ -216,17 +212,15 @@ UM.Dialog
                             elide: Text.ElideRight
                         }
 
-                        UM.ToolbarButton
+                        Button
                         {
-                            iconSource: UM.Theme.getIcon("Cancel")
                             width: UM.Theme.getSize("small_button_icon").width
                             height: UM.Theme.getSize("small_button_icon").height
-                            toolItem: UM.ColorImage
+                            background: Item {}
+                            contentItem: UM.ColorImage
                             {
                                 source: UM.Theme.getIcon("Cancel")
                                 color: UM.Theme.getColor("icon")
-                                width: parent.width
-                                height: parent.height
                             }
                             onClicked: manager.removeNodeFromGroup(model.node_index)
                         }
