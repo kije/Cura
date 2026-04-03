@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # Setting keys
 SETTING_ENABLED = "nonplanar_enabled"
 SETTING_MAX_ANGLE = "nonplanar_max_angle"
+SETTING_SURFACE_MODE = "nonplanar_surface_mode"
 SETTING_LAYER_COUNT = "nonplanar_layer_count"
 SETTING_NOZZLE_CLEARANCE = "nonplanar_nozzle_clearance"
 SETTING_MIN_REGION_AREA = "nonplanar_min_region_area"
@@ -83,7 +84,11 @@ class NonPlanarSlicingExtension(QObject, Extension):
         Extension.__init__(self)
 
         self.setMenuName(catalog.i18nc("@item:inmenu", "Non-Planar Slicing"))
+        self.addMenuItem(catalog.i18nc("@item:inmenu", "Toggle Non-Planar Surface Overlay"), self._toggleOverlay)
+        self.addMenuItem(catalog.i18nc("@item:inmenu", "Re-analyze Model"), self._forceReanalyze)
         self.addMenuItem(catalog.i18nc("@item:inmenu", "About Non-Planar Slicing"), self._showAboutMessage)
+
+        self._overlay_visible = True
 
         # Cached analysis results per scene node
         self._analysis_cache: Dict[int, _AnalysisResult] = {}
@@ -116,7 +121,11 @@ class NonPlanarSlicingExtension(QObject, Extension):
         # G-code post-processing hook (same pattern as PostProcessingPlugin)
         app.getOutputDeviceManager().writeStarted.connect(self._onWriteStarted)
 
-        # Layer data modification after slicing
+        # Layer data modification after ProcessSlicedLayersJob finishes.
+        # We can't use backendStateChange(Done) because that fires BEFORE
+        # ProcessSlicedLayersJob builds the layer mesh.  Instead we hook
+        # the backend's _onProcessLayersFinished indirectly by monitoring
+        # the process_layers_job.finished signal.
         backend = app.getBackend()
         if backend is not None:
             backend.backendStateChange.connect(self._onBackendStateChanged)
@@ -248,6 +257,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
         return {
             "enabled": self._isEnabled(),
             "max_angle_deg": float(self._getSetting(SETTING_MAX_ANGLE, 30.0)),
+            "surface_mode": str(self._getSetting(SETTING_SURFACE_MODE, "all_surfaces")),
             "nonplanar_layer_count": int(self._getSetting(SETTING_LAYER_COUNT, 5)),
             "nozzle_clearance_mm": float(self._getSetting(SETTING_NOZZLE_CLEARANCE, 8.0)),
             "min_region_area_mm2": float(self._getSetting(SETTING_MIN_REGION_AREA, 100.0)),
@@ -516,6 +526,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "flow_compensation": settings["flow_compensation"],
             "feedrate_compensation": settings["feedrate_compensation"],
             "segment_length": settings.get("segment_length", SEGMENT_LENGTH),
+            "surface_mode": settings.get("surface_mode", "all_surfaces"),
         }
 
         return bend_gcode(
@@ -551,25 +562,69 @@ class NonPlanarSlicingExtension(QObject, Extension):
     # -------------------------------------------------------------------------
 
     def _onBackendStateChanged(self, state) -> None:
-        """Called when the backend state changes (e.g., slicing completes)."""
-        # Import here to avoid circular dependencies
+        """Called when the backend state changes.
+
+        When slicing starts (Processing), we connect to the
+        ProcessSlicedLayersJob's finished signal so we can modify
+        layer data AFTER the mesh is built (not before).
+        """
         try:
-            from cura.CuraApplication import CuraApplication
             from UM.Backend.Backend import BackendState
         except ImportError:
             return
 
-        if state != BackendState.Done:
-            return
+        if state == BackendState.Processing:
+            # Slicing just started. Monitor for ProcessSlicedLayersJob.
+            self._connectToProcessLayersJob()
 
+    def _connectToProcessLayersJob(self) -> None:
+        """Connect to the ProcessSlicedLayersJob.finished signal.
+
+        The backend creates this job after receiving layer data from the
+        engine. We poll briefly to catch it when it's created.
+        """
         if not self._isEnabled():
             return
 
-        # Defer the layer data modification slightly to ensure ProcessSlicedLayersJob is done
-        QTimer.singleShot(500, self._modifyLayerData)
+        backend = Application.getInstance().getBackend()
+        if backend is None:
+            return
+
+        # The backend stores the job as _process_layers_job.
+        # We use a short polling timer to detect when it starts.
+        self._layer_job_check_timer = QTimer()
+        self._layer_job_check_timer.setInterval(200)
+        self._layer_job_check_count = 0
+
+        def _checkForJob():
+            self._layer_job_check_count += 1
+            job = getattr(backend, "_process_layers_job", None)
+            if job is not None:
+                self._layer_job_check_timer.stop()
+                try:
+                    job.finished.connect(self._onProcessLayersFinished)
+                    Logger.log("d", "Connected to ProcessSlicedLayersJob.finished")
+                except Exception:
+                    Logger.logException("w", "Failed to connect to ProcessSlicedLayersJob")
+            elif self._layer_job_check_count > 50:  # 10 seconds max
+                self._layer_job_check_timer.stop()
+
+        self._layer_job_check_timer.timeout.connect(_checkForJob)
+        self._layer_job_check_timer.start()
+
+    def _onProcessLayersFinished(self, job) -> None:
+        """Called when ProcessSlicedLayersJob finishes building the layer mesh.
+
+        At this point, the LayerData mesh is fully built and we can
+        modify its vertices for non-planar preview.
+        """
+        if not self._isEnabled():
+            return
+        # Slight delay to ensure the decorator is set on the scene node.
+        QTimer.singleShot(100, self._modifyLayerData)
 
     def _modifyLayerData(self) -> None:
-        """Modify the layer data for non-planar preview visualization."""
+        """Modify the built layer data mesh for non-planar preview."""
         analysis_result = self._getActiveAnalysisResult()
         if analysis_result is None or analysis_result.height_map is None:
             return
@@ -588,7 +643,6 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 continue
 
             try:
-                # Detect total layers from layer data
                 layers = layer_data.getLayers()
                 if not layers:
                     continue
@@ -610,6 +664,8 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
                 if modifier.modify_layer_data(layer_data):
                     Logger.log("i", "Modified layer data for non-planar preview")
+                    # Trigger a scene update so SimulationView re-renders.
+                    scene.sceneChanged.emit(node)
 
             except Exception:
                 Logger.logException("w", "Failed to modify layer data for non-planar preview")
@@ -621,6 +677,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
     def _updateOverlayForNode(self, node, result: _AnalysisResult,
                               settings: Dict[str, Any]) -> None:
         """Update the overlay visualization for a scene node."""
+        if not self._overlay_visible:
+            return
+
         from .visualization.region_overlay import NonPlanarRegionOverlay
 
         if self._overlay is None:
@@ -658,6 +717,32 @@ class NonPlanarSlicingExtension(QObject, Extension):
         """Remove all non-planar overlay visualizations."""
         if self._overlay is not None:
             self._overlay.remove_overlays()
+
+    def _toggleOverlay(self) -> None:
+        """Toggle the non-planar region overlay on/off."""
+        self._overlay_visible = not self._overlay_visible
+        if self._overlay_visible:
+            self._runAnalysis()
+            Message(
+                catalog.i18nc("@info:status", "Non-planar overlay enabled."),
+                title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
+                message_type=Message.MessageType.NEUTRAL,
+                lifetime=3,
+            ).show()
+        else:
+            self._clearOverlays()
+            Message(
+                catalog.i18nc("@info:status", "Non-planar overlay hidden."),
+                title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
+                message_type=Message.MessageType.NEUTRAL,
+                lifetime=3,
+            ).show()
+
+    def _forceReanalyze(self) -> None:
+        """Clear cache and re-run analysis on all models."""
+        self._analysis_cache.clear()
+        self._clearOverlays()
+        self._runAnalysis()
 
     # -------------------------------------------------------------------------
     # Helpers

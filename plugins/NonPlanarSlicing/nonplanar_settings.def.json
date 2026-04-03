@@ -28,9 +28,23 @@
             "settable_per_extruder": false,
             "settable_per_meshgroup": false
         },
+        "nonplanar_surface_mode": {
+            "label": "Non-Planar Surface Mode",
+            "description": "Which surfaces to apply non-planar slicing to. 'top_only' bends only the topmost N layers. 'all_surfaces' analyzes the entire model and bends layers near any suitable inclined surface.",
+            "type": "enum",
+            "options": {
+                "top_only": "Top Layers Only",
+                "all_surfaces": "All Suitable Surfaces"
+            },
+            "default_value": "all_surfaces",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
         "nonplanar_layer_count": {
             "label": "Non-Planar Layer Count",
-            "description": "Number of top layers to apply non-planar bending to. More layers produce smoother transitions but increase processing time and collision risk.",
+            "description": "Number of layers below each candidate surface to apply non-planar bending to. More layers produce smoother transitions but increase processing time and collision risk.",
             "type": "int",
             "default_value": 5,
             "minimum_value": "1",

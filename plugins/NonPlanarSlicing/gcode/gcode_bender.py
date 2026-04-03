@@ -241,6 +241,7 @@ def bend_gcode(
     feedrate_compensation = bool(settings.get("feedrate_compensation", True))
     is_relative = bool(settings.get("is_relative_extrusion", False))
     segment_length = float(settings.get("segment_length", _DEFAULT_SEGMENT_LENGTH))
+    surface_mode = str(settings.get("surface_mode", "all_surfaces"))
 
     # Parse.
     parsed = parse_gcode(gcode_list)
@@ -261,21 +262,30 @@ def bend_gcode(
         logger.warning("No layers detected; nothing to bend.")
         return gcode_list
 
-    # Determine which layers to bend (topmost N).
     max_layer = parsed.total_layers - 1
-    top_layer_start = max(0, max_layer - nonplanar_layer_count + 1)
-    target_layers = set(range(top_layer_start, max_layer + 1))
+
+    # In "all_surfaces" mode, all layers are candidates — eligibility
+    # is determined per-move based on proximity to the surface height
+    # map.  In "top_only" mode, only the topmost N layers are bent.
+    all_surfaces_mode = surface_mode == "all_surfaces"
+    if all_surfaces_mode:
+        target_layers = set(range(0, max_layer + 1))
+        # Max depth below surface to consider for bending (mm).
+        max_bend_depth = nonplanar_layer_count * layer_height
+    else:
+        top_layer_start = max(0, max_layer - nonplanar_layer_count + 1)
+        target_layers = set(range(top_layer_start, max_layer + 1))
+        max_bend_depth = 0.0  # Not used in top_only mode.
 
     if not target_layers:
         logger.info("No target layers for non-planar bending.")
         return gcode_list
 
     logger.info(
-        "Bending layers %d-%d (%d layers), layer_height=%.3f, "
+        "Bending %d target layers (mode=%s), layer_height=%.3f, "
         "max_angle=%.1f deg, segment_length=%.2f mm",
-        top_layer_start,
-        max_layer,
         len(target_layers),
+        surface_mode,
         layer_height,
         max_angle_deg,
         segment_length,
@@ -325,6 +335,19 @@ def bend_gcode(
             if not is_safe:
                 should_bend = False
 
+        if should_bend and all_surfaces_mode:
+            # In all_surfaces mode, only bend moves whose Z is within
+            # max_bend_depth below the surface at this XY.
+            surface_z_check = height_map.interpolate(move.abs_x, move.abs_y)
+            if math.isnan(surface_z_check):
+                should_bend = False
+            elif move.abs_z > surface_z_check + layer_height:
+                # Move is above the surface — don't bend.
+                should_bend = False
+            elif move.abs_z < surface_z_check - max_bend_depth:
+                # Move is too far below the surface — don't bend.
+                should_bend = False
+
         if not should_bend:
             # End any active region.
             if in_region:
@@ -359,7 +382,18 @@ def bend_gcode(
         )
 
         # Compute layers_from_top for Z offset.
-        layers_from_top = max_layer - move.layer_number
+        if all_surfaces_mode:
+            # In all_surfaces mode, compute how many layers below the
+            # local surface this move sits, based on its Z vs surface Z.
+            _local_surface_z = height_map.interpolate(move.abs_x, move.abs_y)
+            if not math.isnan(_local_surface_z):
+                layers_from_top = max(0, round(
+                    (_local_surface_z - move.abs_z) / layer_height
+                ))
+            else:
+                layers_from_top = 0
+        else:
+            layers_from_top = max_layer - move.layer_number
 
         # Bend each sub-segment.
         sub_prev_x = prev_x

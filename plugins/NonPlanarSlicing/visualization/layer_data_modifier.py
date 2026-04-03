@@ -1,9 +1,24 @@
 """Modify LayerData vertices to reflect non-planar Z-offsets in the layer preview.
 
 After CuraEngine slices and ProcessSlicedLayersJob builds the layer
-visualization, this module modifies the vertex positions of the topmost
-layers so the SimulationView renders curved toolpaths instead of flat
-ones.  Modifications are performed in-place on LayerPolygon data arrays.
+visualization mesh, this module modifies the **built mesh vertices**
+to bend the topmost layers to follow the model surface.
+
+The key insight is that ProcessSlicedLayersJob calls ``LayerDataBuilder.build()``
+which copies polygon ``_data`` into a flat vertex array.  Each ``LayerPolygon``
+tracks its range in that array via ``_vertex_begin`` and ``_vertex_end``.
+We modify both the polygon ``_data`` (for ``createMeshOrJumps``) and the
+built mesh vertices (for the SimulationPass renderer).
+
+Coordinate system in the built mesh vertices (shape ``(N, 3)``):
+
+* Column 0 -- X position in mm (same as world X).
+* Column 1 -- Height in mm (world Z / Y_scene).
+* Column 2 -- Depth in mm (-world_Y / Z_scene negated).
+
+The height map uses slicing coordinates (Z-up):
+* X = world X = column 0
+* Y = -column 2 (negate to get world Y from the stored -world_Y)
 
 Copyright (c) 2024 Cura Non-Planar Contributors
 Non-Planar Slicing Plugin is released under the terms of the LGPLv3 or higher.
@@ -12,6 +27,7 @@ Non-Planar Slicing Plugin is released under the terms of the LGPLv3 or higher.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Optional, TYPE_CHECKING
 
 import numpy
@@ -27,7 +43,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Line types that represent travel moves (no material extruded).
-# These should not be bent because they represent non-printing motion.
 _TRAVEL_TYPES: frozenset[int] = frozenset()
 if LayerPolygon is not None:
     _TRAVEL_TYPES = frozenset({
@@ -41,23 +56,10 @@ if LayerPolygon is not None:
 
 
 class LayerDataModifier:
-    """Modifies LayerData vertices to reflect non-planar Z-offsets in the layer preview.
+    """Modifies built LayerData mesh vertices for non-planar preview.
 
-    After CuraEngine slices and ProcessSlicedLayersJob builds the layer
-    visualization, this class modifies the vertex positions of the topmost
-    layers to show the curved toolpaths instead of flat ones.  The
-    modifications happen in-place on the LayerPolygon data arrays.
-
-    Coordinate system in ``LayerPolygon._data`` (shape ``(N, 3)``):
-
-    * Column 0 -- X position in millimetres (same as world X).
-    * Column 1 -- Y position, which represents **world Z** (height).
-      For Point2D vertices ``ProcessSlicedLayersJob`` stores
-      ``layer.height / 1000`` (converting from microns to mm).
-      For Point3D vertices the engine already supplies the value in mm.
-    * Column 2 -- Z position, which represents **-world Y**.
-
-    We modify column 1 to shift vertices to the non-planar surface height.
+    This must be called AFTER ``ProcessSlicedLayersJob`` has finished and
+    built the mesh, because we modify the final vertex arrays directly.
     """
 
     def __init__(
@@ -69,28 +71,6 @@ class LayerDataModifier:
         nonplanar_layer_count: int,
         total_layers: int,
     ) -> None:
-        """Initialise the modifier.
-
-        Parameters
-        ----------
-        height_map:
-            A ``HeightMap`` object that can be sampled at (x, y) positions
-            to obtain the target surface Z in mm.
-        safe_map:
-            2-D boolean array aligned with the height map grid.  ``True``
-            where the position is safe for non-planar printing.
-        blend_map:
-            2-D float array (values in ``[0, 1]``) aligned with the height
-            map grid.  Controls how strongly the non-planar offset is
-            applied.  1.0 = fully bent, 0.0 = flat (original position).
-        layer_height:
-            Nominal layer height in mm.
-        nonplanar_layer_count:
-            Number of topmost layers to bend.
-        total_layers:
-            Total number of layers in the sliced model.
-        """
-
         self._height_map = height_map
         self._safe_map = numpy.asarray(safe_map, dtype=bool)
         self._blend_map = numpy.asarray(blend_map, dtype=numpy.float64)
@@ -98,45 +78,27 @@ class LayerDataModifier:
         self._nonplanar_layer_count = int(nonplanar_layer_count)
         self._total_layers = int(total_layers)
 
-    # -----------------------------------------------------------------
-    # Public API
-    # -----------------------------------------------------------------
-
     def modify_layer_data(self, layer_data) -> bool:
         """Modify layer data vertices in-place for non-planar visualization.
+
+        Modifies both the polygon source ``_data`` arrays AND the built
+        mesh vertex buffer so the SimulationView renders bent toolpaths.
 
         Parameters
         ----------
         layer_data:
-            The ``LayerData`` object obtained via
-            ``LayerDataDecorator.getLayerData()``.
+            The ``LayerData`` object (a ``MeshData`` subclass) obtained
+            via ``LayerDataDecorator.getLayerData()``.
 
-        Returns
-        -------
-        bool
-            ``True`` if any modifications were made, ``False`` otherwise.
-
-        The method:
-
-        1. Identifies which layers are in the non-planar range (topmost N
-           layers).
-        2. For each ``LayerPolygon`` in those layers, modifies
-           ``polygon._data`` to apply Z offsets.
-        3. Skips travel-move vertices (no extrusion types).
-        4. Uses the height map, safe map, and blend map to compute the
-           target Z for each vertex.
+        Returns True if any modifications were made.
         """
-
         if layer_data is None:
-            logger.warning("modify_layer_data called with None layer_data")
             return False
 
         layers = layer_data.getLayers()
         if not layers:
-            logger.debug("No layers found in layer data")
             return False
 
-        # Determine the range of layer numbers to modify.
         sorted_layer_numbers = sorted(layers.keys())
         if not sorted_layer_numbers:
             return False
@@ -145,213 +107,184 @@ class LayerDataModifier:
             0, len(sorted_layer_numbers) - self._nonplanar_layer_count
         )
         target_layer_numbers = sorted_layer_numbers[first_nonplanar:]
-
         if not target_layer_numbers:
-            logger.debug("No layers fall in the non-planar range")
             return False
 
-        total_modified = 0
-        total_skipped = 0
+        # Get the built mesh vertices (the GPU buffer source).
+        mesh_vertices = layer_data.getVertices()
+        has_mesh_vertices = mesh_vertices is not None and len(mesh_vertices) > 0
 
-        # The topmost layer number is the last in the sorted list.
         top_layer_idx = len(sorted_layer_numbers) - 1
+        total_modified = 0
 
         for layer_number in target_layer_numbers:
             layer = layers.get(layer_number)
             if layer is None:
                 continue
 
-            # How many layers from the top surface is this layer?
             layer_position = sorted_layer_numbers.index(layer_number)
             layers_from_top = top_layer_idx - layer_position
 
-            modified, skipped = self._modify_layer_polygons(
-                layer, layers_from_top
-            )
-            total_modified += modified
-            total_skipped += skipped
+            for polygon in layer.polygons:
+                modified = self._modify_polygon(
+                    polygon, layers_from_top,
+                    mesh_vertices if has_mesh_vertices else None,
+                )
+                total_modified += modified
 
-        if total_modified > 0:
+        if total_modified > 0 and has_mesh_vertices:
+            # Force the MeshData to recognize the vertex change.
+            # MeshData caches vertex data; we need to invalidate it.
+            try:
+                # Directly set the modified vertices back.
+                # LayerData inherits from MeshData which stores _vertices.
+                layer_data._vertices = mesh_vertices
+            except Exception:
+                pass
+
             logger.info(
-                "Non-planar layer modification complete: %d vertices modified, "
-                "%d vertices skipped (travel/out-of-range)",
-                total_modified,
-                total_skipped,
-            )
-        else:
-            logger.debug(
-                "No vertices were modified (all outside non-planar region)"
+                "Non-planar preview: modified %d vertices in %d layers",
+                total_modified, len(target_layer_numbers),
             )
 
         return total_modified > 0
 
-    # -----------------------------------------------------------------
-    # Private helpers
-    # -----------------------------------------------------------------
-
-    def _modify_layer_polygons(
-        self, layer, layers_from_top: int
-    ) -> tuple[int, int]:
-        """Modify all polygons in a single layer.
-
-        Returns
-        -------
-        tuple[int, int]
-            (modified_count, skipped_count)
-        """
-
-        modified = 0
-        skipped = 0
-
-        for polygon in layer.polygons:
-            m, s = self._modify_polygon(polygon, layers_from_top)
-            modified += m
-            skipped += s
-
-        return modified, skipped
-
     def _modify_polygon(
-        self, polygon, layers_from_top: int
-    ) -> tuple[int, int]:
-        """Modify vertices of a single LayerPolygon in-place.
+        self,
+        polygon,
+        layers_from_top: int,
+        mesh_vertices: Optional[numpy.ndarray],
+    ) -> int:
+        """Modify vertices of a single LayerPolygon.
 
-        Parameters
-        ----------
-        polygon:
-            A ``LayerPolygon`` instance whose ``_data`` array will be
-            modified.
-        layers_from_top:
-            Number of layers between this layer and the topmost layer
-            (0 = topmost).
+        Modifies both ``polygon._data`` (for createMeshOrJumps) and
+        the corresponding range in ``mesh_vertices`` (for SimulationPass).
 
-        Returns
-        -------
-        tuple[int, int]
-            (modified_count, skipped_count)
+        Returns the number of vertices modified.
         """
-
         data = polygon._data  # (N, 3) float32
-        types = polygon._types  # (N, 1) or (N,) uint8
+        types = polygon._types
 
         if data.shape[0] == 0:
-            return 0, 0
+            return 0
 
-        # Flatten types to 1-D if needed.
         flat_types = types.ravel() if types.ndim > 1 else types
-
-        modified = 0
-        skipped = 0
-
-        # Build a mask of extrusion vertices (skip travel moves).
         n_points = data.shape[0]
+
+        # Build extrusion mask (skip travel moves).
         extrusion_mask = numpy.ones(n_points, dtype=bool)
         if _TRAVEL_TYPES:
             for travel_type in _TRAVEL_TYPES:
                 extrusion_mask &= flat_types[:n_points] != travel_type
 
-        # Extract world coordinates from layer-data coordinate system.
-        # data[:, 0] = X (mm)
-        # data[:, 1] = world_Z / 1000 for Point2D, or world_Z in engine
-        #              units for Point3D.  Since ProcessSlicedLayersJob
-        #              already divides by 1000 for Point2D and copies
-        #              engine values for Point3D, the stored value is in
-        #              mm in both cases (engine units are mm for coords).
-        # data[:, 2] = -world_Y (mm)
-        world_x = data[:, 0]          # mm
-        world_y = -data[:, 2]         # mm (negate to recover world Y)
+        modified = 0
 
         for i in range(n_points):
             if not extrusion_mask[i]:
-                skipped += 1
                 continue
 
-            bent_z = self._compute_bent_z_for_layer(
-                layers_from_top, float(world_x[i]), float(world_y[i])
+            # Layer data coordinates:
+            # col 0 = X (mm), col 1 = height (mm), col 2 = -world_Y (mm)
+            world_x = float(data[i, 0])
+            # For height map lookup we need slicing coordinates:
+            # slicing X = world X = col 0
+            # slicing Y = world Y = -col 2
+            slicing_x = world_x
+            slicing_y = -float(data[i, 2])
+
+            bent_z = self._compute_bent_z(
+                layers_from_top, slicing_x, slicing_y,
+                float(data[i, 1]),  # original height
             )
             if bent_z is None:
-                skipped += 1
                 continue
 
-            # Write back in layer-data coordinate system.
-            # Column 1 stores height in mm (same scale as world Z in mm).
+            # Update polygon source data (used by createMeshOrJumps).
             data[i, 1] = numpy.float32(bent_z)
             modified += 1
 
-        return modified, skipped
+        # Also update the built mesh vertices if available.
+        if mesh_vertices is not None and modified > 0:
+            self._update_mesh_vertices(polygon, mesh_vertices)
 
-    def _compute_bent_z_for_layer(
+        return modified
+
+    def _update_mesh_vertices(
+        self,
+        polygon,
+        mesh_vertices: numpy.ndarray,
+    ) -> None:
+        """Copy modified polygon._data into the built mesh vertex range.
+
+        LayerPolygon.build() stored vertices at
+        ``mesh_vertices[_vertex_begin:_vertex_end]``.  We need to
+        recompute the index list and copy the updated data.
+        """
+        try:
+            vb = polygon._vertex_begin
+            ve = polygon._vertex_end
+            if vb >= ve or ve > len(mesh_vertices):
+                return
+
+            # Rebuild the index list (same logic as LayerPolygon.build).
+            needed_points = polygon._build_cache_needed_points
+            if needed_points is None:
+                return
+
+            types = polygon._types
+            index_list = (
+                numpy.arange(len(types)).reshape((-1, 1))
+                + numpy.array([[0, 1]])
+            ).reshape((-1, 1))[needed_points.reshape((-1, 1))]
+
+            mesh_vertices[vb:ve, :] = polygon._data[index_list, :]
+
+        except Exception:
+            logger.debug("Failed to update mesh vertices for polygon", exc_info=True)
+
+    def _compute_bent_z(
         self,
         layers_from_top: int,
-        world_x: float,
-        world_y: float,
+        slicing_x: float,
+        slicing_y: float,
+        original_height: float,
     ) -> Optional[float]:
-        """Compute the bent Z coordinate for a given layer offset and XY position.
-
-        The bent Z formula is::
-
-            target_z = (surface_z - layers_from_top * layer_height) * blend
-
-        where *surface_z* comes from the height map at the given XY and
-        *blend* is the blend factor at that grid cell.
+        """Compute the bent Z (height) for a vertex.
 
         Parameters
         ----------
-        layers_from_top:
-            How many layers below the top surface this point sits
-            (0 = top layer).
-        world_x:
-            X position in mm (world coordinates).
-        world_y:
-            Y position in mm (world coordinates).
+        slicing_x, slicing_y:
+            Position in slicing coordinates (Z-up: X, Y on horizontal plane).
+        original_height:
+            Original layer height in mm.
 
-        Returns
-        -------
-        float or None
-            The target Z in mm, or ``None`` if the position is outside
-            the non-planar region or the height map does not cover it.
+        Returns the new height in mm, or None if outside non-planar region.
         """
-
-        # Check if position is within the height map.
-        if not self._height_map.is_valid(world_x, world_y):
+        if not self._height_map.is_valid(slicing_x, slicing_y):
             return None
 
-        # Sample the height map using bilinear interpolation.
-        import math
-        surface_z = self._height_map.interpolate(world_x, world_y)
+        surface_z = self._height_map.interpolate(slicing_x, slicing_y)
         if math.isnan(surface_z):
             return None
 
-        # Map the world XY to grid indices for the safe/blend maps.
-        row, col = self._height_map.get_grid_coords(world_x, world_y)
+        row, col = self._height_map.get_grid_coords(slicing_x, slicing_y)
 
-        # Check bounds against the safe map.
-        if (
-            row < 0
-            or col < 0
-            or row >= self._safe_map.shape[0]
-            or col >= self._safe_map.shape[1]
-        ):
+        if (row < 0 or col < 0
+                or row >= self._safe_map.shape[0]
+                or col >= self._safe_map.shape[1]):
             return None
 
         if not self._safe_map[row, col]:
             return None
 
-        # Look up the blend factor.
         blend = float(self._blend_map[row, col])
         if blend <= 0.0:
             return None
 
-        # Compute the target Z.
-        # The surface Z is where the top layer should sit.  Each layer
-        # below the top is offset downward by one layer height.
-        flat_z = surface_z - layers_from_top * self._layer_height
+        # Target Z: surface minus layer offset.
+        target_z = surface_z - layers_from_top * self._layer_height
 
-        # Determine the original (planar) Z for this layer.
-        # The topmost layer number is total_layers - 1.
-        original_layer_number = self._total_layers - 1 - layers_from_top
-        original_z = original_layer_number * self._layer_height
-
-        # Blend between original flat Z and the non-planar target Z.
-        bent_z = original_z + blend * (flat_z - original_z)
+        # Blend between original height and non-planar target.
+        bent_z = original_height + blend * (target_z - original_height)
 
         return bent_z

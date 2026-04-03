@@ -7,8 +7,9 @@ surface will be treated non-planarly:
 * **Yellow** -- borderline regions (near the collision boundary).
 * **Red** -- rejected regions (collision detected).
 
-The overlay is built with ``UM.Mesh.MeshBuilder`` and attached as a child
-``SceneNode`` of the model being analysed.
+The overlay is a custom ``SceneNode`` subclass with its own ``render()``
+method (following the ``ConvexHullNode`` pattern) that uses a transparent
+shader.
 
 Copyright (c) 2024 Cura Non-Planar Contributors
 Non-Planar Slicing Plugin is released under the terms of the LGPLv3 or higher.
@@ -35,6 +36,7 @@ try:
     from UM.Scene.SceneNode import SceneNode
     from UM.View.GL.OpenGL import OpenGL
     from UM.Resources import Resources
+    from UM.Math.Color import Color
 
     _CURA_AVAILABLE = True
 except ImportError:
@@ -45,12 +47,54 @@ except ImportError:
 
 # ---- Colour constants (RGBA, float) ----
 
-COLOR_SAFE = numpy.array([0.2, 0.8, 0.2, 0.4], dtype=numpy.float32)
-COLOR_BORDERLINE = numpy.array([0.8, 0.8, 0.2, 0.4], dtype=numpy.float32)
-COLOR_REJECTED = numpy.array([0.8, 0.2, 0.2, 0.4], dtype=numpy.float32)
+COLOR_SAFE = numpy.array([0.2, 0.8, 0.2, 0.5], dtype=numpy.float32)
+COLOR_BORDERLINE = numpy.array([0.9, 0.8, 0.1, 0.5], dtype=numpy.float32)
+COLOR_REJECTED = numpy.array([0.8, 0.2, 0.2, 0.5], dtype=numpy.float32)
 
 # Small offset along face normals to prevent Z-fighting (mm).
-_NORMAL_OFFSET = 0.1
+_NORMAL_OFFSET = 0.15
+
+
+# ---- Custom SceneNode subclass with rendering ----
+
+if _CURA_AVAILABLE:
+    class NonPlanarOverlayNode(SceneNode):
+        """Scene node that renders a transparent coloured mesh overlay.
+
+        Follows the same pattern as ConvexHullNode: overrides ``render()``
+        to set up a transparent shader and queue the mesh for rendering.
+        """
+
+        _shader = None  # Class-level shader cache
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            self.setSelectable(False)
+            self.setCalculateBoundingBox(False)
+            self._color = Color(0.2, 0.8, 0.2, 1.0)
+
+        def render(self, renderer):
+            """Render with a transparent shader."""
+            if not self.getMeshData():
+                return True
+
+            if NonPlanarOverlayNode._shader is None:
+                NonPlanarOverlayNode._shader = OpenGL.getInstance().createShaderProgram(
+                    Resources.getPath(Resources.Shaders, "transparent_object.shader")
+                )
+                NonPlanarOverlayNode._shader.setUniformValue("u_diffuseColor", self._color)
+                NonPlanarOverlayNode._shader.setUniformValue("u_opacity", 0.5)
+
+            renderer.queueNode(
+                self,
+                shader=NonPlanarOverlayNode._shader,
+                transparent=True,
+                backface_cull=False,
+                sort=-7,
+            )
+            return True
+else:
+    NonPlanarOverlayNode = None  # type: ignore[assignment,misc]
 
 
 class NonPlanarRegionOverlay:
@@ -91,7 +135,8 @@ class NonPlanarRegionOverlay:
         parent_node:
             The ``CuraSceneNode`` being analysed.
         vertices:
-            ``(N, 3)`` mesh vertices in world coordinates (mm).
+            ``(N, 3)`` mesh vertices in **model space** (Y-up, as
+            returned by ``getMeshData().getVertices()``).
         indices:
             ``(M, 3)`` triangle vertex-index array.
         candidate_regions:
@@ -102,23 +147,12 @@ class NonPlanarRegionOverlay:
             candidate face is classified as safe, borderline, or
             rejected.
         height_map:
-            Optional height map for mapping face positions to the safe
-            map.  If supplied it must have ``is_valid(x, y)`` and
-            ``get_grid_coords(x, y)`` methods, and the
-            collision_result must carry a ``safe_map`` attribute.
-
-        Returns
-        -------
-        SceneNode or None
-            The created overlay node, or ``None`` if no overlay was
-            needed (e.g. no candidate regions, or Cura imports
-            unavailable).
+            Optional height map (in Z-up slicing coordinates) for
+            mapping face positions to the safe map.
         """
 
         if not _CURA_AVAILABLE:
-            logger.warning(
-                "Cura imports not available; cannot create overlay node"
-            )
+            logger.warning("Cura imports not available; cannot create overlay")
             return None
 
         if not hasattr(candidate_regions, "regions") or not candidate_regions.regions:
@@ -129,44 +163,33 @@ class NonPlanarRegionOverlay:
         indices = numpy.asarray(indices, dtype=numpy.intp)
 
         if vertices.ndim != 2 or vertices.shape[1] != 3:
-            logger.error(
-                "Invalid vertices shape %s; expected (N, 3)", vertices.shape
-            )
+            logger.error("Invalid vertices shape %s", vertices.shape)
             return None
         if indices.ndim != 2 or indices.shape[1] != 3:
-            logger.error(
-                "Invalid indices shape %s; expected (M, 3)", indices.shape
-            )
+            logger.error("Invalid indices shape %s", indices.shape)
             return None
 
         mesh_data = self._build_overlay_mesh(
-            vertices, indices, candidate_regions, collision_result, height_map
+            vertices, indices, candidate_regions, collision_result, height_map,
+            parent_node,
         )
         if mesh_data is None:
             return None
 
-        overlay_node = SceneNode()
+        overlay_node = NonPlanarOverlayNode(parent=parent_node)
         overlay_node.setMeshData(mesh_data)
-        overlay_node.setSelectable(False)
-        overlay_node.setCalculateBoundingBox(False)
-        overlay_node.setParent(parent_node)
 
         self._overlay_nodes.append(overlay_node)
 
         logger.info(
-            "Created non-planar overlay node with %d faces",
+            "Created non-planar overlay with %d faces",
             mesh_data.getVertexCount() // 3 if mesh_data.getVertexCount() else 0,
         )
 
         return overlay_node
 
     def remove_overlays(self) -> None:
-        """Remove all overlay nodes from the scene.
-
-        Each previously created overlay node is detached from its parent
-        and dereferenced so it can be garbage-collected.
-        """
-
+        """Remove all overlay nodes from the scene."""
         removed = 0
         for node in self._overlay_nodes:
             try:
@@ -190,180 +213,155 @@ class NonPlanarRegionOverlay:
         candidate_regions: "CandidateRegions",
         collision_result: Optional["CollisionResult"],
         height_map,
+        parent_node=None,
     ) -> Optional[object]:
         """Build the overlay ``MeshData`` with per-vertex colours.
 
-        Only faces that belong to at least one candidate region are
-        included.  Each face is coloured according to its collision
-        status.
+        Vertices are in model space (Y-up).  For collision/safety
+        lookups we transform to slicing coordinates (Z-up) to match
+        the height map.
         """
 
         num_faces = indices.shape[0]
         candidate_mask = candidate_regions.all_candidate_mask
         if candidate_mask.size != num_faces:
-            logger.error(
-                "candidate_mask length (%d) does not match face count (%d)",
-                candidate_mask.size,
-                num_faces,
-            )
+            logger.error("candidate_mask length mismatch")
             return None
 
         candidate_face_ids = numpy.nonzero(candidate_mask)[0]
         if candidate_face_ids.size == 0:
-            logger.debug("No candidate faces to overlay")
             return None
 
-        # Classify each candidate face.
+        # Get the world transform for converting model-space vertices
+        # to slicing coordinates (Z-up) for height map lookups.
+        world_transform = None
+        if parent_node is not None:
+            try:
+                t = parent_node.getWorldTransformation()
+                if t is not None:
+                    world_transform = t.getData()
+            except Exception:
+                pass
+
+        # Classify faces (using transformed coordinates for safety lookups).
         face_colors = self._classify_faces(
             vertices, indices, candidate_face_ids,
-            candidate_regions, collision_result, height_map,
+            collision_result, height_map, world_transform,
         )
 
-        # Compute per-face normals for offsetting.
-        face_normals = self._compute_face_normals(
-            vertices, indices, candidate_face_ids
-        )
+        # Compute face normals in model space for the offset.
+        face_normals = self._compute_face_normals(vertices, indices, candidate_face_ids)
 
-        # Gather triangle vertices and apply normal offset (vectorised).
-        tris = indices[candidate_face_ids]  # (K, 3)
-        v0 = vertices[tris[:, 0]]  # (K, 3)
-        v1 = vertices[tris[:, 1]]
-        v2 = vertices[tris[:, 2]]
+        # Gather triangle vertices and apply normal offset.
+        tris = indices[candidate_face_ids]
+        v0 = vertices[tris[:, 0]].copy()
+        v1 = vertices[tris[:, 1]].copy()
+        v2 = vertices[tris[:, 2]].copy()
 
-        offset = face_normals * _NORMAL_OFFSET  # (K, 3)
-        v0 = v0 + offset
-        v1 = v1 + offset
-        v2 = v2 + offset
+        offset = face_normals * _NORMAL_OFFSET
+        v0 += offset
+        v1 += offset
+        v2 += offset
 
-        # Stack into the interleaved vertex array that addFacesWithColor
-        # expects: rows of [v0 v1 v2] concatenated, shape (K*3, 3).
         n_overlay_faces = candidate_face_ids.size
         overlay_verts = numpy.empty((n_overlay_faces * 3, 3), dtype=numpy.float32)
         overlay_verts[0::3] = v0
         overlay_verts[1::3] = v1
         overlay_verts[2::3] = v2
 
-        # Face index array: sequential triplets.
         overlay_indices = numpy.arange(
             n_overlay_faces * 3, dtype=numpy.int32
         ).reshape(-1, 3)
 
-        # Per-vertex colours: repeat each face colour 3 times (one per
-        # vertex of the triangle).
         overlay_colors = numpy.repeat(
             face_colors.astype(numpy.float32), 3, axis=0
         )
 
-        # Build using the bulk API (same pattern as Layer.createMeshOrJumps).
         builder = MeshBuilder()
         builder.reserveFaceAndVertexCount(n_overlay_faces, n_overlay_faces * 3)
         builder.addFacesWithColor(overlay_verts, overlay_indices, overlay_colors)
 
-        mesh = builder.build()
-        return mesh
+        return builder.build()
+
+    @staticmethod
+    def _model_to_slicing_coords(
+        vertices: numpy.ndarray,
+        world_transform: Optional[numpy.ndarray],
+    ) -> numpy.ndarray:
+        """Convert model-space Y-up vertices to slicing Z-up coordinates.
+
+        This matches the transform done in
+        ``NonPlanarSlicingExtension._transformVertices``.
+        """
+        if world_transform is not None:
+            rot_scale = world_transform[:3, :3]
+            translate = world_transform[:3, 3]
+            world_verts = vertices.dot(rot_scale.T) + translate
+        else:
+            world_verts = vertices
+
+        result = numpy.empty_like(world_verts)
+        result[:, 0] = world_verts[:, 0]    # X stays
+        result[:, 1] = -world_verts[:, 2]   # Y = -Z_scene
+        result[:, 2] = world_verts[:, 1]    # Z = Y_scene (height)
+        return result
 
     def _classify_faces(
         self,
         vertices: numpy.ndarray,
         indices: numpy.ndarray,
         candidate_face_ids: numpy.ndarray,
-        candidate_regions: "CandidateRegions",
         collision_result: Optional["CollisionResult"],
         height_map,
+        world_transform: Optional[numpy.ndarray],
     ) -> numpy.ndarray:
         """Assign a colour to each candidate face.
 
-        Returns
-        -------
-        numpy.ndarray
-            ``(K, 4)`` RGBA colour array, one row per candidate face.
+        Returns (K, 4) RGBA colour array.
         """
-
         n_faces = candidate_face_ids.size
-        colors = numpy.tile(COLOR_SAFE, (n_faces, 1))  # default: green
+        colors = numpy.tile(COLOR_SAFE, (n_faces, 1))
 
-        if collision_result is None:
-            # No collision data -- everything is optimistically green.
+        if collision_result is None or height_map is None:
             return colors
 
-        # Try to obtain a per-face safety mask from the collision result.
-        safe_mask = self._get_per_face_safety(
-            vertices, indices, candidate_face_ids,
-            collision_result, height_map,
+        safe_map = getattr(collision_result, "safe_map", None)
+        if safe_map is None:
+            return colors
+
+        safe_map = numpy.asarray(safe_map, dtype=bool)
+
+        # Transform vertices to slicing coordinates for height map lookup.
+        referenced = numpy.unique(indices[candidate_face_ids].ravel())
+        slicing_verts = self._model_to_slicing_coords(
+            vertices[referenced], world_transform,
         )
 
-        if safe_mask is None:
-            # Cannot determine safety; leave everything green.
-            return colors
+        # Build a vertex index -> safety lookup.
+        # In slicing coords: column 0 = X, column 1 = Y, column 2 = Z (height).
+        vertex_safe = numpy.zeros(vertices.shape[0], dtype=bool)
+        for i, vi in enumerate(referenced):
+            sx, sy = float(slicing_verts[i, 0]), float(slicing_verts[i, 1])
+            if not height_map.is_valid(sx, sy):
+                continue
+            row, col = height_map.get_grid_coords(sx, sy)
+            if 0 <= row < safe_map.shape[0] and 0 <= col < safe_map.shape[1]:
+                vertex_safe[vi] = safe_map[row, col]
 
-        # Classify each face.
+        # Classify each face based on vertex safety.
         for local_idx in range(n_faces):
             face_id = candidate_face_ids[local_idx]
             tri = indices[face_id]
+            vs = vertex_safe[tri]
 
-            # A face is safe if ALL its vertices map to safe cells.
-            vertex_safe = safe_mask[tri]
-
-            if numpy.all(vertex_safe):
+            if numpy.all(vs):
                 colors[local_idx] = COLOR_SAFE
-            elif numpy.any(vertex_safe):
+            elif numpy.any(vs):
                 colors[local_idx] = COLOR_BORDERLINE
             else:
                 colors[local_idx] = COLOR_REJECTED
 
         return colors
-
-    def _get_per_face_safety(
-        self,
-        vertices: numpy.ndarray,
-        indices: numpy.ndarray,
-        candidate_face_ids: numpy.ndarray,
-        collision_result: "CollisionResult",
-        height_map,
-    ) -> Optional[numpy.ndarray]:
-        """Build a per-vertex boolean safety mask.
-
-        Uses the collision result's ``safe_map`` and the height map's
-        ``get_grid_coords`` to map each vertex to a grid cell and check
-        safety.
-
-        Returns
-        -------
-        numpy.ndarray or None
-            ``(N,)`` boolean array (True = safe) indexed by vertex
-            index, or ``None`` if the necessary data is not available.
-        """
-
-        safe_map = getattr(collision_result, "safe_map", None)
-        if safe_map is None:
-            logger.debug("CollisionResult has no safe_map attribute")
-            return None
-        if height_map is None:
-            logger.debug("No height_map provided; cannot map vertices to grid")
-            return None
-
-        safe_map = numpy.asarray(safe_map, dtype=bool)
-        n_verts = vertices.shape[0]
-        vertex_safe = numpy.zeros(n_verts, dtype=bool)
-
-        # Determine which vertices are actually referenced by candidate faces
-        # to avoid processing the entire mesh.
-        referenced = numpy.unique(indices[candidate_face_ids].ravel())
-
-        for vi in referenced:
-            wx, wy = float(vertices[vi, 0]), float(vertices[vi, 1])
-
-            if not height_map.is_valid(wx, wy):
-                continue
-            row, col = height_map.get_grid_coords(wx, wy)
-
-            if (
-                0 <= row < safe_map.shape[0]
-                and 0 <= col < safe_map.shape[1]
-            ):
-                vertex_safe[vi] = safe_map[row, col]
-
-        return vertex_safe
 
     @staticmethod
     def _compute_face_normals(
@@ -373,23 +371,9 @@ class NonPlanarRegionOverlay:
     ) -> numpy.ndarray:
         """Compute unit normals for the specified faces.
 
-        Parameters
-        ----------
-        vertices:
-            ``(N, 3)`` vertex positions.
-        indices:
-            ``(M, 3)`` face indices.
-        face_ids:
-            ``(K,)`` subset of face indices to compute normals for.
-
-        Returns
-        -------
-        numpy.ndarray
-            ``(K, 3)`` unit normals.  Degenerate triangles get a
-            fallback normal of ``(0, 1, 0)``.
+        Returns (K, 3) unit normals. Degenerate triangles get (0, 1, 0).
         """
-
-        tris = indices[face_ids]  # (K, 3)
+        tris = indices[face_ids]
         v0 = vertices[tris[:, 0]]
         v1 = vertices[tris[:, 1]]
         v2 = vertices[tris[:, 2]]
@@ -402,8 +386,6 @@ class NonPlanarRegionOverlay:
         degenerate = lengths.ravel() < 1e-12
         safe_lengths = numpy.where(degenerate[:, numpy.newaxis], 1.0, lengths)
         normals = cross / safe_lengths
-
-        # Replace degenerate normals with an upward-facing default.
         normals[degenerate] = numpy.array([0.0, 1.0, 0.0])
 
         return normals

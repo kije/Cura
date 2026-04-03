@@ -166,7 +166,8 @@ class TestBendGCode:
     def test_bend_modifies_gcode(self):
         """Bending with a surface above the layer should produce Z changes."""
         gcode = self._make_simple_gcode()
-        hm = _MockHeightMap(z_value=10.0, grid_shape=(20, 20))
+        # Surface Z close to where the layers are (~0.2-0.4)
+        hm = _MockHeightMap(z_value=0.4, grid_shape=(20, 20))
         safe_map = np.ones((20, 20), dtype=bool)
         blend_map = np.ones((20, 20), dtype=np.float64)
 
@@ -177,6 +178,7 @@ class TestBendGCode:
             "flow_compensation": False,
             "feedrate_compensation": False,
             "segment_length": 50.0,  # large to avoid subdivision
+            "surface_mode": "top_only",  # Use top_only for predictable test
         }
         result = bend_gcode(gcode, hm, safe_map, blend_map, settings)
         assert len(result) > 0
