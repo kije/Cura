@@ -384,6 +384,8 @@ def bend_gcode(
     _diag_max_z_delta = 0.0
     _diag_sample_count = 0
     _diag_z_clamped = 0
+    # Track which chunks had actual Z-bending (for region markers).
+    _chunks_with_bending: set[int] = set()
 
     for move_idx, move in enumerate(parsed.moves):
         # Update tracking state from previous moves.
@@ -443,6 +445,36 @@ def bend_gcode(
             if in_region:
                 region_end_indices[current_region_id] = len(modified_moves)
                 in_region = False
+
+            # Ensure explicit Z on all moves in target layers to prevent
+            # stale Z from preceding bent regions.  CuraEngine omits Z
+            # from most G1 moves (only emitting it at layer changes).
+            # After bending modifies Z for some moves, any subsequent
+            # move without explicit Z inherits the stale bent Z value,
+            # causing the nozzle to stay at the wrong height.  Setting
+            # z=abs_z on all target-layer moves eliminates this class of
+            # bugs entirely.  The file size increases slightly but
+            # correctness is guaranteed.
+            if move.layer_number in target_layers and move.z is None:
+                move = GCodeMove(
+                    command=move.command,
+                    x=move.x,
+                    y=move.y,
+                    z=move.abs_z,
+                    e=move.e,
+                    f=move.f,
+                    abs_x=move.abs_x,
+                    abs_y=move.abs_y,
+                    abs_z=move.abs_z,
+                    abs_e=move.abs_e,
+                    line_type=move.line_type,
+                    layer_number=move.layer_number,
+                    original_line=move.original_line,
+                    chunk_index=move.chunk_index,
+                    line_index_in_chunk=move.line_index_in_chunk,
+                    is_travel=move.is_travel,
+                    is_extrusion=move.is_extrusion,
+                )
 
             modified_moves.append(move)
             continue
@@ -524,6 +556,7 @@ def bend_gcode(
                 if z_delta > 0.001:
                     _diag_actually_bent += 1
                     _diag_max_z_delta = max(_diag_max_z_delta, z_delta)
+                    _chunks_with_bending.add(move.chunk_index)
                 else:
                     _diag_zero_delta += 1
                     if blend_factor < 0.001:
@@ -817,9 +850,9 @@ def bend_gcode(
             result[0] = stats + header
 
     # Insert region boundary comments into the reconstructed chunks.
-    # We track region boundaries by layer chunk and insert comments.
-    if region_id > 0:
-        _insert_region_markers(result, parsed, modified_moves, reverted_regions)
+    # Only mark chunks that had actual Z-bending (z_delta > 0.001).
+    if _chunks_with_bending:
+        _insert_region_markers(result, _chunks_with_bending)
     logger.info(
         "Non-planar bending complete: %d regions bent, %d reverted, "
         "%d total moves processed.",
@@ -833,9 +866,7 @@ def bend_gcode(
 
 def _insert_region_markers(
     chunks: list[str],
-    parsed: ParsedGCode,
-    modified_moves: list[GCodeMove],
-    reverted_regions: set[int],
+    bent_chunks: set[int],
 ) -> None:
     """Insert ;NON-PLANAR START/END comment markers into reconstructed chunks.
 
@@ -844,29 +875,12 @@ def _insert_region_markers(
 
     Args:
         chunks: The reconstructed gcode_list (modified in place).
-        parsed: The original parsed G-code.
-        modified_moves: The (possibly subdivided) modified moves.
-        reverted_regions: Set of region IDs that were reverted.
+        bent_chunks: Set of chunk indices that had actual Z-bending
+            (z_delta > 0.001mm from original).
     """
-    # Group modified bent moves by chunk_index to find which chunks
-    # contain non-planar moves.
-    chunk_has_bent: dict[int, bool] = {}
-    for move in modified_moves:
-        ci = move.chunk_index
-        if ci not in chunk_has_bent:
-            chunk_has_bent[ci] = False
-        # A move is "bent" if it's an extrusion in a target layer
-        # and not from a reverted region.  Since we already filtered
-        # reverted regions, any extrusion move remaining is bent.
-        # We use a simple heuristic: if the move's Z differs from
-        # the original line's Z, it was bent.
-        # For simplicity, mark any chunk that has modified extrusions.
-        if move.is_extrusion:
-            chunk_has_bent[ci] = True
-
     region_counter = 0
-    for ci, has_bent in sorted(chunk_has_bent.items()):
-        if not has_bent or ci >= len(chunks):
+    for ci in sorted(bent_chunks):
+        if ci >= len(chunks):
             continue
         region_counter += 1
         lines = chunks[ci].split("\n")

@@ -489,3 +489,68 @@ class TestZSpikeRegression:
             f"at wrong height (stale bent Z not restored):\n"
             + "\n".join(violations[:10])
         )
+
+    def test_all_target_layer_moves_have_explicit_z(self):
+        """Every G1 move in a target layer must have explicit Z in the output.
+
+        CuraEngine normally omits Z from most G1 lines (only emitting it
+        at layer changes).  After bending, un-bent moves without Z would
+        inherit stale bent Z values.  The fix ensures ALL moves in target
+        layers get explicit Z.
+        """
+        n_layers = 20
+        layer_height = 0.2
+        gcode = self._make_multilayer_gcode(
+            n_layers=n_layers, moves_per_layer=8, layer_height=layer_height,
+        )
+
+        hm = _MockHeightMap(z_value=3.0, grid_shape=(20, 20))
+        # Partial safe_map — creates mixed bent/un-bent in same layer.
+        safe_map = np.zeros((20, 20), dtype=bool)
+        safe_map[8:12, 2:8] = True
+        blend_map = np.ones((20, 20), dtype=np.float64)
+
+        settings = {
+            "layer_height": layer_height,
+            "nonplanar_layer_count": 5,
+            "max_angle_deg": 45.0,
+            "flow_compensation": False,
+            "feedrate_compensation": False,
+            "segment_length": 50.0,
+            "surface_mode": "top_only",
+        }
+        result = bend_gcode(gcode, hm, safe_map, blend_map, settings)
+
+        # In top_only mode, target layers are the top 5 (layers 15-19).
+        # Every G1 move in those layers should have explicit Z.
+        import re
+        z_pattern = re.compile(r"Z([\d.]+)")
+        current_layer = -1
+        target_start = n_layers - 5  # layer 15
+        missing_z_lines = []
+
+        for chunk in result:
+            for line in chunk.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";LAYER:"):
+                    try:
+                        current_layer = int(stripped.split(":")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+                if not stripped.startswith("G1"):
+                    continue
+                if current_layer < target_start:
+                    continue
+
+                # Every G1 in a target layer must have Z.
+                if not z_pattern.search(stripped):
+                    missing_z_lines.append(
+                        f"Layer {current_layer}: {stripped}"
+                    )
+
+        assert len(missing_z_lines) == 0, (
+            f"Found {len(missing_z_lines)} G1 moves in target layers "
+            f"without explicit Z (would inherit stale Z from bent regions):\n"
+            + "\n".join(missing_z_lines[:10])
+        )

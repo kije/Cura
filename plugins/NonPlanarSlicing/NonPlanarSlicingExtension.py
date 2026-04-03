@@ -145,6 +145,14 @@ class NonPlanarSlicingExtension(QObject, Extension):
         self._reanalyze_timer.setInterval(500)  # 500ms debounce
         self._reanalyze_timer.timeout.connect(self._forceReanalyze)
 
+        # Debounce timer for transform changes (drag/rotate/scale).
+        # Transform events fire at 60+ Hz during interaction — using a
+        # single debounce timer prevents hundreds of analysis restarts.
+        self._transform_debounce_timer = QTimer()
+        self._transform_debounce_timer.setSingleShot(True)
+        self._transform_debounce_timer.setInterval(800)  # 800ms debounce
+        self._transform_debounce_timer.timeout.connect(self._runAnalysis)
+
         # Track the currently connected global stack to avoid duplicate signal connections
         self._connected_stack = None
 
@@ -616,12 +624,15 @@ class NonPlanarSlicingExtension(QObject, Extension):
         """Called when a watched node's transform changes (move/rotate/scale).
 
         Invalidates the analysis for this node so it will be re-analyzed
-        with the new transform.
+        with the new transform.  Uses a debounce timer to avoid hundreds
+        of analysis restarts during interactive manipulation (drag fires
+        at 60+ Hz).
         """
         self._removeResultForNode(node)
         if self._isEnabled():
-            Logger.log("d", "Node '%s' transformed — scheduling re-analysis", node.getName())
-            QTimer.singleShot(500, self._runAnalysis)
+            # Restart the debounce timer — only the LAST transform event
+            # in a rapid sequence will trigger re-analysis.
+            self._transform_debounce_timer.start()
 
     def _isSliceableNode(self, node) -> bool:
         """Check if a node is a sliceable mesh."""
