@@ -131,6 +131,14 @@ class NonPlanarSlicingExtension(QObject, Extension):
         # Background analysis job tracking
         self._analysis_job: Optional[_AnalysisJob] = None
 
+        # Debounce timer for re-analysis on settings changes.
+        # Using a persistent timer (instead of singleShot) means that rapid
+        # sequential changes only trigger one re-analysis after the last change.
+        self._reanalyze_timer = QTimer()
+        self._reanalyze_timer.setSingleShot(True)
+        self._reanalyze_timer.setInterval(500)  # 500ms debounce
+        self._reanalyze_timer.timeout.connect(self._forceReanalyze)
+
         # Track the currently connected global stack to avoid duplicate signal connections
         self._connected_stack = None
 
@@ -360,8 +368,10 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 self._clearOverlays()
         elif key in SETTINGS_INVALIDATE_ANALYSIS:
             if self._isEnabled() and self._analysis_entries:
-                Logger.log("d", "Setting '%s' changed — re-analyzing", key)
-                QTimer.singleShot(300, self._forceReanalyze)
+                Logger.log("d", "Setting '%s' changed — scheduling re-analysis (debounced)", key)
+                # Restart the debounce timer — only the last change in a
+                # rapid burst will actually trigger re-analysis.
+                self._reanalyze_timer.start()
 
     def _onFileLoaded(self, file_name: str) -> None:
         """Called when a file finishes loading. Triggers analysis on new models.
@@ -585,54 +595,6 @@ class NonPlanarSlicingExtension(QObject, Extension):
         if not node.isVisible():
             return False
         return True
-
-    def _runAnalysisSynchronous(self) -> None:
-        """Run analysis synchronously on the main thread.
-
-        Used as fallback when post-processing needs results immediately
-        (e.g. when the user enabled the setting after loading the model
-        and slicing has already finished).
-        """
-        settings = self._getSettings()
-        scene = Application.getInstance().getController().getScene()
-
-        for node in DepthFirstIterator(scene.getRoot()):
-            if not self._isSliceableNode(node):
-                continue
-            if self._getResultForNode(node) is not None:
-                continue
-
-            mesh_data = node.getMeshData()
-            if mesh_data is None:
-                continue
-            vertices = mesh_data.getVertices()
-            if vertices is None or len(vertices) == 0:
-                continue
-            indices = mesh_data.getIndices()
-            transform = node.getWorldTransformation()
-            transform_matrix = transform.getData() if transform is not None else None
-
-            snapshot = _NodeSnapshot(
-                node=node,
-                vertices=numpy.array(vertices),
-                indices=numpy.array(indices) if indices is not None else None,
-                transform_matrix=numpy.array(transform_matrix) if transform_matrix is not None else None,
-                name=node.getName(),
-            )
-
-            Logger.log("d", "Running synchronous analysis for '%s'", node.getName())
-            result = _AnalysisJob._analyzeSnapshot(
-                snapshot, settings,
-                *_AnalysisJob._get_analysis_imports(),
-            )
-            if result is not None:
-                self._analysis_entries.append((weakref.ref(node), result))
-                self._watchNodeTransform(node)
-                self._updating_overlays = True
-                try:
-                    self._updateOverlayForNode(node, result, settings)
-                finally:
-                    self._updating_overlays = False
 
     # -------------------------------------------------------------------------
     # G-code Post-Processing
@@ -894,18 +856,20 @@ class NonPlanarSlicingExtension(QObject, Extension):
         if not self._isEnabled():
             return
 
-        # Ensure analysis has been run. If the user enabled the setting
-        # after loading the model, analysis might not have happened yet.
-        # If a background job is running, wait for it (it should be fast
-        # at this point since slicing itself takes longer).
+        # Ensure analysis has been run. If analysis is not yet available,
+        # start a background job (or wait for the running one to finish).
+        # NEVER run analysis synchronously — it freezes the UI for 10+ seconds.
         if self._getActiveAnalysisResult() is None:
             if self._analysis_job is not None:
-                Logger.log("d", "Waiting for background analysis to finish before post-processing")
-                # Don't block the UI indefinitely — if the job is still
-                # running, fall through and let the result arrive later.
+                Logger.log("d", "NonPlanar: analysis job still running — "
+                           "post-processing will be retried when it finishes")
             else:
-                Logger.log("d", "No analysis results at post-processing time; running synchronous analysis")
-                self._runAnalysisSynchronous()
+                Logger.log("d", "NonPlanar: no analysis results — starting background analysis")
+                # Reset the flag so post-processing will be retried
+                # when analysis finishes (via _onAnalysisJobFinished).
+                self._postprocessing_done_for_gcode = False
+                self._runAnalysis()
+            return
 
         # 1. Modify layer data for SimulationView preview
         self._modifyLayerData()
