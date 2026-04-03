@@ -36,7 +36,7 @@ UM.Dialog
 
     property var availableExtruders: manager ? manager.availableExtruders : []
 
-    signal accepted()
+    signal applied()
 
     function reset()
     {
@@ -474,7 +474,7 @@ UM.Dialog
                     Cura.SecondaryButton
                     {
                         text: catalog.i18nc("@action:button", "Cancel")
-                        onClicked: editorDialog.close()
+                        onClicked: editorDialog.visible = false
                     }
 
                     Cura.PrimaryButton
@@ -482,8 +482,8 @@ UM.Dialog
                         text: catalog.i18nc("@action:button", "Apply")
                         onClicked:
                         {
-                            editorDialog.accepted()
-                            editorDialog.close()
+                            editorDialog.applied()
+                            editorDialog.visible = false
                         }
                     }
                 }

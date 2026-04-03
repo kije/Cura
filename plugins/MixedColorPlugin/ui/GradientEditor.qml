@@ -23,7 +23,7 @@ UM.Dialog
     property int targetIndex: -1
     property bool gradientEnabled: enableCheck.checked
 
-    signal accepted()
+    signal applied()
 
     // Internal keyframe model
     ListModel
@@ -333,7 +333,7 @@ UM.Dialog
                         {
                             manager.removeGradient(gradientDialog.targetIndex)
                         }
-                        gradientDialog.close()
+                        gradientDialog.visible = false
                     }
                 }
 
@@ -342,7 +342,7 @@ UM.Dialog
                 Cura.SecondaryButton
                 {
                     text: catalog.i18nc("@action:button", "Cancel")
-                    onClicked: gradientDialog.close()
+                    onClicked: gradientDialog.visible = false
                 }
 
                 Cura.PrimaryButton
@@ -350,8 +350,8 @@ UM.Dialog
                     text: catalog.i18nc("@action:button", "Apply")
                     onClicked:
                     {
-                        gradientDialog.accepted()
-                        gradientDialog.close()
+                        gradientDialog.applied()
+                        gradientDialog.visible = false
                     }
                 }
             }

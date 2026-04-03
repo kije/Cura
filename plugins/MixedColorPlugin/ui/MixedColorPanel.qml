@@ -28,7 +28,7 @@ UM.Dialog
     MixedFilamentEditor
     {
         id: filamentEditor
-        onAccepted:
+        onApplied:
         {
             if (filamentEditor.editIndex >= 0)
             {
@@ -65,7 +65,7 @@ UM.Dialog
     GradientEditor
     {
         id: gradientEditor
-        onAccepted:
+        onApplied:
         {
             if (gradientEditor.targetIndex >= 0)
             {
@@ -102,7 +102,7 @@ UM.Dialog
                     {
                         filamentEditor.editIndex = -1
                         filamentEditor.reset()
-                        filamentEditor.open()
+                        filamentEditor.show()
                     }
                 }
             }
@@ -247,7 +247,7 @@ UM.Dialog
                                         {
                                             filamentEditor.editIndex = index
                                             filamentEditor.loadFromData(modelData)
-                                            filamentEditor.open()
+                                            filamentEditor.show()
                                         }
                                     }
 
@@ -266,7 +266,7 @@ UM.Dialog
                                             {
                                                 gradientEditor.reset()
                                             }
-                                            gradientEditor.open()
+                                            gradientEditor.show()
                                         }
                                     }
                                 }
