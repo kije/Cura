@@ -66,7 +66,7 @@ SKIP_LINE_TYPES = frozenset([
 # Internal constants
 HEIGHTMAP_RESOLUTION = 0.5  # mm
 SEGMENT_LENGTH = 1.0  # mm, max G-code segment length for subdivision
-SAFETY_MARGIN = 1.0  # mm, subtracted from nozzle clearance
+SAFETY_MARGIN = 0.5  # mm, subtracted from nozzle clearance
 
 # Settings whose changes should invalidate the analysis cache and trigger
 # re-analysis.  These affect candidate detection, height maps, or collision

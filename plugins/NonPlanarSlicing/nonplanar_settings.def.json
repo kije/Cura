@@ -65,7 +65,7 @@
             "maximum_value_warning": "20.0",
             "enabled": "nonplanar_enabled",
             "settable_per_mesh": false,
-            "settable_per_extruder": true,
+            "settable_per_extruder": false,
             "settable_per_meshgroup": false
         },
         "nonplanar_min_region_area": {

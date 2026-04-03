@@ -87,7 +87,10 @@ def check_collisions(
         nozzle_expansion_angle_deg,
     )
 
-    effective_clearance = max(nozzle_clearance_mm - safety_margin_mm, 0.0)
+    # Use at least 50% of the declared clearance (so a 1mm clearance with
+    # 1mm margin still yields 0.5mm rather than zero).
+    effective_clearance = max(nozzle_clearance_mm - safety_margin_mm,
+                             nozzle_clearance_mm * 0.5)
 
     # ------------------------------------------------------------------
     # 1.  Rasterise the printhead polygon into a binary footprint on the
