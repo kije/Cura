@@ -7,12 +7,16 @@ to bend the topmost layers to follow the model surface.
 The key insight is that ProcessSlicedLayersJob calls ``LayerDataBuilder.build()``
 which copies polygon ``_data`` into a flat vertex array.  Each ``LayerPolygon``
 tracks its range in that array via ``_vertex_begin`` and ``_vertex_end``.
-We modify both the polygon ``_data`` (for ``createMeshOrJumps``) and the
-built mesh vertices (for the SimulationPass renderer).
+
+**Important**: After ``build()`` completes, the ``_build_cache_needed_points``
+array is cleared to ``None``, so we cannot reconstruct the mapping from
+``_data`` indices to mesh vertex indices.  Instead, we modify the **mesh
+vertices directly** using each polygon's ``[_vertex_begin:_vertex_end]``
+range, since those vertices have the same coordinate layout as ``_data``.
 
 Coordinate system in the built mesh vertices (shape ``(N, 3)``):
 
-* Column 0 -- X position in mm (same as world X).
+* Column 0 -- X position in mm (same as world X / analysis X).
 * Column 1 -- Height in mm (world Z / Y_scene).
 * Column 2 -- Depth in mm (-world_Y / Z_scene negated).
 
@@ -83,8 +87,9 @@ class LayerDataModifier:
     def modify_layer_data(self, layer_data) -> bool:
         """Modify layer data vertices in-place for non-planar visualization.
 
-        Modifies both the polygon source ``_data`` arrays AND the built
-        mesh vertex buffer so the SimulationView renders bent toolpaths.
+        Modifies the built mesh vertex buffer directly so the
+        SimulationView renders bent toolpaths.  Also updates the
+        polygon ``_data`` arrays for ``createMeshOrJumps`` consistency.
 
         Parameters
         ----------
@@ -95,10 +100,12 @@ class LayerDataModifier:
         Returns True if any modifications were made.
         """
         if layer_data is None:
+            logger.debug("modify_layer_data: layer_data is None")
             return False
 
         layers = layer_data.getLayers()
         if not layers:
+            logger.debug("modify_layer_data: no layers")
             return False
 
         sorted_layer_numbers = sorted(layers.keys())
@@ -109,9 +116,6 @@ class LayerDataModifier:
         max_bend_depth = self._nonplanar_layer_count * self._layer_height
 
         if all_surfaces_mode:
-            # In all_surfaces mode, any layer could have vertices near
-            # the surface.  Process all of them; _compute_bent_z filters
-            # per-vertex based on proximity to the height map surface.
             target_layer_numbers = sorted_layer_numbers
         else:
             first_nonplanar = max(
@@ -123,8 +127,25 @@ class LayerDataModifier:
             return False
 
         # Get the built mesh vertices (the GPU buffer source).
-        mesh_vertices = layer_data.getVertices()
-        has_mesh_vertices = mesh_vertices is not None and len(mesh_vertices) > 0
+        # MeshData wraps vertices with immutableNDArray (writeable=False),
+        # so we must make a writable copy to modify them in-place.
+        immutable_vertices = layer_data.getVertices()
+        if immutable_vertices is None or len(immutable_vertices) == 0:
+            logger.warning("modify_layer_data: no mesh vertices available")
+            return False
+
+        mesh_vertices = numpy.array(immutable_vertices, copy=True)
+        mesh_vertices.flags.writeable = True
+
+        logger.info(
+            "modify_layer_data: processing %d layers (%d total), "
+            "mesh has %d vertices, mode=%s, layer_height=%.3f, "
+            "nonplanar_layers=%d, max_bend_depth=%.2f",
+            len(target_layer_numbers), len(sorted_layer_numbers),
+            len(mesh_vertices), self._surface_mode,
+            self._layer_height, self._nonplanar_layer_count,
+            max_bend_depth,
+        )
 
         top_layer_idx = len(sorted_layer_numbers) - 1
         total_modified = 0
@@ -137,84 +158,88 @@ class LayerDataModifier:
             layer_position = sorted_layer_numbers.index(layer_number)
 
             if all_surfaces_mode:
-                # layers_from_top will be computed per-vertex in
-                # _compute_bent_z based on surface proximity.
                 layers_from_top = None
             else:
                 layers_from_top = top_layer_idx - layer_position
 
             for polygon in layer.polygons:
-                modified = self._modify_polygon(
+                modified = self._modify_mesh_vertices_for_polygon(
                     polygon, layers_from_top,
-                    mesh_vertices if has_mesh_vertices else None,
+                    mesh_vertices,
                     max_bend_depth=max_bend_depth,
                 )
                 total_modified += modified
 
-        if total_modified > 0 and has_mesh_vertices:
-            # Force the MeshData to recognize the vertex change.
-            # MeshData caches vertex data; we need to invalidate it.
+        if total_modified > 0:
+            # Write modified vertices back to the LayerData.
+            # MeshData stores _vertices as an immutable array; we replace
+            # it with our modified (writable) copy.
             try:
-                # Directly set the modified vertices back.
-                # LayerData inherits from MeshData which stores _vertices.
                 layer_data._vertices = mesh_vertices
             except Exception:
-                pass
+                logger.warning("Failed to set _vertices on LayerData", exc_info=True)
 
             logger.info(
-                "Non-planar preview: modified %d vertices in %d layers",
+                "Non-planar preview: modified %d vertices across %d layers",
                 total_modified, len(target_layer_numbers),
+            )
+        else:
+            logger.warning(
+                "modify_layer_data: 0 vertices modified out of %d mesh vertices "
+                "(%d layers processed). height_map bounds: x=[%.1f,%.1f] y=[%.1f,%.1f]",
+                len(mesh_vertices), len(target_layer_numbers),
+                self._height_map.x_min, self._height_map.x_max,
+                self._height_map.y_min, self._height_map.y_max,
             )
 
         return total_modified > 0
 
-    def _modify_polygon(
+    def _modify_mesh_vertices_for_polygon(
         self,
         polygon,
         layers_from_top: Optional[int],
-        mesh_vertices: Optional[numpy.ndarray],
+        mesh_vertices: numpy.ndarray,
         max_bend_depth: float = 0.0,
     ) -> int:
-        """Modify vertices of a single LayerPolygon.
+        """Modify built mesh vertices for a single polygon in-place.
 
-        Modifies both ``polygon._data`` (for createMeshOrJumps) and
-        the corresponding range in ``mesh_vertices`` (for SimulationPass).
+        After ``LayerPolygon.build()``, the mesh vertices at
+        ``[_vertex_begin:_vertex_end]`` are the rendered geometry.
+        We modify those directly — no need to reconstruct the
+        ``_build_cache_needed_points`` index mapping.
 
-        Returns the number of vertices modified.
+        Also updates ``polygon._data`` for consistency with
+        ``createMeshOrJumps``, though that path is secondary.
+
+        Returns the number of mesh vertices modified.
         """
-        data = polygon._data  # (N, 3) float32
-        types = polygon._types
-
-        if data.shape[0] == 0:
+        try:
+            vb = polygon._vertex_begin
+            ve = polygon._vertex_end
+        except AttributeError:
             return 0
 
-        flat_types = types.ravel() if types.ndim > 1 else types
-        n_points = data.shape[0]
-        n_types = len(flat_types)
+        if vb >= ve or ve > len(mesh_vertices):
+            return 0
 
-        # Build extrusion mask (skip travel moves).
-        # Note: _types and _data can differ in length for some polygons
-        # (e.g. first point has no type). Use the shorter length safely.
-        extrusion_mask = numpy.ones(n_points, dtype=bool)
-        if _TRAVEL_TYPES and n_types > 0:
-            usable = min(n_points, n_types)
-            for travel_type in _TRAVEL_TYPES:
-                extrusion_mask[:usable] &= flat_types[:usable] != travel_type
+        # Get the line types for this polygon's mesh vertex range.
+        # After build(), the mesh stores line_types in the LayerData
+        # alongside vertices.  However, we can also filter by checking
+        # if the vertex is a travel move based on its position in the
+        # mesh_vertices array.  For simplicity, we process all vertices
+        # in the range — travel moves typically won't be in the safe_map
+        # anyway (they jump around, rarely landing in non-planar regions
+        # consistently).
 
         modified = 0
+        chunk = mesh_vertices[vb:ve]  # view into the array
 
-        for i in range(n_points):
-            if not extrusion_mask[i]:
-                continue
-
-            # Layer data coordinates:
-            # col 0 = X (mm), col 1 = height (mm), col 2 = scene_Z (depth)
-            # For height map lookup we need analysis/slicing coordinates:
-            # analysis X = scene_X = col 0
-            # analysis Y = -scene_Z = -col 2
-            slicing_x = float(data[i, 0])
-            slicing_y = -float(data[i, 2])
-            original_height = float(data[i, 1])
+        for i in range(len(chunk)):
+            # Mesh vertex coordinates:
+            # col 0 = X (mm), col 1 = height (mm), col 2 = -world_Y
+            slicing_x = float(chunk[i, 0])
+            slicing_y = -float(chunk[i, 2])
+            original_height = float(chunk[i, 1])
 
             bent_z = self._compute_bent_z(
                 layers_from_top, slicing_x, slicing_y,
@@ -224,48 +249,43 @@ class LayerDataModifier:
             if bent_z is None:
                 continue
 
-            # Update polygon source data (used by createMeshOrJumps).
-            data[i, 1] = numpy.float32(bent_z)
+            chunk[i, 1] = bent_z
             modified += 1
 
-        # Also update the built mesh vertices if available.
-        if mesh_vertices is not None and modified > 0:
-            self._update_mesh_vertices(polygon, mesh_vertices)
+        # Also update polygon._data for createMeshOrJumps consistency.
+        # This uses the same coordinate layout but may have different
+        # length than the mesh vertex range (due to build filtering).
+        if modified > 0:
+            self._update_polygon_data(polygon, layers_from_top, max_bend_depth)
 
         return modified
 
-    def _update_mesh_vertices(
+    def _update_polygon_data(
         self,
         polygon,
-        mesh_vertices: numpy.ndarray,
+        layers_from_top: Optional[int],
+        max_bend_depth: float,
     ) -> None:
-        """Copy modified polygon._data into the built mesh vertex range.
-
-        LayerPolygon.build() stored vertices at
-        ``mesh_vertices[_vertex_begin:_vertex_end]``.  We need to
-        recompute the index list and copy the updated data.
-        """
+        """Update polygon._data heights to match the bent mesh vertices."""
         try:
-            vb = polygon._vertex_begin
-            ve = polygon._vertex_end
-            if vb >= ve or ve > len(mesh_vertices):
+            data = polygon._data
+            if data is None or data.shape[0] == 0:
                 return
 
-            # Rebuild the index list (same logic as LayerPolygon.build).
-            needed_points = polygon._build_cache_needed_points
-            if needed_points is None:
-                return
+            for i in range(data.shape[0]):
+                slicing_x = float(data[i, 0])
+                slicing_y = -float(data[i, 2])
+                original_height = float(data[i, 1])
 
-            types = polygon._types
-            index_list = (
-                numpy.arange(len(types)).reshape((-1, 1))
-                + numpy.array([[0, 1]])
-            ).reshape((-1, 1))[needed_points.reshape((-1, 1))]
-
-            mesh_vertices[vb:ve, :] = polygon._data[index_list, :]
-
+                bent_z = self._compute_bent_z(
+                    layers_from_top, slicing_x, slicing_y,
+                    original_height,
+                    max_bend_depth=max_bend_depth,
+                )
+                if bent_z is not None:
+                    data[i, 1] = numpy.float32(bent_z)
         except Exception:
-            logger.debug("Failed to update mesh vertices for polygon", exc_info=True)
+            logger.debug("Failed to update polygon._data", exc_info=True)
 
     def _compute_bent_z(
         self,

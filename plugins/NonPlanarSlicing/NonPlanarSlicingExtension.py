@@ -854,24 +854,35 @@ class NonPlanarSlicingExtension(QObject, Extension):
         """Modify the built layer data mesh for non-planar preview."""
         analysis_result = self._getActiveAnalysisResult()
         if analysis_result is None or analysis_result.height_map is None:
+            Logger.log("d", "NonPlanar: _modifyLayerData skipped — no analysis/height_map")
             return
 
         if analysis_result.safe_map is None or not numpy.any(analysis_result.safe_map):
+            Logger.log("d", "NonPlanar: _modifyLayerData skipped — no safe cells")
             return
+
+        Logger.log("i", "NonPlanar: _modifyLayerData starting (safe_cells=%d/%d, blend_range=%.3f..%.3f)",
+                    int(numpy.sum(analysis_result.safe_map)),
+                    analysis_result.safe_map.size,
+                    float(numpy.min(analysis_result.blend_map)),
+                    float(numpy.max(analysis_result.blend_map)))
 
         settings = self._getSettings()
         scene = Application.getInstance().getController().getScene()
 
         from .visualization.layer_data_modifier import LayerDataModifier
 
+        found_layer_data = False
         for node in DepthFirstIterator(scene.getRoot()):
             layer_data = node.callDecoration("getLayerData")
             if layer_data is None:
                 continue
 
+            found_layer_data = True
             try:
                 layers = layer_data.getLayers()
                 if not layers:
+                    Logger.log("d", "NonPlanar: layer_data has no layers")
                     continue
                 total_layers = max(layers.keys()) + 1 if layers else 0
 
@@ -879,6 +890,8 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     getattr(scene, "gcode_dict", {}).get(0, [""]),
                     settings,
                 )
+                Logger.log("d", "NonPlanar: layer_data found with %d layers, layer_height=%.3f",
+                            total_layers, layer_height)
 
                 modifier = LayerDataModifier(
                     height_map=analysis_result.height_map,
@@ -891,12 +904,17 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 )
 
                 if modifier.modify_layer_data(layer_data):
-                    Logger.log("i", "Modified layer data for non-planar preview")
+                    Logger.log("i", "NonPlanar: modified layer data for preview — triggering scene update")
                     # Trigger a scene update so SimulationView re-renders.
                     scene.sceneChanged.emit(node)
+                else:
+                    Logger.log("w", "NonPlanar: modify_layer_data returned False — no vertices modified")
 
             except Exception:
                 Logger.logException("w", "Failed to modify layer data for non-planar preview")
+
+        if not found_layer_data:
+            Logger.log("w", "NonPlanar: _modifyLayerData found no nodes with LayerData")
 
     # -------------------------------------------------------------------------
     # Overlay Visualization
