@@ -106,6 +106,13 @@ class NonPlanarSlicingExtension(QObject, Extension):
         self._analysis_timer.setSingleShot(True)
         self._analysis_timer.timeout.connect(self._runAnalysis)
 
+        # Guard against re-entrant scene change signals (overlay creation
+        # adds SceneNodes which fires sceneChanged, causing an infinite loop)
+        self._updating_overlays = False
+
+        # Cache key: maps node id → (mesh_data_id, _AnalysisResult)
+        # mesh_data_id lets us detect when the mesh actually changed.
+
         # Load settings definitions from JSON
         self._loadSettingsDefinitions()
 
@@ -285,10 +292,26 @@ class NonPlanarSlicingExtension(QObject, Extension):
             return
         if not self._isEnabled():
             return
+        # Skip scene changes caused by our own overlay nodes — this breaks
+        # the infinite loop: analysis → overlay creation → sceneChanged → analysis
+        if self._updating_overlays:
+            return
+        try:
+            from .visualization.region_overlay import NonPlanarOverlayNode
+            if isinstance(node, NonPlanarOverlayNode):
+                return
+        except ImportError:
+            pass
         self._analysis_timer.start()
 
     def _runAnalysis(self) -> None:
-        """Run mesh analysis on all sliceable nodes in the scene."""
+        """Run mesh analysis on all sliceable nodes in the scene.
+
+        Uses a cache keyed by (node_id, mesh_data_id) so that analysis
+        is only re-run when the mesh actually changes.  Overlay updates
+        are guarded with ``_updating_overlays`` to prevent re-entrant
+        ``sceneChanged`` signals from triggering another analysis cycle.
+        """
         if not self._isEnabled():
             self._clearOverlays()
             return
@@ -303,17 +326,39 @@ class NonPlanarSlicingExtension(QObject, Extension):
             if not self._isSliceableNode(node):
                 continue
 
+            # Check cache: skip re-analysis if the mesh hasn't changed.
+            mesh_data = node.getMeshData()
+            mesh_id = id(mesh_data) if mesh_data is not None else None
+            node_id = id(node)
+            cached = self._analysis_cache.get(node_id)
+            if cached is not None:
+                cached_mesh_id, cached_result = cached
+                if cached_mesh_id == mesh_id:
+                    # Mesh unchanged — reuse cached result.
+                    result = cached_result
+                    analyzed_count += 1
+                    if result.candidate_regions is not None:
+                        for region in result.candidate_regions.regions:
+                            total_candidate_area += region.total_area
+                            total_regions += 1
+                    continue
+
             result = self._analyzeNode(node, settings)
             if result is not None:
-                self._analysis_cache[id(node)] = result
+                self._analysis_cache[node_id] = (mesh_id, result)
                 analyzed_count += 1
                 if result.candidate_regions is not None:
                     for region in result.candidate_regions.regions:
                         total_candidate_area += region.total_area
                         total_regions += 1
 
-                # Update overlay visualization
-                self._updateOverlayForNode(node, result, settings)
+                # Update overlay visualization (guarded to prevent
+                # the overlay's scene additions from re-triggering us).
+                self._updating_overlays = True
+                try:
+                    self._updateOverlayForNode(node, result, settings)
+                finally:
+                    self._updating_overlays = False
 
         if analyzed_count > 0 and total_regions > 0:
             self._showAnalysisMessage(total_regions, total_candidate_area)
@@ -726,6 +771,8 @@ class NonPlanarSlicingExtension(QObject, Extension):
         """Toggle the non-planar region overlay on/off."""
         self._overlay_visible = not self._overlay_visible
         if self._overlay_visible:
+            # Rebuild overlays from cache, or run fresh analysis if needed
+            self._rebuildOverlaysFromCache()
             self._runAnalysis()
             Message(
                 catalog.i18nc("@info:status", "Non-planar overlay enabled."),
@@ -741,6 +788,24 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 message_type=Message.MessageType.NEUTRAL,
                 lifetime=3,
             ).show()
+
+    def _rebuildOverlaysFromCache(self) -> None:
+        """Recreate overlay visuals from cached analysis (no re-computation)."""
+        if not self._overlay_visible:
+            return
+        settings = self._getSettings()
+        scene = Application.getInstance().getController().getScene()
+        self._updating_overlays = True
+        try:
+            for node in DepthFirstIterator(scene.getRoot()):
+                if not self._isSliceableNode(node):
+                    continue
+                cached = self._analysis_cache.get(id(node))
+                if cached is not None:
+                    _mesh_id, result = cached
+                    self._updateOverlayForNode(node, result, settings)
+        finally:
+            self._updating_overlays = False
 
     def _forceReanalyze(self) -> None:
         """Clear cache and re-run analysis on all models."""
@@ -758,9 +823,11 @@ class NonPlanarSlicingExtension(QObject, Extension):
         for node in DepthFirstIterator(scene.getRoot()):
             if not self._isSliceableNode(node):
                 continue
-            result = self._analysis_cache.get(id(node))
-            if result is not None and result.height_map is not None:
-                return result
+            cached = self._analysis_cache.get(id(node))
+            if cached is not None:
+                _mesh_id, result = cached
+                if result.height_map is not None:
+                    return result
         return None
 
     def _showAnalysisMessage(self, region_count: int, total_area: float) -> None:
