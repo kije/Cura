@@ -103,9 +103,9 @@ class NonPlanarRegionOverlay:
             rejected.
         height_map:
             Optional height map for mapping face positions to the safe
-            map.  If supplied it must have a ``world_to_grid(x, y)``
-            method and the collision_result must carry a ``safe_map``
-            attribute.
+            map.  If supplied it must have ``is_valid(x, y)`` and
+            ``get_grid_coords(x, y)`` methods, and the
+            collision_result must carry a ``safe_map`` attribute.
 
         Returns
         -------
@@ -324,7 +324,7 @@ class NonPlanarRegionOverlay:
         """Build a per-vertex boolean safety mask.
 
         Uses the collision result's ``safe_map`` and the height map's
-        ``world_to_grid`` to map each vertex to a grid cell and check
+        ``get_grid_coords`` to map each vertex to a grid cell and check
         safety.
 
         Returns
