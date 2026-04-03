@@ -1,0 +1,8 @@
+{
+    "name": "Mixed Colors",
+    "author": "Community",
+    "version": "1.0.0",
+    "api": 8,
+    "description": "Create virtual mixed-color filaments by alternating layers of different physical filaments (dithering). Supports IDEX/tool changers and mixing hotends.",
+    "catalog": "cura"
+}
