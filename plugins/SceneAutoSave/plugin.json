@@ -1,0 +1,8 @@
+{
+    "name": "Scene Auto Save",
+    "author": "Community",
+    "description": "Periodically auto-saves the full workspace (scene, settings, profiles) to a recovery file. Offers to restore the session after a crash.",
+    "version": "1.0.0",
+    "api": 8,
+    "i18n-catalog": "cura"
+}
