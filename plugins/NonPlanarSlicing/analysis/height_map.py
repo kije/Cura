@@ -27,9 +27,6 @@ _EPS: float = 1e-8
 # Padding added to the bounding box of candidate faces (mm).
 _BBOX_PAD: float = 1.0
 
-# Number of spatial-index grid buckets along each axis (default).
-_SPATIAL_GRID_RESOLUTION: int = 64
-
 
 @dataclass
 class HeightMap:
@@ -160,6 +157,11 @@ def generate_height_map(
 ) -> HeightMap:
     """Generate a height map by raycasting onto the mesh.
 
+    Uses a vectorized triangle-rasterization approach: for each triangle,
+    compute the Z value at all grid points within its 2D bounding box
+    that lie inside the triangle (barycentric test).  This is orders of
+    magnitude faster than per-cell raycasting for large grids.
+
     Parameters
     ----------
     vertices:
@@ -214,47 +216,30 @@ def generate_height_map(
     rows = max(1, int(np.ceil((y_max - y_min) / resolution)) + 1)
 
     logger.debug(
-        "Height-map grid: %d x %d (%.1f x %.1f mm, res=%.2f mm)",
-        rows, cols, x_max - x_min, y_max - y_min, resolution,
+        "Height-map grid: %d x %d (%.1f x %.1f mm, res=%.2f mm), %d faces",
+        rows, cols, x_max - x_min, y_max - y_min, resolution, num_faces,
     )
 
-    # ---- build spatial index ----
-    spatial = _build_spatial_index(tri_verts, x_min, x_max, y_min, y_max)
-
-    # ---- raycast ----
-    v0_all = tri_verts[:, 0, :]
-    v1_all = tri_verts[:, 1, :]
-    v2_all = tri_verts[:, 2, :]
-
+    # ---- vectorized triangle rasterization ----
     z_values = np.full((rows, cols), np.nan, dtype=np.float64)
     candidate_z = np.full((rows, cols), np.nan, dtype=np.float64)
 
-    # Process in row batches for memory efficiency.
-    for row in range(rows):
-        oy = y_min + row * resolution
-        ox_arr = x_min + np.arange(cols, dtype=np.float64) * resolution
+    v0 = tri_verts[:, 0, :]  # (M, 3)
+    v1 = tri_verts[:, 1, :]
+    v2 = tri_verts[:, 2, :]
 
-        for col in range(cols):
-            ox = ox_arr[col]
-            face_ids = _query_spatial_index(spatial, ox, oy, x_min, x_max, y_min, y_max)
-            if face_ids is None or len(face_ids) == 0:
-                continue
-
-            fids = np.array(face_ids, dtype=np.intp)
-            t_vals, hit_mask = _ray_triangle_batch(
-                ox, oy, v0_all[fids], v1_all[fids], v2_all[fids]
-            )
-            if not np.any(hit_mask):
-                continue
-
-            z_hits = t_vals[hit_mask]
-            best_z = float(np.max(z_hits))
-            z_values[row, col] = best_z
-
-            # Candidate-only z: highest Z among hits on candidate faces.
-            cand_hit = hit_mask & candidate_mask[fids]
-            if np.any(cand_hit):
-                candidate_z[row, col] = float(np.max(t_vals[cand_hit]))
+    # Process triangles in batches to balance vectorization vs memory.
+    _BATCH_SIZE = 256
+    for batch_start in range(0, num_faces, _BATCH_SIZE):
+        batch_end = min(batch_start + _BATCH_SIZE, num_faces)
+        _rasterize_triangle_batch(
+            v0[batch_start:batch_end],
+            v1[batch_start:batch_end],
+            v2[batch_start:batch_end],
+            candidate_mask[batch_start:batch_end],
+            x_min, y_min, resolution, rows, cols,
+            z_values, candidate_z,
+        )
 
     valid_count = int(np.count_nonzero(np.isfinite(z_values)))
     logger.debug(
@@ -274,182 +259,118 @@ def generate_height_map(
 
 
 # ======================================================================
-# Ray-triangle intersection (vectorised Moller-Trumbore)
+# Vectorized triangle rasterization
 # ======================================================================
 
 
-def _ray_triangle_batch(
-    ox: float,
-    oy: float,
+def _rasterize_triangle_batch(
     v0: NDArray[np.floating],
     v1: NDArray[np.floating],
     v2: NDArray[np.floating],
-) -> Tuple[NDArray[np.floating], NDArray[np.bool_]]:
-    """Intersect a vertical ray at (ox, oy) going in -Z with triangles.
-
-    The ray origin is at (ox, oy, +inf) and points in the -Z direction.
-    We are interested in the Z coordinate of the intersection.
-
-    Parameters
-    ----------
-    ox, oy:
-        XY position of the ray.
-    v0, v1, v2:
-        (K, 3) triangle corner arrays.
-
-    Returns
-    -------
-    z_values:
-        (K,) Z coordinate of intersection (meaningful only where *hit*
-        is True).
-    hit:
-        (K,) boolean mask of successful intersections.
-    """
-    K = v0.shape[0]
-    z_out = np.full(K, np.nan, dtype=np.float64)
-    hit = np.zeros(K, dtype=np.bool_)
-
-    if K == 0:
-        return z_out, hit
-
-    # Ray direction: (0, 0, -1).
-    edge1 = v1 - v0  # (K, 3)
-    edge2 = v2 - v0
-
-    # h = cross(dir, edge2) with dir = (0, 0, -1)
-    # cross((0,0,-1), (e2x, e2y, e2z)) = (0*e2z - (-1)*e2y, (-1)*e2x - 0*e2z, 0*e2y - 0*e2x)
-    #                                    = (e2y, -e2x, 0)
-    hx = edge2[:, 1]
-    hy = -edge2[:, 0]
-    # hz = 0
-
-    # a = dot(edge1, h)
-    a = edge1[:, 0] * hx + edge1[:, 1] * hy  # (K,)
-
-    # Parallel test.
-    valid = np.abs(a) > _EPS
-    inv_a = np.where(valid, 1.0 / np.where(valid, a, 1.0), 0.0)
-
-    # s = ray_origin - v0   (ray origin at (ox, oy, big_z) but z cancels)
-    sx = ox - v0[:, 0]
-    sy = oy - v0[:, 1]
-    sz_comp = -v0[:, 2]  # We can pick any z for origin; terms cancel for u,v
-    # Actually we need proper formulation. Let's use origin_z = 0 and then
-    # the hit z = v0z + u*edge1z + v*edge2z.  But the standard M-T gives t
-    # along the ray.  Let's just do it properly.
-
-    # s = O - v0 where O = (ox, oy, Zo) for some large Zo.
-    # But since direction is (0,0,-1), the parameter t gives the point
-    # P = O + t*d = (ox, oy, Zo - t).  So z_hit = Zo - t.
-    # We pick Zo = 0 for simplicity -> z_hit = -t.  But then
-    # s = (ox - v0x, oy - v0y, 0 - v0z) = (sx, sy, -v0z).
-
-    sz = -v0[:, 2]
-
-    # u = inv_a * dot(s, h)
-    u = inv_a * (sx * hx + sy * hy)
-
-    valid &= (u >= 0.0) & (u <= 1.0)
-
-    # q = cross(s, edge1)
-    qx = sy * edge1[:, 2] - sz * edge1[:, 1]
-    qy = sz * edge1[:, 0] - sx * edge1[:, 2]
-    qz = sx * edge1[:, 1] - sy * edge1[:, 0]
-
-    # v = inv_a * dot(dir, q) = inv_a * (0*qx + 0*qy + (-1)*qz) = -inv_a * qz
-    v = -inv_a * qz
-
-    valid &= (v >= 0.0) & (u + v <= 1.0)
-
-    # t = inv_a * dot(edge2, q)
-    t = inv_a * (edge2[:, 0] * qx + edge2[:, 1] * qy + edge2[:, 2] * qz)
-
-    # We want t > 0 (intersection in the -Z direction from origin at z=0,
-    # meaning the surface is *below* z=0... but we actually want any hit).
-    # z_hit = -t.  Since the ray goes downward, positive t means the
-    # triangle is below origin.  We accept any finite t (the mesh can be
-    # anywhere).
-    valid &= np.isfinite(t)
-
-    z_out[valid] = -t[valid]  # z_hit = 0 - t = -t (origin z = 0)
-    hit[valid] = True
-
-    return z_out, hit
-
-
-# ======================================================================
-# Simple grid-based spatial index
-# ======================================================================
-
-
-def _build_spatial_index(
-    tri_verts: NDArray[np.floating],
+    is_candidate: NDArray[np.bool_],
     x_min: float,
-    x_max: float,
     y_min: float,
-    y_max: float,
-    grid_res: int = _SPATIAL_GRID_RESOLUTION,
-) -> dict:
-    """Build a simple 2D grid spatial index for triangles.
+    resolution: float,
+    rows: int,
+    cols: int,
+    z_values: NDArray[np.floating],
+    candidate_z: NDArray[np.floating],
+) -> None:
+    """Rasterize a batch of triangles onto the height-map grids.
 
-    Each cell stores a list of face indices whose XY bounding box
-    overlaps that cell.
+    For each triangle, finds all grid points within its 2D bounding box,
+    tests them for containment using barycentric coordinates, computes
+    the Z at each interior point via the triangle's plane equation, and
+    updates z_values/candidate_z with the maximum Z.
+
+    Modifies z_values and candidate_z in place.
     """
-    num_faces = tri_verts.shape[0]
-    x_range = max(x_max - x_min, 1e-6)
-    y_range = max(y_max - y_min, 1e-6)
+    batch_size = v0.shape[0]
 
-    cell_w = x_range / grid_res
-    cell_h = y_range / grid_res
+    for i in range(batch_size):
+        ax, ay, az = v0[i, 0], v0[i, 1], v0[i, 2]
+        bx, by, bz = v1[i, 0], v1[i, 1], v1[i, 2]
+        cx, cy, cz = v2[i, 0], v2[i, 1], v2[i, 2]
 
-    # Per-triangle XY bounding boxes.
-    tri_xy_min = tri_verts[:, :, :2].min(axis=1)  # (M, 2)
-    tri_xy_max = tri_verts[:, :, :2].max(axis=1)
+        # 2D bounding box of this triangle in grid coordinates.
+        tri_x_min = min(ax, bx, cx)
+        tri_x_max = max(ax, bx, cx)
+        tri_y_min = min(ay, by, cy)
+        tri_y_max = max(ay, by, cy)
 
-    col_min = np.clip(((tri_xy_min[:, 0] - x_min) / cell_w).astype(np.intp), 0, grid_res - 1)
-    col_max = np.clip(((tri_xy_max[:, 0] - x_min) / cell_w).astype(np.intp), 0, grid_res - 1)
-    row_min = np.clip(((tri_xy_min[:, 1] - y_min) / cell_h).astype(np.intp), 0, grid_res - 1)
-    row_max = np.clip(((tri_xy_max[:, 1] - y_min) / cell_h).astype(np.intp), 0, grid_res - 1)
+        col_lo = max(0, int(np.floor((tri_x_min - x_min) / resolution)))
+        col_hi = min(cols - 1, int(np.ceil((tri_x_max - x_min) / resolution)))
+        row_lo = max(0, int(np.floor((tri_y_min - y_min) / resolution)))
+        row_hi = min(rows - 1, int(np.ceil((tri_y_max - y_min) / resolution)))
 
-    grid: dict[Tuple[int, int], list[int]] = {}
-    for face_id in range(num_faces):
-        r0, r1 = int(row_min[face_id]), int(row_max[face_id])
-        c0, c1 = int(col_min[face_id]), int(col_max[face_id])
-        for r in range(r0, r1 + 1):
-            for c in range(c0, c1 + 1):
-                key = (r, c)
-                bucket = grid.get(key)
-                if bucket is None:
-                    grid[key] = [face_id]
-                else:
-                    bucket.append(face_id)
+        if col_lo > col_hi or row_lo > row_hi:
+            continue
 
-    return {
-        "grid": grid,
-        "grid_res": grid_res,
-        "x_min": x_min,
-        "y_min": y_min,
-        "cell_w": cell_w,
-        "cell_h": cell_h,
-    }
+        # Generate grid coordinates for all points in the bounding box.
+        grid_cols = np.arange(col_lo, col_hi + 1, dtype=np.float64)
+        grid_rows = np.arange(row_lo, row_hi + 1, dtype=np.float64)
+        gx = x_min + grid_cols * resolution  # (nc,)
+        gy = y_min + grid_rows * resolution  # (nr,)
 
+        # Meshgrid: px[r, c], py[r, c]
+        px, py = np.meshgrid(gx, gy)  # both (nr, nc)
 
-def _query_spatial_index(
-    spatial: dict,
-    x: float,
-    y: float,
-    x_min: float,
-    x_max: float,
-    y_min: float,
-    y_max: float,
-) -> list[int] | None:
-    """Return face indices whose bounding box overlaps point (x, y)."""
-    grid = spatial["grid"]
-    grid_res = spatial["grid_res"]
-    cell_w = spatial["cell_w"]
-    cell_h = spatial["cell_h"]
+        # Barycentric coordinates for point-in-triangle test.
+        # Using the cross-product method:
+        #   v0 = C - A, v1 = B - A, v2 = P - A
+        #   dot00 = v0 . v0, dot01 = v0 . v1, dot02 = v0 . v2
+        #   dot11 = v1 . v1, dot12 = v1 . v2
+        #   u = (dot11*dot02 - dot01*dot12) / denom
+        #   v = (dot00*dot12 - dot01*dot02) / denom
+        #   inside if u >= 0, v >= 0, u + v <= 1
+        e0x = cx - ax
+        e0y = cy - ay
+        e1x = bx - ax
+        e1y = by - ay
 
-    col = int(np.clip((x - spatial["x_min"]) / cell_w, 0, grid_res - 1))
-    row = int(np.clip((y - spatial["y_min"]) / cell_h, 0, grid_res - 1))
+        dot00 = e0x * e0x + e0y * e0y
+        dot01 = e0x * e1x + e0y * e1y
+        dot11 = e1x * e1x + e1y * e1y
+        denom = dot00 * dot11 - dot01 * dot01
 
-    return grid.get((row, col))
+        if abs(denom) < _EPS:
+            continue  # Degenerate triangle
+
+        inv_denom = 1.0 / denom
+
+        # Vector from A to each grid point.
+        dpx = px - ax  # (nr, nc)
+        dpy = py - ay
+
+        dot02 = e0x * dpx + e0y * dpy
+        dot12 = e1x * dpx + e1y * dpy
+
+        u = (dot11 * dot02 - dot01 * dot12) * inv_denom
+        v = (dot00 * dot12 - dot01 * dot02) * inv_denom
+
+        inside = (u >= -_EPS) & (v >= -_EPS) & (u + v <= 1.0 + _EPS)
+
+        if not np.any(inside):
+            continue
+
+        # Compute Z at each interior point using the plane of the triangle.
+        # P = A + u*(C-A) + v*(B-A)  =>  z = az + u*(cz-az) + v*(bz-az)
+        z_hit = az + u * (cz - az) + v * (bz - az)
+
+        # Update z_values: keep the maximum Z at each cell.
+        # Use vectorized np.maximum with NaN handling.
+        hit_rows_local, hit_cols_local = np.nonzero(inside)
+        if len(hit_rows_local) == 0:
+            continue
+
+        abs_rows = hit_rows_local + row_lo
+        abs_cols = hit_cols_local + col_lo
+        z_vals = z_hit[hit_rows_local, hit_cols_local]
+
+        # Update z_values grid — np.fmax treats NaN as missing.
+        current_vals = z_values[abs_rows, abs_cols]
+        z_values[abs_rows, abs_cols] = np.fmax(current_vals, z_vals)
+
+        if is_candidate[i]:
+            current_cvals = candidate_z[abs_rows, abs_cols]
+            candidate_z[abs_rows, abs_cols] = np.fmax(current_cvals, z_vals)

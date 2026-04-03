@@ -506,6 +506,12 @@ class NonPlanarSlicingExtension(QObject, Extension):
         elif analyzed_count > 0:
             Logger.log("d", "Non-planar analysis: no candidate regions found")
 
+        # Analysis is now available — if post-processing was attempted
+        # earlier but skipped (no analysis yet), retry it now.
+        if not self._postprocessing_done_for_gcode and analyzed_count > 0:
+            Logger.log("d", "NonPlanar: analysis just finished — retrying post-processing")
+            QTimer.singleShot(200, self._tryApplyPostProcessing)
+
     def _showCachedResults(self) -> None:
         """Show analysis message from already-cached results."""
         total_candidate_area = 0.0
