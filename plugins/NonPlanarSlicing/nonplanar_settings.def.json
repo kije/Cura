@@ -1,0 +1,103 @@
+{
+    "name": "Non-Planar Slicing Settings",
+    "version": 2,
+    "metadata": {
+        "setting_version": 26
+    },
+    "settings": {
+        "nonplanar_enabled": {
+            "label": "Non-Planar Slicing",
+            "description": "Enable non-planar curved layers on top surfaces to eliminate stair-stepping artifacts. Only applies to regions verified collision-free with the printhead. This is an experimental feature.",
+            "type": "bool",
+            "default_value": false,
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_max_angle": {
+            "label": "Non-Planar Maximum Angle",
+            "description": "Maximum surface angle from horizontal that can be printed non-planarly (degrees). Higher values improve surface quality on steeper surfaces but increase collision risk. Limited by nozzle/fan geometry.",
+            "type": "float",
+            "unit": "\u00b0",
+            "default_value": 30.0,
+            "minimum_value": "1.0",
+            "maximum_value": "60.0",
+            "maximum_value_warning": "45.0",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_layer_count": {
+            "label": "Non-Planar Layer Count",
+            "description": "Number of top layers to apply non-planar bending to. More layers produce smoother transitions but increase processing time and collision risk.",
+            "type": "int",
+            "default_value": 5,
+            "minimum_value": "1",
+            "maximum_value": "20",
+            "maximum_value_warning": "10",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_nozzle_clearance": {
+            "label": "Non-Planar Nozzle Clearance",
+            "description": "Distance from the nozzle tip to the first obstruction above it (fan shroud, sensor, etc.) in mm. This is used for collision detection. A 1mm safety margin is subtracted internally.",
+            "type": "float",
+            "unit": "mm",
+            "default_value": 8.0,
+            "minimum_value": "1.0",
+            "maximum_value_warning": "20.0",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": true,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_min_region_area": {
+            "label": "Non-Planar Minimum Region Area",
+            "description": "Minimum surface area (mm\u00b2) of a candidate region for non-planar slicing. Regions smaller than this are kept planar to avoid unnecessary processing.",
+            "type": "float",
+            "unit": "mm\u00b2",
+            "default_value": 100.0,
+            "minimum_value": "1.0",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_blend_distance": {
+            "label": "Non-Planar Blend Distance",
+            "description": "Width of the smooth transition zone (mm) between planar and non-planar regions. Prevents abrupt layer height changes at boundaries. Uses smoothstep interpolation for C1 continuity.",
+            "type": "float",
+            "unit": "mm",
+            "default_value": 3.0,
+            "minimum_value": "0.5",
+            "maximum_value_warning": "10.0",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_flow_compensation": {
+            "label": "Non-Planar Flow Compensation",
+            "description": "Adjust extrusion rate (E values) to compensate for varying layer thickness on curved surfaces. Recommended to keep enabled for consistent print quality.",
+            "type": "bool",
+            "default_value": true,
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_feedrate_compensation": {
+            "label": "Non-Planar Feedrate Compensation",
+            "description": "Adjust feedrate (F values) to account for 3D travel distance on curved surfaces, maintaining consistent volumetric flow rate.",
+            "type": "bool",
+            "default_value": true,
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        }
+    }
+}

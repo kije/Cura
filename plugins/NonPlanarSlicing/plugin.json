@@ -1,0 +1,9 @@
+{
+    "name": "Non-Planar Slicing",
+    "author": "Cura Non-Planar Contributors",
+    "version": "1.0.0",
+    "api": 8,
+    "description": "Experimental non-planar slicing that applies curved layers to top surfaces, eliminating stair-stepping artifacts on inclined surfaces while maintaining collision safety.",
+    "catalog": "cura",
+    "supported_sdk_versions": ["8.0.0"]
+}

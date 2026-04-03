@@ -1,0 +1,723 @@
+# Copyright (c) 2024 Cura Non-Planar Contributors
+# Non-Planar Slicing Plugin is released under the terms of the LGPLv3 or higher.
+
+from __future__ import annotations
+
+import json
+import os
+import collections
+import logging
+import time
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
+
+import numpy
+
+from PyQt6.QtCore import QObject, QTimer
+
+from UM.Application import Application
+from UM.Extension import Extension
+from UM.Logger import Logger
+from UM.Message import Message
+from UM.PluginRegistry import PluginRegistry
+from UM.Scene.Camera import Camera
+from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
+from UM.Settings.ContainerRegistry import ContainerRegistry
+from UM.Settings.DefinitionContainer import DefinitionContainer
+from UM.Settings.SettingDefinition import SettingDefinition
+from UM.i18n import i18nCatalog
+
+if TYPE_CHECKING:
+    from UM.Scene.SceneNode import SceneNode
+    from cura.CuraApplication import CuraApplication
+    from cura.Scene.CuraSceneNode import CuraSceneNode
+
+    from .analysis.surface_analyzer import SurfaceAnalysis
+    from .analysis.candidate_detector import CandidateRegions
+    from .analysis.height_map import HeightMap
+    from .analysis.collision_checker import CollisionResult
+    from .visualization.region_overlay import NonPlanarRegionOverlay
+
+catalog = i18nCatalog("cura")
+logger = logging.getLogger(__name__)
+
+# Setting keys
+SETTING_ENABLED = "nonplanar_enabled"
+SETTING_MAX_ANGLE = "nonplanar_max_angle"
+SETTING_LAYER_COUNT = "nonplanar_layer_count"
+SETTING_NOZZLE_CLEARANCE = "nonplanar_nozzle_clearance"
+SETTING_MIN_REGION_AREA = "nonplanar_min_region_area"
+SETTING_BLEND_DISTANCE = "nonplanar_blend_distance"
+SETTING_FLOW_COMPENSATION = "nonplanar_flow_compensation"
+SETTING_FEEDRATE_COMPENSATION = "nonplanar_feedrate_compensation"
+
+# Existing Cura settings we read from the printer profile
+MACHINE_HEAD_POLYGON = "machine_head_with_fans_polygon"
+MACHINE_GANTRY_HEIGHT = "gantry_height"
+MACHINE_NOZZLE_EXPANSION_ANGLE = "machine_nozzle_expansion_angle"
+MACHINE_NOZZLE_SIZE = "machine_nozzle_size"
+
+# Non-planar layer types to skip (G-code ;TYPE: values)
+SKIP_LINE_TYPES = frozenset([
+    "SUPPORT", "SUPPORT-INTERFACE", "PRIME-TOWER", "SKIRT",
+])
+
+# Internal constants
+HEIGHTMAP_RESOLUTION = 0.5  # mm
+SEGMENT_LENGTH = 1.0  # mm, max G-code segment length for subdivision
+SAFETY_MARGIN = 1.0  # mm, subtracted from nozzle clearance
+
+
+class NonPlanarSlicingExtension(QObject, Extension):
+    """Main extension class for the Non-Planar Slicing plugin.
+
+    Orchestrates the full non-planar slicing pipeline:
+    1. Injects custom settings into Cura's "experimental" category
+    2. Analyzes mesh geometry to identify non-planar candidate regions
+    3. After slicing, post-processes G-code to bend top layers onto the model surface
+    4. Modifies layer visualization data for the preview
+    5. Provides overlay visualization of candidate regions
+    """
+
+    def __init__(self) -> None:
+        QObject.__init__(self)
+        Extension.__init__(self)
+
+        self.setMenuName(catalog.i18nc("@item:inmenu", "Non-Planar Slicing"))
+        self.addMenuItem(catalog.i18nc("@item:inmenu", "About Non-Planar Slicing"), self._showAboutMessage)
+
+        # Cached analysis results per scene node
+        self._analysis_cache: Dict[int, _AnalysisResult] = {}
+
+        # Overlay manager
+        self._overlay: Optional[NonPlanarRegionOverlay] = None
+
+        # Settings injection state
+        self._settings_injected = False
+        self._settings_dict: Dict[str, Any] = {}
+
+        # Debounce timer for scene changes
+        self._analysis_timer = QTimer()
+        self._analysis_timer.setInterval(500)
+        self._analysis_timer.setSingleShot(True)
+        self._analysis_timer.timeout.connect(self._runAnalysis)
+
+        # Load settings definitions from JSON
+        self._loadSettingsDefinitions()
+
+        # Connect signals
+        app = Application.getInstance()
+
+        # Settings injection on container load
+        ContainerRegistry.getInstance().containerLoadComplete.connect(self._onContainerLoadComplete)
+
+        # Scene monitoring for analysis
+        app.getController().getScene().sceneChanged.connect(self._onSceneChanged)
+
+        # G-code post-processing hook (same pattern as PostProcessingPlugin)
+        app.getOutputDeviceManager().writeStarted.connect(self._onWriteStarted)
+
+        # Layer data modification after slicing
+        backend = app.getBackend()
+        if backend is not None:
+            backend.backendStateChange.connect(self._onBackendStateChanged)
+
+        Logger.log("i", "Non-Planar Slicing plugin initialized")
+
+    # -------------------------------------------------------------------------
+    # Settings Injection (ArcWelder pattern)
+    # -------------------------------------------------------------------------
+
+    def _loadSettingsDefinitions(self) -> None:
+        """Load setting definitions from the JSON file."""
+        settings_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "nonplanar_settings.def.json"
+        )
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f, object_pairs_hook=collections.OrderedDict)
+            self._settings_dict = data.get("settings", {})
+            Logger.log("d", "Loaded %d non-planar setting definitions", len(self._settings_dict))
+        except Exception:
+            Logger.logException("e", "Failed to load non-planar settings definitions")
+            self._settings_dict = {}
+
+    def _onContainerLoadComplete(self) -> None:
+        """Inject our settings into the 'experimental' category of fdmprinter definitions."""
+        if self._settings_injected:
+            return
+
+        if not self._settings_dict:
+            Logger.log("w", "No non-planar settings to inject")
+            return
+
+        container_registry = ContainerRegistry.getInstance()
+        # Find all definition containers that have the "experimental" category
+        for container in container_registry.findDefinitionContainers():
+            if not isinstance(container, DefinitionContainer):
+                continue
+
+            # Find the "experimental" category
+            experimental_category = None
+            try:
+                for definition in container.definitions:
+                    if definition.key == "experimental":
+                        experimental_category = definition
+                        break
+            except Exception:
+                continue
+
+            if experimental_category is None:
+                continue
+
+            # Inject our settings into this category
+            self._injectSettings(container, experimental_category)
+
+        self._settings_injected = True
+
+        # Make settings visible in the UI
+        self._makeSettingsVisible()
+
+        Logger.log("i", "Non-planar settings injected into experimental category")
+
+    def _injectSettings(self, container: DefinitionContainer,
+                        category: SettingDefinition) -> None:
+        """Inject setting definitions into a category."""
+        for setting_key, setting_data in self._settings_dict.items():
+            # Check if this setting already exists (avoid duplicates on reload)
+            if container.findDefinitions(key=setting_key):
+                continue
+
+            try:
+                setting_definition = SettingDefinition(setting_key, container, category)
+                setting_definition.deserialize(setting_data)
+
+                # Add to the category's children
+                category._children.append(setting_definition)
+
+                # Update the container's definition cache
+                container._definition_cache[setting_key] = setting_definition
+
+            except Exception:
+                Logger.logException("e", "Failed to inject setting: %s", setting_key)
+
+    def _makeSettingsVisible(self) -> None:
+        """Add our settings to the visible settings preference."""
+        try:
+            preferences = Application.getInstance().getPreferences()
+            visible_settings = preferences.getValue("general/visible_settings")
+            if visible_settings is None:
+                return
+
+            our_keys = set(self._settings_dict.keys())
+            current_visible = set(visible_settings.split(";"))
+            missing = our_keys - current_visible
+
+            if missing:
+                new_visible = visible_settings + ";" + ";".join(sorted(missing))
+                preferences.setValue("general/visible_settings", new_visible)
+                Logger.log("d", "Added %d non-planar settings to visibility", len(missing))
+        except Exception:
+            Logger.logException("w", "Could not update setting visibility")
+
+    # -------------------------------------------------------------------------
+    # Settings Access
+    # -------------------------------------------------------------------------
+
+    def _getGlobalStack(self):
+        """Get the global container stack, or None."""
+        return Application.getInstance().getGlobalContainerStack()
+
+    def _getSetting(self, key: str, default=None):
+        """Get a setting value from the global stack."""
+        stack = self._getGlobalStack()
+        if stack is None:
+            return default
+        value = stack.getProperty(key, "value")
+        return value if value is not None else default
+
+    def _isEnabled(self) -> bool:
+        """Check if non-planar slicing is enabled."""
+        return bool(self._getSetting(SETTING_ENABLED, False))
+
+    def _getSettings(self) -> Dict[str, Any]:
+        """Collect all non-planar settings into a dict."""
+        return {
+            "enabled": self._isEnabled(),
+            "max_angle_deg": float(self._getSetting(SETTING_MAX_ANGLE, 30.0)),
+            "nonplanar_layer_count": int(self._getSetting(SETTING_LAYER_COUNT, 5)),
+            "nozzle_clearance_mm": float(self._getSetting(SETTING_NOZZLE_CLEARANCE, 8.0)),
+            "min_region_area_mm2": float(self._getSetting(SETTING_MIN_REGION_AREA, 100.0)),
+            "blend_distance_mm": float(self._getSetting(SETTING_BLEND_DISTANCE, 3.0)),
+            "flow_compensation": bool(self._getSetting(SETTING_FLOW_COMPENSATION, True)),
+            "feedrate_compensation": bool(self._getSetting(SETTING_FEEDRATE_COMPENSATION, True)),
+            # Machine settings (read-only from printer profile)
+            "printhead_polygon": self._getSetting(MACHINE_HEAD_POLYGON, [[-20, 10], [10, 10], [10, -10], [-20, -10]]),
+            "gantry_height": float(self._getSetting(MACHINE_GANTRY_HEIGHT, 99999)),
+            "nozzle_expansion_angle_deg": float(self._getSetting(MACHINE_NOZZLE_EXPANSION_ANGLE, 45)),
+            "nozzle_size_mm": float(self._getSetting(MACHINE_NOZZLE_SIZE, 0.4)),
+            # Internal constants
+            "heightmap_resolution": HEIGHTMAP_RESOLUTION,
+            "segment_length": SEGMENT_LENGTH,
+            "safety_margin_mm": SAFETY_MARGIN,
+        }
+
+    # -------------------------------------------------------------------------
+    # Scene Change Handling & Mesh Analysis
+    # -------------------------------------------------------------------------
+
+    def _onSceneChanged(self, node) -> None:
+        """Called when the scene changes. Debounce and re-analyze if enabled."""
+        if isinstance(node, Camera):
+            return
+        if not self._isEnabled():
+            return
+        self._analysis_timer.start()
+
+    def _runAnalysis(self) -> None:
+        """Run mesh analysis on all sliceable nodes in the scene."""
+        if not self._isEnabled():
+            self._clearOverlays()
+            return
+
+        settings = self._getSettings()
+        scene = Application.getInstance().getController().getScene()
+        analyzed_count = 0
+        total_candidate_area = 0.0
+        total_regions = 0
+
+        for node in DepthFirstIterator(scene.getRoot()):
+            if not self._isSliceableNode(node):
+                continue
+
+            result = self._analyzeNode(node, settings)
+            if result is not None:
+                self._analysis_cache[id(node)] = result
+                analyzed_count += 1
+                if result.candidate_regions is not None:
+                    for region in result.candidate_regions.regions:
+                        total_candidate_area += region.total_area
+                        total_regions += 1
+
+                # Update overlay visualization
+                self._updateOverlayForNode(node, result, settings)
+
+        if analyzed_count > 0 and total_regions > 0:
+            self._showAnalysisMessage(total_regions, total_candidate_area)
+        elif analyzed_count > 0:
+            Logger.log("d", "Non-planar analysis: no candidate regions found")
+
+    def _isSliceableNode(self, node) -> bool:
+        """Check if a node is a sliceable mesh."""
+        if not hasattr(node, "callDecoration"):
+            return False
+        if not node.callDecoration("isSliceable"):
+            return False
+        if not node.getMeshData():
+            return False
+        if not node.isVisible():
+            return False
+        return True
+
+    def _analyzeNode(self, node, settings: Dict[str, Any]) -> Optional[_AnalysisResult]:
+        """Run the full analysis pipeline on a single mesh node."""
+        from .analysis.surface_analyzer import analyze_mesh
+        from .analysis.candidate_detector import detect_candidates
+        from .analysis.height_map import generate_height_map
+        from .analysis.collision_checker import check_collisions
+
+        try:
+            mesh_data = node.getMeshData()
+            if mesh_data is None:
+                return None
+
+            vertices = mesh_data.getVertices()
+            if vertices is None or len(vertices) == 0:
+                return None
+
+            indices = mesh_data.getIndices()
+
+            # Get world transformation matrix
+            transform = node.getWorldTransformation()
+            transform_matrix = transform.getData() if transform is not None else None
+
+            # Step 1: Surface analysis
+            t0 = time.time()
+            analysis = analyze_mesh(vertices, indices, transform_matrix)
+            Logger.log("d", "Surface analysis: %d faces in %.2fs",
+                       len(analysis.face_normals), time.time() - t0)
+
+            # Step 2: Candidate detection
+            t0 = time.time()
+            candidates = detect_candidates(
+                analysis, indices,
+                max_angle_deg=settings["max_angle_deg"],
+                min_benefit_angle_deg=5.0,
+                min_region_area_mm2=settings["min_region_area_mm2"],
+            )
+            Logger.log("d", "Candidate detection: %d regions in %.2fs",
+                       len(candidates.regions), time.time() - t0)
+
+            if not candidates.regions:
+                return _AnalysisResult(
+                    analysis=analysis, candidate_regions=candidates,
+                    height_map=None, collision_result=None,
+                    safe_map=None, blend_map=None,
+                )
+
+            # Step 3: Height map generation
+            t0 = time.time()
+
+            # Transform vertices to world space for height map
+            world_vertices = self._transformVertices(vertices, transform_matrix)
+
+            height_map = generate_height_map(
+                world_vertices, indices, candidates.all_candidate_mask,
+                resolution=settings["heightmap_resolution"],
+            )
+            Logger.log("d", "Height map: %dx%d grid in %.2fs",
+                       height_map.grid_shape[0], height_map.grid_shape[1],
+                       time.time() - t0)
+
+            # Step 4: Collision checking
+            t0 = time.time()
+            collision_result = check_collisions(
+                height_map,
+                printhead_polygon=settings["printhead_polygon"],
+                nozzle_clearance_mm=settings["nozzle_clearance_mm"],
+                nozzle_expansion_angle_deg=settings["nozzle_expansion_angle_deg"],
+                safety_margin_mm=settings["safety_margin_mm"],
+            )
+            Logger.log("d", "Collision check: %d safe, %d collision in %.2fs",
+                       collision_result.safe_count, collision_result.collision_count,
+                       time.time() - t0)
+
+            # Step 5: Compute blend map
+            from .gcode.transition_blender import compute_blend_map
+            blend_map = compute_blend_map(
+                collision_result.safe_map,
+                resolution=settings["heightmap_resolution"],
+                blend_distance=settings["blend_distance_mm"],
+            )
+
+            return _AnalysisResult(
+                analysis=analysis,
+                candidate_regions=candidates,
+                height_map=height_map,
+                collision_result=collision_result,
+                safe_map=collision_result.safe_map,
+                blend_map=blend_map,
+            )
+
+        except Exception:
+            Logger.logException("e", "Failed to analyze node for non-planar slicing")
+            return None
+
+    def _transformVertices(self, vertices: numpy.ndarray,
+                           transform_matrix: Optional[numpy.ndarray]) -> numpy.ndarray:
+        """Transform vertices to world space, converting Y-up to Z-up."""
+        if transform_matrix is not None:
+            rot_scale = transform_matrix[:3, :3]
+            translate = transform_matrix[:3, 3]
+            world_verts = vertices.dot(rot_scale.T) + translate
+        else:
+            world_verts = vertices.copy()
+
+        # Convert from Y-up (Cura scene) to Z-up (slicing coords)
+        result = numpy.empty_like(world_verts)
+        result[:, 0] = world_verts[:, 0]   # X stays
+        result[:, 1] = -world_verts[:, 2]  # Y = -Z_scene
+        result[:, 2] = world_verts[:, 1]   # Z = Y_scene
+        return result
+
+    # -------------------------------------------------------------------------
+    # G-code Post-Processing
+    # -------------------------------------------------------------------------
+
+    def _onWriteStarted(self, output_device) -> None:
+        """Post-process G-code before export: apply non-planar bending."""
+        if not self._isEnabled():
+            return
+
+        scene = Application.getInstance().getController().getScene()
+        if not hasattr(scene, "gcode_dict"):
+            return
+
+        gcode_dict = getattr(scene, "gcode_dict")
+        if not gcode_dict:
+            return
+
+        from cura.CuraApplication import CuraApplication
+        active_plate = CuraApplication.getInstance().getMultiBuildPlateModel().activeBuildPlate
+        gcode_list = gcode_dict.get(active_plate)
+        if not gcode_list:
+            return
+
+        # Check for already-processed G-code
+        if gcode_list[0] and ";NON-PLANAR PROCESSED" in gcode_list[0]:
+            Logger.log("d", "G-code already non-planar processed, skipping")
+            return
+
+        # Find the analysis result for the active scene
+        analysis_result = self._getActiveAnalysisResult()
+        if analysis_result is None or analysis_result.height_map is None:
+            Logger.log("d", "No non-planar analysis available, skipping G-code bending")
+            return
+
+        if analysis_result.safe_map is None or not numpy.any(analysis_result.safe_map):
+            Logger.log("d", "No safe non-planar regions, skipping G-code bending")
+            return
+
+        settings = self._getSettings()
+
+        try:
+            t0 = time.time()
+            modified_gcode = self._bendGCode(gcode_list, analysis_result, settings)
+            elapsed = time.time() - t0
+
+            gcode_dict[active_plate] = modified_gcode
+            setattr(scene, "gcode_dict", gcode_dict)
+
+            Logger.log("i", "Non-planar G-code bending completed in %.2fs", elapsed)
+
+            Message(
+                catalog.i18nc("@info:status",
+                              "Non-planar slicing applied successfully ({time:.1f}s).").format(time=elapsed),
+                title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
+                message_type=Message.MessageType.POSITIVE,
+                lifetime=5,
+            ).show()
+
+        except Exception:
+            Logger.logException("e", "Failed to apply non-planar G-code bending")
+            Message(
+                catalog.i18nc("@info:status",
+                              "Non-planar slicing failed. Original G-code preserved."),
+                title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
+                message_type=Message.MessageType.ERROR,
+                lifetime=10,
+            ).show()
+
+    def _bendGCode(self, gcode_list: List[str], analysis: _AnalysisResult,
+                   settings: Dict[str, Any]) -> List[str]:
+        """Apply non-planar bending to the G-code."""
+        from .gcode.gcode_bender import bend_gcode
+
+        # Detect layer height from G-code
+        layer_height = self._detectLayerHeight(gcode_list, settings)
+
+        bender_settings = {
+            "layer_height": layer_height,
+            "nonplanar_layer_count": settings["nonplanar_layer_count"],
+            "max_angle_deg": settings["max_angle_deg"],
+            "flow_compensation": settings["flow_compensation"],
+            "feedrate_compensation": settings["feedrate_compensation"],
+            "segment_length": settings.get("segment_length", SEGMENT_LENGTH),
+        }
+
+        return bend_gcode(
+            gcode_list,
+            height_map=analysis.height_map,
+            safe_map=analysis.safe_map,
+            blend_map=analysis.blend_map,
+            settings=bender_settings,
+        )
+
+    def _detectLayerHeight(self, gcode_list: List[str], settings: Dict[str, Any]) -> float:
+        """Detect layer height from G-code comments or settings."""
+        # Try to find ;Layer height: X.XX in header
+        for chunk in gcode_list[:3]:
+            for line in chunk.split("\n"):
+                if line.startswith(";Layer height:"):
+                    try:
+                        return float(line.split(":")[1].strip())
+                    except (ValueError, IndexError):
+                        pass
+
+        # Fall back to the global setting
+        stack = self._getGlobalStack()
+        if stack is not None:
+            lh = stack.getProperty("layer_height", "value")
+            if lh is not None and lh > 0:
+                return float(lh)
+
+        return 0.2  # safe default
+
+    # -------------------------------------------------------------------------
+    # Layer Data Modification (SimulationView preview)
+    # -------------------------------------------------------------------------
+
+    def _onBackendStateChanged(self, state) -> None:
+        """Called when the backend state changes (e.g., slicing completes)."""
+        # Import here to avoid circular dependencies
+        try:
+            from cura.CuraApplication import CuraApplication
+            from UM.Backend.Backend import BackendState
+        except ImportError:
+            return
+
+        if state != BackendState.Done:
+            return
+
+        if not self._isEnabled():
+            return
+
+        # Defer the layer data modification slightly to ensure ProcessSlicedLayersJob is done
+        QTimer.singleShot(500, self._modifyLayerData)
+
+    def _modifyLayerData(self) -> None:
+        """Modify the layer data for non-planar preview visualization."""
+        analysis_result = self._getActiveAnalysisResult()
+        if analysis_result is None or analysis_result.height_map is None:
+            return
+
+        if analysis_result.safe_map is None or not numpy.any(analysis_result.safe_map):
+            return
+
+        settings = self._getSettings()
+        scene = Application.getInstance().getController().getScene()
+
+        from .visualization.layer_data_modifier import LayerDataModifier
+
+        for node in DepthFirstIterator(scene.getRoot()):
+            layer_data = node.callDecoration("getLayerData")
+            if layer_data is None:
+                continue
+
+            try:
+                # Detect total layers from layer data
+                layers = layer_data.getLayers()
+                if not layers:
+                    continue
+                total_layers = max(layers.keys()) + 1 if layers else 0
+
+                layer_height = self._detectLayerHeight(
+                    getattr(scene, "gcode_dict", {}).get(0, [""]),
+                    settings,
+                )
+
+                modifier = LayerDataModifier(
+                    height_map=analysis_result.height_map,
+                    safe_map=analysis_result.safe_map,
+                    blend_map=analysis_result.blend_map,
+                    layer_height=layer_height,
+                    nonplanar_layer_count=settings["nonplanar_layer_count"],
+                    total_layers=total_layers,
+                )
+
+                if modifier.modify_layer_data(layer_data):
+                    Logger.log("i", "Modified layer data for non-planar preview")
+
+            except Exception:
+                Logger.logException("w", "Failed to modify layer data for non-planar preview")
+
+    # -------------------------------------------------------------------------
+    # Overlay Visualization
+    # -------------------------------------------------------------------------
+
+    def _updateOverlayForNode(self, node, result: _AnalysisResult,
+                              settings: Dict[str, Any]) -> None:
+        """Update the overlay visualization for a scene node."""
+        from .visualization.region_overlay import NonPlanarRegionOverlay
+
+        if self._overlay is None:
+            self._overlay = NonPlanarRegionOverlay()
+
+        # Remove previous overlays
+        self._overlay.remove_overlays()
+
+        if result.candidate_regions is None or not result.candidate_regions.regions:
+            return
+
+        mesh_data = node.getMeshData()
+        if mesh_data is None:
+            return
+
+        vertices = mesh_data.getVertices()
+        indices = mesh_data.getIndices()
+
+        if vertices is None:
+            return
+
+        try:
+            self._overlay.create_overlay(
+                parent_node=node,
+                vertices=vertices,
+                indices=indices,
+                candidate_regions=result.candidate_regions,
+                collision_result=result.collision_result,
+                height_map=result.height_map,
+            )
+        except Exception:
+            Logger.logException("w", "Failed to create non-planar region overlay")
+
+    def _clearOverlays(self) -> None:
+        """Remove all non-planar overlay visualizations."""
+        if self._overlay is not None:
+            self._overlay.remove_overlays()
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    def _getActiveAnalysisResult(self) -> Optional[_AnalysisResult]:
+        """Get the analysis result for the active/visible scene nodes."""
+        scene = Application.getInstance().getController().getScene()
+        for node in DepthFirstIterator(scene.getRoot()):
+            if not self._isSliceableNode(node):
+                continue
+            result = self._analysis_cache.get(id(node))
+            if result is not None and result.height_map is not None:
+                return result
+        return None
+
+    def _showAnalysisMessage(self, region_count: int, total_area: float) -> None:
+        """Show a message about the analysis results."""
+        Message(
+            catalog.i18nc("@info:status",
+                          "Non-planar slicing: found {count} region(s) "
+                          "covering {area:.0f} mm\u00b2.").format(
+                count=region_count, area=total_area),
+            title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
+            message_type=Message.MessageType.POSITIVE,
+            lifetime=8,
+        ).show()
+
+    def _showAboutMessage(self) -> None:
+        """Show information about the plugin."""
+        Message(
+            catalog.i18nc("@info:status",
+                          "Non-Planar Slicing (Experimental)\n\n"
+                          "This plugin applies curved layers to top surfaces of your model, "
+                          "eliminating stair-stepping artifacts on inclined surfaces.\n\n"
+                          "Enable it in Print Settings > Experimental > Non-Planar Slicing.\n\n"
+                          "The plugin automatically detects suitable regions and verifies "
+                          "that the printhead will not collide with the model."),
+            title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
+            message_type=Message.MessageType.NEUTRAL,
+            lifetime=0,
+        ).show()
+
+
+class _AnalysisResult:
+    """Stores the results of the non-planar analysis pipeline for a mesh node."""
+
+    __slots__ = [
+        "analysis", "candidate_regions", "height_map",
+        "collision_result", "safe_map", "blend_map",
+    ]
+
+    def __init__(
+        self,
+        analysis: Optional[SurfaceAnalysis] = None,
+        candidate_regions: Optional[CandidateRegions] = None,
+        height_map: Optional[HeightMap] = None,
+        collision_result: Optional[CollisionResult] = None,
+        safe_map: Optional[numpy.ndarray] = None,
+        blend_map: Optional[numpy.ndarray] = None,
+    ) -> None:
+        self.analysis = analysis
+        self.candidate_regions = candidate_regions
+        self.height_map = height_map
+        self.collision_result = collision_result
+        self.safe_map = safe_map
+        self.blend_map = blend_map
