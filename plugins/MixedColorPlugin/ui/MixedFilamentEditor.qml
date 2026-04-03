@@ -20,8 +20,6 @@ UM.Dialog
     minimumWidth: 400 * screenScaleFactor
     minimumHeight: 450 * screenScaleFactor
 
-    UM.I18nCatalog { id: catalog; name: "cura" }
-
     // Properties exposed to parent
     property int editIndex: -1
     property string filamentName: nameField.text
@@ -108,6 +106,7 @@ UM.Dialog
 
     Item
     {
+        UM.I18nCatalog { id: catalog; name: "cura" }
         anchors.fill: parent
 
         ScrollView

@@ -19,64 +19,91 @@ UM.Dialog
     minimumHeight: 400 * screenScaleFactor
     backgroundColor: UM.Theme.getColor("main_background")
 
-    UM.I18nCatalog { id: catalog; name: "cura" }
-
-    property var mixedFilaments: manager.mixedFilaments
-    property int selectedIndex: -1
-
-    // Editor dialog instances
-    MixedFilamentEditor
+    Item
     {
-        id: filamentEditor
-        onApplied:
+        UM.I18nCatalog { id: catalog; name: "cura" }
+        id: base
+        anchors.fill: parent
+
+        property var mixedFilaments: manager ? manager.mixedFilaments : []
+        property int selectedIndex: -1
+
+        // Sub-dialog instances created as Window children of base Item.
+        // UM.Dialog is a Window type, so nesting them inside another UM.Dialog
+        // doesn't work. Instead we use Loader to create them on demand.
+        property var filamentEditorComponent: Component
         {
-            if (filamentEditor.editIndex >= 0)
+            MixedFilamentEditor { }
+        }
+        property var gradientEditorComponent: Component
+        {
+            GradientEditor { }
+        }
+
+        property var filamentEditorInstance: null
+        property var gradientEditorInstance: null
+
+        function showFilamentEditor(editIndex, modelData)
+        {
+            if (!filamentEditorInstance)
             {
-                manager.updateMixedFilament(
-                    filamentEditor.editIndex,
-                    filamentEditor.filamentName,
-                    filamentEditor.filamentA,
-                    filamentEditor.filamentB,
-                    filamentEditor.proxyExtruder,
-                    filamentEditor.outputMode,
-                    filamentEditor.ratioA,
-                    filamentEditor.ratioB,
-                    filamentEditor.patternMode,
-                    filamentEditor.customPattern
-                )
+                filamentEditorInstance = filamentEditorComponent.createObject(base)
+                filamentEditorInstance.applied.connect(function() {
+                    var ed = filamentEditorInstance
+                    if (ed.editIndex >= 0)
+                    {
+                        manager.updateMixedFilament(
+                            ed.editIndex, ed.filamentName, ed.filamentA, ed.filamentB,
+                            ed.proxyExtruder, ed.outputMode, ed.ratioA, ed.ratioB,
+                            ed.patternMode, ed.customPattern)
+                    }
+                    else
+                    {
+                        manager.addMixedFilament(
+                            ed.filamentName, ed.filamentA, ed.filamentB,
+                            ed.proxyExtruder, ed.outputMode, ed.ratioA, ed.ratioB,
+                            ed.patternMode, ed.customPattern)
+                    }
+                })
+            }
+
+            filamentEditorInstance.editIndex = editIndex
+            if (editIndex >= 0 && modelData)
+            {
+                filamentEditorInstance.loadFromData(modelData)
             }
             else
             {
-                manager.addMixedFilament(
-                    filamentEditor.filamentName,
-                    filamentEditor.filamentA,
-                    filamentEditor.filamentB,
-                    filamentEditor.proxyExtruder,
-                    filamentEditor.outputMode,
-                    filamentEditor.ratioA,
-                    filamentEditor.ratioB,
-                    filamentEditor.patternMode,
-                    filamentEditor.customPattern
-                )
+                filamentEditorInstance.reset()
             }
+            filamentEditorInstance.show()
         }
-    }
 
-    GradientEditor
-    {
-        id: gradientEditor
-        onApplied:
+        function showGradientEditor(targetIndex, gradientData)
         {
-            if (gradientEditor.targetIndex >= 0)
+            if (!gradientEditorInstance)
             {
-                manager.setGradient(gradientEditor.targetIndex, gradientEditor.getGradientJson())
+                gradientEditorInstance = gradientEditorComponent.createObject(base)
+                gradientEditorInstance.applied.connect(function() {
+                    var ge = gradientEditorInstance
+                    if (ge.targetIndex >= 0)
+                    {
+                        manager.setGradient(ge.targetIndex, ge.getGradientJson())
+                    }
+                })
             }
-        }
-    }
 
-    Item
-    {
-        anchors.fill: parent
+            gradientEditorInstance.targetIndex = targetIndex
+            if (gradientData)
+            {
+                gradientEditorInstance.loadFromData(gradientData)
+            }
+            else
+            {
+                gradientEditorInstance.reset()
+            }
+            gradientEditorInstance.show()
+        }
 
         ColumnLayout
         {
@@ -98,12 +125,7 @@ UM.Dialog
                 Cura.SecondaryButton
                 {
                     text: catalog.i18nc("@action:button", "Add Mixed Filament")
-                    onClicked:
-                    {
-                        filamentEditor.editIndex = -1
-                        filamentEditor.reset()
-                        filamentEditor.show()
-                    }
+                    onClicked: base.showFilamentEditor(-1, null)
                 }
             }
 
@@ -126,14 +148,14 @@ UM.Dialog
                     ListView
                     {
                         id: filamentList
-                        model: dialog.mixedFilaments
+                        model: base.mixedFilaments
                         spacing: UM.Theme.getSize("narrow_margin").height
 
                         delegate: Rectangle
                         {
                             width: filamentList.width
                             height: filamentContent.implicitHeight + 2 * UM.Theme.getSize("default_margin").height
-                            color: dialog.selectedIndex === index ?
+                            color: base.selectedIndex === index ?
                                    UM.Theme.getColor("action_button_active") :
                                    UM.Theme.getColor("action_button")
                             border.color: UM.Theme.getColor("lining")
@@ -143,7 +165,7 @@ UM.Dialog
                             MouseArea
                             {
                                 anchors.fill: parent
-                                onClicked: dialog.selectedIndex = index
+                                onClicked: base.selectedIndex = index
                             }
 
                             RowLayout
@@ -167,7 +189,6 @@ UM.Dialog
                                     border.color: UM.Theme.getColor("lining")
                                     border.width: 1
 
-                                    // Striped pattern overlay to show dithering
                                     Column
                                     {
                                         anchors.fill: parent
@@ -202,24 +223,11 @@ UM.Dialog
 
                                     UM.Label
                                     {
-                                        text: catalog.i18nc("@label", "Extruder %1 + Extruder %2  |  Pattern: %3  |  Mode: %4")
-                                            .arg(modelData.filament_a + 1)
-                                            .arg(modelData.filament_b + 1)
-                                            .arg(modelData.pattern ? modelData.pattern.display || "AB" : "AB")
-                                            .arg(modelData.output_mode === "tool_change" ? "IDEX" : "Mixing")
+                                        text: "Extruder " + (modelData.filament_a + 1) +
+                                              " + Extruder " + (modelData.filament_b + 1) +
+                                              "  |  Mode: " + (modelData.output_mode === "tool_change" ? "IDEX" : "Mixing")
                                         font: UM.Theme.getFont("default")
                                         color: UM.Theme.getColor("text_inactive")
-                                    }
-
-                                    UM.Label
-                                    {
-                                        text: modelData.gradient ?
-                                              catalog.i18nc("@label", "Gradient: %1 keyframes").arg(
-                                                  modelData.gradient.keyframes ? modelData.gradient.keyframes.length : 0) :
-                                              catalog.i18nc("@label", "No gradient")
-                                        font: UM.Theme.getFont("small")
-                                        color: UM.Theme.getColor("text_inactive")
-                                        visible: modelData.gradient !== null && modelData.gradient !== undefined
                                     }
                                 }
 
@@ -228,10 +236,6 @@ UM.Dialog
                                 {
                                     checked: modelData.enabled !== undefined ? modelData.enabled : true
                                     onCheckedChanged: manager.setMixedFilamentEnabled(index, checked)
-
-                                    ToolTip.text: catalog.i18nc("@info:tooltip", "Enable/disable this mixed filament")
-                                    ToolTip.visible: hovered
-                                    ToolTip.delay: 500
                                 }
 
                                 // Action buttons
@@ -243,45 +247,24 @@ UM.Dialog
                                     {
                                         text: catalog.i18nc("@action:button", "Edit")
                                         height: 24 * screenScaleFactor
-                                        onClicked:
-                                        {
-                                            filamentEditor.editIndex = index
-                                            filamentEditor.loadFromData(modelData)
-                                            filamentEditor.show()
-                                        }
+                                        onClicked: base.showFilamentEditor(index, modelData)
                                     }
 
                                     Cura.SecondaryButton
                                     {
                                         text: catalog.i18nc("@action:button", "Gradient")
                                         height: 24 * screenScaleFactor
-                                        onClicked:
-                                        {
-                                            gradientEditor.targetIndex = index
-                                            if (modelData.gradient)
-                                            {
-                                                gradientEditor.loadFromData(modelData.gradient)
-                                            }
-                                            else
-                                            {
-                                                gradientEditor.reset()
-                                            }
-                                            gradientEditor.show()
-                                        }
+                                        onClicked: base.showGradientEditor(index, modelData.gradient || null)
                                     }
                                 }
 
                                 // Delete button
                                 Cura.SecondaryButton
                                 {
-                                    text: catalog.i18nc("@action:button", "X")
+                                    text: "X"
                                     width: 28 * screenScaleFactor
                                     height: 28 * screenScaleFactor
                                     onClicked: manager.removeMixedFilament(index)
-
-                                    ToolTip.text: catalog.i18nc("@info:tooltip", "Remove this mixed filament")
-                                    ToolTip.visible: hovered
-                                    ToolTip.delay: 500
                                 }
                             }
                         }
@@ -295,7 +278,7 @@ UM.Dialog
                     text: catalog.i18nc("@label", "No mixed filaments defined.\nClick 'Add Mixed Filament' to create one.")
                     horizontalAlignment: Text.AlignHCenter
                     color: UM.Theme.getColor("text_inactive")
-                    visible: !dialog.mixedFilaments || dialog.mixedFilaments.length === 0
+                    visible: !base.mixedFilaments || base.mixedFilaments.length === 0
                 }
             }
 
@@ -331,12 +314,6 @@ UM.Dialog
                             text: catalog.i18nc("@option:check", "Pre-heat next extruder")
                             checked: manager ? manager.enablePreheat : true
                             onCheckedChanged: if (manager) manager.setEnablePreheat(checked)
-
-                            ToolTip.text: catalog.i18nc("@info:tooltip",
-                                "Start heating the next extruder before the tool change " +
-                                "to reduce waiting time.")
-                            ToolTip.visible: hovered
-                            ToolTip.delay: 500
                         }
 
                         UM.Label
@@ -352,11 +329,6 @@ UM.Dialog
                             visible: preheatCheck.checked
                             editable: true
                             onValueChanged: if (manager) manager.setPreheatLayers(value)
-
-                            ToolTip.text: catalog.i18nc("@info:tooltip",
-                                "Number of layers ahead to start pre-heating.")
-                            ToolTip.visible: hovered
-                            ToolTip.delay: 500
                         }
 
                         UM.Label
@@ -369,31 +341,15 @@ UM.Dialog
             }
 
             // Info text
-            Rectangle
+            UM.Label
             {
                 Layout.fillWidth: true
-                height: infoText.implicitHeight + 2 * UM.Theme.getSize("default_margin").height
-                color: UM.Theme.getColor("action_button")
-                border.color: UM.Theme.getColor("lining")
-                radius: UM.Theme.getSize("default_radius").width
-
-                UM.Label
-                {
-                    id: infoText
-                    anchors.fill: parent
-                    anchors.margins: UM.Theme.getSize("default_margin").width
-                    wrapMode: Text.WordWrap
-                    text: catalog.i18nc("@info",
-                        "Mixed filaments create blended colors by alternating layers of different physical filaments. " +
-                        "Assign objects to proxy extruder slots, then define which physical filaments alternate.\n\n" +
-                        "IDEX/Tool Changer: Alternates tool changes between layers.\n" +
-                        "Mixing Hotend: Sets mix ratios via M163/M164 (Marlin) or M567 (RepRap).\n\n" +
-                        "Per-object assignment: Objects are matched by ;MESH: comments in G-code. " +
-                        "Use the Mesh Assignments section to map specific objects to mixed filaments.\n\n" +
-                        "Bresenham dithering distributes layer alternation evenly for smoother color transitions.")
-                    font: UM.Theme.getFont("small")
-                    color: UM.Theme.getColor("text_inactive")
-                }
+                wrapMode: Text.WordWrap
+                text: catalog.i18nc("@info",
+                    "Mixed filaments alternate layers of different physical filaments to create blended colors. " +
+                    "Assign objects to proxy extruder slots, then define which physical filaments alternate.")
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_inactive")
             }
 
             // Bottom buttons
@@ -401,9 +357,7 @@ UM.Dialog
             {
                 Layout.fillWidth: true
                 spacing: UM.Theme.getSize("default_margin").width
-
                 Item { Layout.fillWidth: true }
-
                 Cura.PrimaryButton
                 {
                     text: catalog.i18nc("@action:button", "Close")
@@ -430,10 +384,8 @@ UM.Dialog
                 var tipText = catalog.i18nc("@info:tooltip", "Mixed Colors active.");
                 if (manager && manager.enabledMixedFilamentCount > 0)
                 {
-                    tipText += "<br><br>" + catalog.i18nc("@info:tooltip",
-                        "%1 mixed filament(s) will be applied:").arg(manager.enabledMixedFilamentCount);
-                    tipText += "<ul>";
                     var filaments = manager.mixedFilaments;
+                    tipText += "<ul>";
                     for (var i = 0; i < filaments.length; i++)
                     {
                         if (filaments[i].enabled)
@@ -460,7 +412,7 @@ UM.Dialog
                 horizontalCenter: parent.right
                 verticalCenter: parent.top
             }
-            labelText: manager ? manager.enabledMixedFilamentCount : "0"
+            labelText: manager ? "" + manager.enabledMixedFilamentCount : "0"
         }
     }
 }

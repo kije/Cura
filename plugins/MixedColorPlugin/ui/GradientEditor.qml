@@ -18,8 +18,6 @@ UM.Dialog
     minimumWidth: 400 * screenScaleFactor
     minimumHeight: 400 * screenScaleFactor
 
-    UM.I18nCatalog { id: catalog; name: "cura" }
-
     property int targetIndex: -1
     property bool gradientEnabled: enableCheck.checked
 
@@ -75,6 +73,7 @@ UM.Dialog
 
     Item
     {
+        UM.I18nCatalog { id: catalog; name: "cura" }
         anchors.fill: parent
 
         ColumnLayout
