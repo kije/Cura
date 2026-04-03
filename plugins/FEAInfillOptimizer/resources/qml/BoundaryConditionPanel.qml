@@ -95,17 +95,71 @@ Item
             text: catalog.i18nc("@info", "Shift+click: add face | Ctrl+click: remove face")
         }
 
-        // ── Force vector inputs (force mode only) ────────────────────────────
+        // ── Rotate mode indicator ──────────────────────────────────────────
+        Rectangle
+        {
+            Layout.fillWidth: true
+            visible: bcPanel.currentMode === "rotate"
+            height: visible ? rotateModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+            color: "#222244"
+            radius: UM.Theme.getSize("default_radius").width
+
+            UM.Label
+            {
+                id: rotateModeLabel
+                anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width }
+                wrapMode: Text.WordWrap
+                color: "#aaaaff"
+                text: catalog.i18nc("@info", "Drag the rotation rings to adjust force direction. Click 'Support / Mount' or 'Apply Load' to switch back.")
+            }
+        }
+
+        // ── Force settings (force + rotate mode) ────────────────────────────
         ColumnLayout
         {
             Layout.fillWidth: true
             spacing: UM.Theme.getSize("default_margin").height / 2
-            visible: bcPanel.currentMode === "force"
+            visible: bcPanel.currentMode === "force" || bcPanel.currentMode === "rotate"
+
+            // Magnitude input (always editable)
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "Load Amount")
+                font: UM.Theme.getFont("medium_bold")
+            }
+
+            RowLayout
+            {
+                Layout.fillWidth: true
+                spacing: UM.Theme.getSize("default_margin").width / 2
+
+                TextField
+                {
+                    id: magnitudeField
+                    Layout.fillWidth: true
+                    text: (toolProperties.getValue("ForceMagnitude") ?? 100).toFixed(1)
+                    validator: DoubleValidator { bottom: 0; decimals: 1 }
+                    onEditingFinished:
+                        UM.Controller.setProperty("ForceMagnitude", parseFloat(text) || 100.0)
+                }
+                UM.Label { text: "N" }
+            }
 
             UM.Label
             {
-                text: catalog.i18nc("@label", "Force Vector (N)")
-                font: UM.Theme.getFont("medium")
+                Layout.fillWidth: true
+                text: catalog.i18nc("@info", "Tip: 1 kg weight ≈ 10 N. A finger push ≈ 20-50 N.")
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_inactive")
+                wrapMode: Text.WordWrap
+            }
+
+            // Direction components (read-only in rotate mode, editable in force mode)
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "Direction (advanced)")
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_medium")
             }
 
             GridLayout
@@ -113,43 +167,48 @@ Item
                 Layout.fillWidth: true
                 columns: 2
                 columnSpacing: UM.Theme.getSize("default_margin").width
-                rowSpacing: UM.Theme.getSize("default_margin").height / 2
+                rowSpacing: UM.Theme.getSize("default_margin").height / 4
 
-                UM.Label { text: catalog.i18nc("@label", "Fx:") }
+                UM.Label { text: "Fx:"; font: UM.Theme.getFont("small") }
                 TextField
                 {
                     id: forceXField
                     Layout.fillWidth: true
-                    text: bcPanel.forceX.toFixed(2)
-                    validator: DoubleValidator { decimals: 2; notation: DoubleValidator.ScientificNotation }
+                    text: bcPanel.forceX.toFixed(1)
+                    readOnly: bcPanel.currentMode === "rotate"
+                    font.pointSize: 9
+                    validator: DoubleValidator { decimals: 1 }
                     onEditingFinished:
                         UM.Controller.setProperty("ForceX", parseFloat(text) || 0.0)
                 }
 
-                UM.Label { text: catalog.i18nc("@label", "Fy:") }
+                UM.Label { text: "Fy:"; font: UM.Theme.getFont("small") }
                 TextField
                 {
                     id: forceYField
                     Layout.fillWidth: true
-                    text: bcPanel.forceY.toFixed(2)
-                    validator: DoubleValidator { decimals: 2; notation: DoubleValidator.ScientificNotation }
+                    text: bcPanel.forceY.toFixed(1)
+                    readOnly: bcPanel.currentMode === "rotate"
+                    font.pointSize: 9
+                    validator: DoubleValidator { decimals: 1 }
                     onEditingFinished:
                         UM.Controller.setProperty("ForceY", parseFloat(text) || 0.0)
                 }
 
-                UM.Label { text: catalog.i18nc("@label", "Fz:") }
+                UM.Label { text: "Fz:"; font: UM.Theme.getFont("small") }
                 TextField
                 {
                     id: forceZField
                     Layout.fillWidth: true
-                    text: bcPanel.forceZ.toFixed(2)
-                    validator: DoubleValidator { decimals: 2; notation: DoubleValidator.ScientificNotation }
+                    text: bcPanel.forceZ.toFixed(1)
+                    readOnly: bcPanel.currentMode === "rotate"
+                    font.pointSize: 9
+                    validator: DoubleValidator { decimals: 1 }
                     onEditingFinished:
                         UM.Controller.setProperty("ForceZ", parseFloat(text) || 0.0)
                 }
             }
 
-            // Magnitude readout
             UM.Label
             {
                 text: catalog.i18nc("@info", "Magnitude: %1 N").arg(
