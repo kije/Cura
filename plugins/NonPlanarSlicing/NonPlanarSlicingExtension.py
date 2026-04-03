@@ -769,7 +769,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "max_angle_deg": settings["max_angle_deg"],
             "flow_compensation": settings["flow_compensation"],
             "feedrate_compensation": settings["feedrate_compensation"],
-            "segment_length": settings.get("segment_length", SEGMENT_LENGTH),
+            "segment_length": settings.get("segment_length", 1.0),
             "surface_mode": settings.get("surface_mode", "all_surfaces"),
             "gcode_offset_x": gcode_offset_x,
             "gcode_offset_y": gcode_offset_y,

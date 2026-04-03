@@ -155,6 +155,11 @@ class LayerDataModifier:
 
         top_layer_idx = len(sorted_layer_numbers) - 1
         total_modified = 0
+        self._reset_rejection_tracking()
+
+        # Diagnostic: sample vertex coordinates from the first target layer
+        # to check for coordinate mismatches against the height map.
+        _diag_logged = False
 
         for layer_number in target_layer_numbers:
             layer = layers.get(layer_number)
@@ -169,12 +174,41 @@ class LayerDataModifier:
                 layers_from_top = top_layer_idx - layer_position
 
             for polygon in layer.polygons:
+                # Log diagnostic info for the first polygon we encounter.
+                if not _diag_logged:
+                    try:
+                        vb = polygon._vertex_begin
+                        ve = polygon._vertex_end
+                        if vb < ve and ve <= len(mesh_vertices):
+                            sample = mesh_vertices[vb:min(vb + 5, ve)]
+                            logger.info(
+                                "DIAG first polygon: layer=%d, vb=%d, ve=%d, "
+                                "sample X=[%.2f..%.2f], Y(height)=[%.2f..%.2f], "
+                                "Z(-worldY)=[%.2f..%.2f], "
+                                "analysis_x=[%.2f..%.2f], analysis_y=[%.2f..%.2f], "
+                                "height_map x=[%.2f,%.2f] y=[%.2f,%.2f]",
+                                layer_number, vb, ve,
+                                float(sample[:, 0].min()), float(sample[:, 0].max()),
+                                float(sample[:, 1].min()), float(sample[:, 1].max()),
+                                float(sample[:, 2].min()), float(sample[:, 2].max()),
+                                float(sample[:, 0].min()), float(sample[:, 0].max()),  # slicing_x = col 0
+                                float(-sample[:, 2].max()), float(-sample[:, 2].min()),  # slicing_y = -col 2
+                                self._height_map.x_min, self._height_map.x_max,
+                                self._height_map.y_min, self._height_map.y_max,
+                            )
+                            _diag_logged = True
+                    except Exception:
+                        pass
+
                 modified = self._modify_mesh_vertices_for_polygon(
                     polygon, layers_from_top,
                     mesh_vertices,
                     max_bend_depth=max_bend_depth,
                 )
                 total_modified += modified
+
+        # Log rejection diagnostics.
+        self._log_rejection_summary()
 
         if total_modified > 0:
             # Write modified vertices back to the LayerData.
@@ -293,6 +327,24 @@ class LayerDataModifier:
         except Exception:
             logger.debug("Failed to update polygon._data", exc_info=True)
 
+    # Rejection tracking for diagnostics (class-level, reset per modify_layer_data call).
+    _rejection_counts: dict = {}
+    _rejection_log_limit: int = 5
+    _rejection_logged: int = 0
+
+    def _reset_rejection_tracking(self) -> None:
+        self._rejection_counts = {
+            "not_valid": 0, "nan_surface": 0, "out_of_grid": 0,
+            "not_safe": 0, "zero_blend": 0, "above_surface": 0,
+            "below_depth": 0, "zero_lh": 0,
+        }
+        self._rejection_logged = 0
+
+    def _log_rejection_summary(self) -> None:
+        parts = [f"{k}={v}" for k, v in self._rejection_counts.items() if v > 0]
+        if parts:
+            logger.info("Vertex rejection summary: %s", ", ".join(parts))
+
     def _compute_bent_z(
         self,
         layers_from_top: Optional[int],
@@ -319,10 +371,12 @@ class LayerDataModifier:
         Returns the new height in mm, or None if outside non-planar region.
         """
         if not self._height_map.is_valid(slicing_x, slicing_y):
+            self._rejection_counts["not_valid"] = self._rejection_counts.get("not_valid", 0) + 1
             return None
 
         surface_z = self._height_map.interpolate(slicing_x, slicing_y)
         if math.isnan(surface_z):
+            self._rejection_counts["nan_surface"] = self._rejection_counts.get("nan_surface", 0) + 1
             return None
 
         row, col = self._height_map.get_grid_coords(slicing_x, slicing_y)
@@ -330,24 +384,30 @@ class LayerDataModifier:
         if (row < 0 or col < 0
                 or row >= self._safe_map.shape[0]
                 or col >= self._safe_map.shape[1]):
+            self._rejection_counts["out_of_grid"] = self._rejection_counts.get("out_of_grid", 0) + 1
             return None
 
         if not self._safe_map[row, col]:
+            self._rejection_counts["not_safe"] = self._rejection_counts.get("not_safe", 0) + 1
             return None
 
         blend = float(self._blend_map[row, col])
         if blend <= 0.0:
+            self._rejection_counts["zero_blend"] = self._rejection_counts.get("zero_blend", 0) + 1
             return None
 
         # Determine layers_from_top.
         if layers_from_top is None:
             # All-surfaces mode: compute per vertex.
             if self._layer_height <= 0.0:
+                self._rejection_counts["zero_lh"] = self._rejection_counts.get("zero_lh", 0) + 1
                 return None
             # Skip vertices too far above or below the surface.
             if original_height > surface_z + self._layer_height:
+                self._rejection_counts["above_surface"] = self._rejection_counts.get("above_surface", 0) + 1
                 return None
             if original_height < surface_z - max_bend_depth:
+                self._rejection_counts["below_depth"] = self._rejection_counts.get("below_depth", 0) + 1
                 return None
             layers_from_top = max(0, round(
                 (surface_z - original_height) / self._layer_height
