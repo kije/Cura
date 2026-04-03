@@ -41,6 +41,12 @@ _SKIP_LINE_TYPES = frozenset({
 # Default segment length for subdivision (mm).
 _DEFAULT_SEGMENT_LENGTH = 1.0
 
+# Maximum allowed layer gap as a factor of nominal layer height.
+# If the gap between a bent layer and the layer below exceeds this,
+# the bent Z is clamped back down to prevent unsupported extrusion.
+# 3.0 means the actual gap can be at most 3x the nominal layer height.
+_MAX_SAFE_LAYER_GAP_FACTOR = 3.0
+
 
 class HeightMapProtocol(Protocol):
     """Protocol describing the expected height_map interface."""
@@ -245,6 +251,17 @@ def bend_gcode(
     max_flow_multiplier = float(settings.get("max_flow_multiplier", 2.0))
     min_flow_multiplier = float(settings.get("min_flow_multiplier", 0.5))
 
+    # Maximum Z displacement allowed from the original layer Z.
+    # This prevents bending a line so far that it ends up unsupported.
+    # Default: nozzle_clearance (if provided), otherwise layer_count * layer_height.
+    nozzle_clearance = float(settings.get("nozzle_clearance", 0.0))
+    _max_z_displacement = float(settings.get("max_z_displacement", 0.0))
+    if _max_z_displacement <= 0.0:
+        if nozzle_clearance > 0.0:
+            _max_z_displacement = nozzle_clearance
+        else:
+            _max_z_displacement = 20.0 * layer_height  # generous fallback
+
     # G-code coordinates use machine origin (corner for most printers).
     # Analysis height maps use model-centered coordinates.  These offsets
     # convert G-code XY → analysis XY:  analysis = gcode - offset.
@@ -359,6 +376,7 @@ def bend_gcode(
     _diag_target_equals_sz = 0
     _diag_max_z_delta = 0.0
     _diag_sample_count = 0
+    _diag_z_clamped = 0
 
     for move_idx, move in enumerate(parsed.moves):
         # Update tracking state from previous moves.
@@ -489,6 +507,29 @@ def bend_gcode(
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor
 
+                # Clamp Z displacement to prevent unsupported extrusion.
+                # 1. Don't displace more than _max_z_displacement from original Z.
+                z_displacement = bent_z - sz
+                if abs(z_displacement) > _max_z_displacement:
+                    bent_z = sz + math.copysign(_max_z_displacement, z_displacement)
+                    _diag_z_clamped += 1
+
+                # 2. Don't go below zero (bed surface).
+                if bent_z < 0.0:
+                    bent_z = max(0.05, sz)  # Fall back to original Z or just above bed.
+                    _diag_z_clamped += 1
+
+                # 3. Don't let layer gap exceed max safe layer height.
+                #    The layer below should be at approximately:
+                #    surface_z - (layers_from_top + 1) * layer_height
+                #    Ensure we're not more than _MAX_LAYER_HEIGHT_FACTOR * layer_height
+                #    above it (which would mean unsupported filament).
+                expected_layer_below_z = surface_z - (layers_from_top + 1) * layer_height
+                max_safe_gap = _MAX_SAFE_LAYER_GAP_FACTOR * layer_height
+                if bent_z - expected_layer_below_z > max_safe_gap:
+                    bent_z = expected_layer_below_z + max_safe_gap
+                    _diag_z_clamped += 1
+
                 # Track bending statistics.
                 z_delta = abs(bent_z - sz)
                 if z_delta > 0.001:
@@ -610,9 +651,10 @@ def bend_gcode(
     logger.info(
         "Z-bending detail: actually_bent=%d (delta>0.001mm), "
         "zero_delta=%d, nan_interp=%d, max_z_delta=%.4fmm, "
-        "zero_blend=%d, target_eq_sz=%d",
+        "zero_blend=%d, target_eq_sz=%d, z_clamped=%d",
         _diag_actually_bent, _diag_zero_delta, _diag_nan_interp,
         _diag_max_z_delta, _diag_zero_blend, _diag_target_equals_sz,
+        _diag_z_clamped,
     )
 
     # Log height map bounds and Z range for debugging coordinate mismatches.

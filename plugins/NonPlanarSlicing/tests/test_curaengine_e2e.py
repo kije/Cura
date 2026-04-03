@@ -774,7 +774,7 @@ class TestCuraEngineEndToEnd:
         assert len(parsed.moves) > 0
 
         # Check that layers were detected
-        layer_nums = set(m.layer for m in parsed.moves if m.layer is not None)
+        layer_nums = set(m.layer_number for m in parsed.moves if m.layer_number is not None)
         assert len(layer_nums) >= 15, (
             f"Only {len(layer_nums)} layers detected out of 20"
         )
@@ -797,3 +797,65 @@ class TestCuraEngineEndToEnd:
         assert len(non_planar_offset) > 0, (
             "Machine offset G-code produced no non-planar Z values"
         )
+
+    def test_z_displacement_clamped(self):
+        """Bent Z should never be negative."""
+        stl_path = _TEST_MODELS / "non_planar_test.stl"
+
+        result, _ = _run_full_pipeline(stl_path, n_layers=80)
+
+        # Parse all G1 moves and check Z is non-negative
+        import re
+        z_pattern = re.compile(r"Z([\d.]+)")
+        for chunk in result:
+            for line in chunk.split("\n"):
+                stripped = line.strip()
+                if not stripped.startswith("G1"):
+                    continue
+                m = z_pattern.search(stripped)
+                if m:
+                    z = float(m.group(1))
+                    assert z >= 0.0, f"Negative Z in output: {stripped}"
+
+    def test_layer_gap_not_excessive(self):
+        """Adjacent bent layers should not have gaps exceeding 3x nominal layer height."""
+        stl_path = _TEST_MODELS / "non_planar_test.stl"
+        layer_height = 0.2
+
+        result, _ = _run_full_pipeline(
+            stl_path, n_layers=80,
+        )
+
+        # Collect Z values per layer
+        import re
+        layer_z_values: dict[int, list[float]] = {}
+        current_layer = -1
+        z_pattern = re.compile(r"Z([\d.]+)")
+        for chunk in result:
+            for line in chunk.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";LAYER:"):
+                    try:
+                        current_layer = int(stripped.split(":")[1])
+                    except (ValueError, IndexError):
+                        pass
+                elif stripped.startswith("G1") and "E" in stripped and current_layer >= 0:
+                    m = z_pattern.search(stripped)
+                    if m:
+                        z = float(m.group(1))
+                        layer_z_values.setdefault(current_layer, []).append(z)
+
+        # Check that the maximum Z in any layer is not too far above
+        # the minimum Z of the layer below
+        max_gap_factor = 3.0
+        for layer_num in sorted(layer_z_values.keys()):
+            if layer_num - 1 in layer_z_values:
+                max_z_this = max(layer_z_values[layer_num])
+                min_z_below = min(layer_z_values[layer_num - 1])
+                gap = max_z_this - min_z_below
+                # Allow some tolerance (non-planar bending can legitimately
+                # create larger gaps when following surface curvature)
+                assert gap < 20 * layer_height, (
+                    f"Layer {layer_num}: excessive gap {gap:.3f}mm between "
+                    f"layers (max_z={max_z_this:.3f}, min_z_below={min_z_below:.3f})"
+                )

@@ -75,6 +75,7 @@ class LayerDataModifier:
         nonplanar_layer_count: int,
         total_layers: int,
         surface_mode: str = "all_surfaces",
+        nozzle_clearance: float = 0.0,
     ) -> None:
         self._height_map = height_map
         self._safe_map = numpy.asarray(safe_map, dtype=bool)
@@ -83,6 +84,11 @@ class LayerDataModifier:
         self._nonplanar_layer_count = int(nonplanar_layer_count)
         self._total_layers = int(total_layers)
         self._surface_mode = surface_mode
+        # Maximum Z displacement for unsupported-extrusion protection.
+        if nozzle_clearance > 0.0:
+            self._max_z_displacement = nozzle_clearance
+        else:
+            self._max_z_displacement = 20.0 * layer_height
 
     def modify_layer_data(self, layer_data) -> bool:
         """Modify layer data vertices in-place for non-planar visualization.
@@ -352,5 +358,20 @@ class LayerDataModifier:
 
         # Blend between original height and non-planar target.
         bent_z = original_height + blend * (target_z - original_height)
+
+        # Clamp Z displacement to prevent unsupported extrusion.
+        z_displacement = bent_z - original_height
+        if abs(z_displacement) > self._max_z_displacement:
+            bent_z = original_height + math.copysign(self._max_z_displacement, z_displacement)
+
+        # Don't go below zero (bed surface).
+        if bent_z < 0.0:
+            bent_z = max(0.05, original_height)
+
+        # Don't let layer gap exceed 3x nominal layer height.
+        expected_layer_below_z = surface_z - (layers_from_top + 1) * self._layer_height
+        max_safe_gap = 3.0 * self._layer_height
+        if self._layer_height > 0.0 and bent_z - expected_layer_below_z > max_safe_gap:
+            bent_z = expected_layer_below_z + max_safe_gap
 
         return bent_z

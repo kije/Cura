@@ -767,6 +767,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "surface_mode": settings.get("surface_mode", "all_surfaces"),
             "gcode_offset_x": gcode_offset_x,
             "gcode_offset_y": gcode_offset_y,
+            "nozzle_clearance": settings.get("nozzle_clearance_mm", 8.0),
+            "max_flow_multiplier": settings.get("max_flow_multiplier", 2.0),
+            "min_flow_multiplier": settings.get("min_flow_multiplier", 0.5),
         }
 
         return bend_gcode(
@@ -955,6 +958,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     nonplanar_layer_count=settings["nonplanar_layer_count"],
                     total_layers=total_layers,
                     surface_mode=settings.get("surface_mode", "all_surfaces"),
+                    nozzle_clearance=settings.get("nozzle_clearance_mm", 8.0),
                 )
 
                 if modifier.modify_layer_data(layer_data):
