@@ -974,12 +974,19 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     max_path_deviation=settings.get("max_path_deviation", settings.get("nozzle_size_mm", 0.4)),
                 )
 
-                if modifier.modify_layer_data(layer_data):
-                    Logger.log("i", "NonPlanar: modified layer data for preview — triggering scene update")
-                    # Trigger a scene update so SimulationView re-renders.
+                new_layer_data = modifier.modify_layer_data(layer_data)
+                if new_layer_data is not None:
+                    # Replace the LayerData with a NEW object so Uranium's
+                    # GPU VBO cache (keyed by MeshData object identity)
+                    # is invalidated and fresh vertices are uploaded.
+                    from cura.LayerDataDecorator import LayerDataDecorator
+                    decorator = node.getDecorator(LayerDataDecorator)
+                    if decorator is not None:
+                        decorator.setLayerData(new_layer_data)
+                    Logger.log("i", "NonPlanar: replaced LayerData for preview — triggering scene update")
                     scene.sceneChanged.emit(node)
                 else:
-                    Logger.log("w", "NonPlanar: modify_layer_data returned False — no vertices modified")
+                    Logger.log("w", "NonPlanar: modify_layer_data returned None — no vertices modified")
 
             except Exception:
                 Logger.logException("w", "Failed to modify layer data for non-planar preview")

@@ -93,33 +93,40 @@ class LayerDataModifier:
         else:
             self._max_z_displacement = 0.4  # Conservative default (typical nozzle size)
 
-    def modify_layer_data(self, layer_data) -> bool:
-        """Modify layer data vertices in-place for non-planar visualization.
+    def modify_layer_data(self, layer_data):
+        """Create a new LayerData with non-planar Z offsets for preview.
 
-        Modifies the built mesh vertex buffer directly so the
-        SimulationView renders bent toolpaths.  Also updates the
-        polygon ``_data`` arrays for ``createMeshOrJumps`` consistency.
+        Uranium caches OpenGL VBOs keyed by MeshData object identity.
+        Simply modifying ``_vertices`` on the existing LayerData doesn't
+        invalidate the GPU cache, so the old vertices keep rendering.
+        The fix: create a **new** ``LayerData`` instance with modified
+        vertices so Uranium treats it as a fresh mesh and uploads new VBOs.
+
+        Also updates ``polygon._data`` arrays for ``createMeshOrJumps``
+        consistency (used by the top-layer rendering path).
 
         Parameters
         ----------
         layer_data:
-            The ``LayerData`` object (a ``MeshData`` subclass) obtained
-            via ``LayerDataDecorator.getLayerData()``.
+            The original ``LayerData`` object from ``LayerDataDecorator``.
 
-        Returns True if any modifications were made.
+        Returns
+        -------
+        A new ``LayerData`` instance with modified vertices, or None if
+        no modifications were made.
         """
         if layer_data is None:
             logger.debug("modify_layer_data: layer_data is None")
-            return False
+            return None
 
         layers = layer_data.getLayers()
         if not layers:
             logger.debug("modify_layer_data: no layers")
-            return False
+            return None
 
         sorted_layer_numbers = sorted(layers.keys())
         if not sorted_layer_numbers:
-            return False
+            return None
 
         all_surfaces_mode = self._surface_mode == "all_surfaces"
         max_bend_depth = self._nonplanar_layer_count * self._layer_height
@@ -133,15 +140,15 @@ class LayerDataModifier:
             target_layer_numbers = sorted_layer_numbers[first_nonplanar:]
 
         if not target_layer_numbers:
-            return False
+            return None
 
-        # Get the built mesh vertices (the GPU buffer source).
+        # Get the built mesh vertices.
         # MeshData wraps vertices with immutableNDArray (writeable=False),
-        # so we must make a writable copy to modify them in-place.
+        # so we make a writable copy.
         immutable_vertices = layer_data.getVertices()
         if immutable_vertices is None or len(immutable_vertices) == 0:
             logger.warning("modify_layer_data: no mesh vertices available")
-            return False
+            return None
 
         mesh_vertices = numpy.array(immutable_vertices, copy=True)
         mesh_vertices.flags.writeable = True
@@ -160,8 +167,6 @@ class LayerDataModifier:
         total_modified = 0
         self._reset_rejection_tracking()
 
-        # Diagnostic: sample vertex coordinates from the first target layer
-        # to check for coordinate mismatches against the height map.
         _diag_logged = False
 
         for layer_number in target_layer_numbers:
@@ -177,7 +182,6 @@ class LayerDataModifier:
                 layers_from_top = top_layer_idx - layer_position
 
             for polygon in layer.polygons:
-                # Log diagnostic info for the first polygon we encounter.
                 if not _diag_logged:
                     try:
                         vb = polygon._vertex_begin
@@ -194,8 +198,8 @@ class LayerDataModifier:
                                 float(sample[:, 0].min()), float(sample[:, 0].max()),
                                 float(sample[:, 1].min()), float(sample[:, 1].max()),
                                 float(sample[:, 2].min()), float(sample[:, 2].max()),
-                                float(sample[:, 0].min()), float(sample[:, 0].max()),  # slicing_x = col 0
-                                float(-sample[:, 2].max()), float(-sample[:, 2].min()),  # slicing_y = -col 2
+                                float(sample[:, 0].min()), float(sample[:, 0].max()),
+                                float(-sample[:, 2].max()), float(-sample[:, 2].min()),
                                 self._height_map.x_min, self._height_map.x_max,
                                 self._height_map.y_min, self._height_map.y_max,
                             )
@@ -210,22 +214,83 @@ class LayerDataModifier:
                 )
                 total_modified += modified
 
-        # Log rejection diagnostics.
         self._log_rejection_summary()
 
         if total_modified > 0:
-            # Write modified vertices back to the LayerData.
-            # MeshData stores _vertices as an immutable array; we replace
-            # it with our modified (writable) copy.
-            try:
-                layer_data._vertices = mesh_vertices
-            except Exception:
-                logger.warning("Failed to set _vertices on LayerData", exc_info=True)
-
             logger.info(
                 "Non-planar preview: modified %d vertices across %d layers",
                 total_modified, len(target_layer_numbers),
             )
+
+            # Create a NEW LayerData with the modified vertices.
+            # This is critical: Uranium caches OpenGL VBOs by MeshData
+            # object identity (id()).  A new object forces fresh GPU upload.
+            try:
+                from cura.LayerData import LayerData
+
+                # Copy attributes safely — MeshData may use getAttributes()
+                # or _attributes directly depending on the Uranium version.
+                attributes = None
+                try:
+                    attributes = layer_data.getAttributes()
+                except AttributeError:
+                    pass
+                if attributes is None:
+                    attributes = getattr(layer_data, "_attributes", None)
+
+                # Copy accessor methods safely for MeshData fields.
+                normals = None
+                try:
+                    normals = layer_data.getNormals()
+                except (AttributeError, Exception):
+                    pass
+
+                indices = None
+                try:
+                    indices = layer_data.getIndices()
+                except (AttributeError, Exception):
+                    pass
+
+                colors = None
+                try:
+                    colors = layer_data.getColors()
+                except (AttributeError, Exception):
+                    pass
+
+                uvs = None
+                try:
+                    uvs = layer_data.getUVCoordinates()
+                except (AttributeError, Exception):
+                    pass
+
+                file_name = getattr(layer_data, "_file_name", None)
+                try:
+                    file_name = layer_data.getFileName()
+                except (AttributeError, Exception):
+                    pass
+
+                center_position = None
+                try:
+                    center_position = layer_data.getCenterPosition()
+                except (AttributeError, Exception):
+                    pass
+
+                new_layer_data = LayerData(
+                    vertices=mesh_vertices,
+                    normals=normals,
+                    indices=indices,
+                    colors=colors,
+                    uvs=uvs,
+                    file_name=file_name,
+                    center_position=center_position,
+                    layers=layers,
+                    element_counts=layer_data.getElementCounts(),
+                    attributes=attributes,
+                )
+                return new_layer_data
+            except Exception:
+                logger.warning("Failed to create new LayerData", exc_info=True)
+                return None
         else:
             logger.warning(
                 "modify_layer_data: 0 vertices modified out of %d mesh vertices "
@@ -235,7 +300,7 @@ class LayerDataModifier:
                 self._height_map.y_min, self._height_map.y_max,
             )
 
-        return total_modified > 0
+        return None
 
     def _modify_mesh_vertices_for_polygon(
         self,
