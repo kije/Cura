@@ -141,9 +141,13 @@ class NonPlanarSlicingExtension(QObject, Extension):
             Logger.logException("e", "Failed to load non-planar settings definitions")
             self._settings_dict = {}
 
-    def _onContainerLoadComplete(self) -> None:
+    def _onContainerLoadComplete(self, container_id: str) -> None:
         """Inject our settings into the 'experimental' category of fdmprinter definitions."""
         if self._settings_injected:
+            return
+
+        # Only inject once the base fdmprinter definition is loaded.
+        if container_id != "fdmprinter":
             return
 
         if not self._settings_dict:
