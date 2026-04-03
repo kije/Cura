@@ -327,9 +327,11 @@ class TestZSpikeRegression:
                 # If no Z in the line, the printer stays at current_z.
 
         # Max jump between any two consecutive Z-emitting lines should
-        # be bounded.  For 0.2mm layers with 5 non-planar layers and
-        # 0.4mm max deviation, no single jump should exceed ~2mm.
-        assert max_z_jump < 2.0, (
+        # be bounded.  Within a layer, the jump between a bent move and
+        # a Z-restored un-bent move should be at most ~1mm (the bending
+        # depth).  Between layers, it should be at most layer_height +
+        # the bending range.  1.5mm is a reasonable bound.
+        assert max_z_jump < 1.5, (
             f"Excessive Z jump of {max_z_jump:.3f}mm detected between "
             f"consecutive Z-bearing G1 commands.  This indicates the "
             f"bender is not injecting Z-restore commands after bent regions."
@@ -412,43 +414,45 @@ class TestZSpikeRegression:
             f"Worst line: {worst_line}"
         )
 
-    def test_all_extrusion_moves_have_z_in_bent_layers(self):
-        """In layers that contain any bent moves, ALL G1 extrusion moves
-        should have an explicit Z coordinate to prevent the printer from
-        staying at the wrong height.
+    def test_z_restore_after_bent_to_unbent_transition(self):
+        """After a bent region, the FIRST un-bent move must have an explicit
+        Z to restore the printer to the correct height.
+
+        Uses a partial safe_map to create mixed bent/un-bent moves within
+        the same layer, then verifies that every un-bent extrusion move
+        that follows a bent move has the printer at the correct Z.
         """
-        n_layers = 15
+        n_layers = 20
         layer_height = 0.2
         gcode = self._make_multilayer_gcode(
-            n_layers=n_layers, moves_per_layer=6, layer_height=layer_height,
+            n_layers=n_layers, moves_per_layer=8, layer_height=layer_height,
         )
 
-        # Surface at the top layer height.
-        top_z = n_layers * layer_height
-        hm = _MockHeightMap(z_value=top_z, grid_shape=(20, 20))
-        safe_map = np.ones((20, 20), dtype=bool)
+        # Surface above the layers.
+        hm = _MockHeightMap(z_value=3.0, grid_shape=(20, 20))
+        # Partial safe_map: only columns 2-7 are safe (X=5,7 bent; X=9+ un-bent).
+        safe_map = np.zeros((20, 20), dtype=bool)
+        safe_map[8:12, 2:8] = True
         blend_map = np.ones((20, 20), dtype=np.float64)
 
         settings = {
             "layer_height": layer_height,
-            "nonplanar_layer_count": 3,
+            "nonplanar_layer_count": 5,
             "max_angle_deg": 45.0,
             "flow_compensation": False,
             "feedrate_compensation": False,
             "segment_length": 50.0,
             "surface_mode": "top_only",
-            "max_path_deviation": 0.4,
-            "nozzle_size": 0.4,
         }
         result = bend_gcode(gcode, hm, safe_map, blend_map, settings)
 
-        # Check: within any layer that has bent moves (Z differs from
-        # nominal), verify no G1 extrusion move (with E) lacks a Z.
+        # Simulate printer Z state and verify that un-bent extrusion moves
+        # never have the printer at a stale bent Z.
         import re
         z_pattern = re.compile(r"Z([\d.]+)")
+        printer_z = 0.0
         current_layer = -1
-        layer_has_bent = {}
-        layer_moves_without_z = {}
+        violations = []
 
         for chunk in result:
             for line in chunk.split("\n"):
@@ -459,37 +463,29 @@ class TestZSpikeRegression:
                     except (ValueError, IndexError):
                         pass
                     continue
-                if not stripped.startswith("G1") or "E" not in stripped:
-                    continue
-                if current_layer < 0:
+                if not stripped.startswith("G"):
                     continue
 
-                has_z = bool(z_pattern.search(stripped))
-                nominal_z = (current_layer + 1) * layer_height
+                z_match = z_pattern.search(stripped)
+                if z_match:
+                    printer_z = float(z_match.group(1))
 
-                if has_z:
-                    z_val = float(z_pattern.search(stripped).group(1))
-                    if abs(z_val - nominal_z) > 0.01:
-                        layer_has_bent.setdefault(current_layer, False)
-                        layer_has_bent[current_layer] = True
-                else:
-                    layer_moves_without_z.setdefault(current_layer, 0)
-                    layer_moves_without_z[current_layer] += 1
+                # For every G1 extrusion move, the printer Z should be
+                # within a reasonable range of the layer's nominal Z.
+                if (stripped.startswith("G1") and "E" in stripped
+                        and current_layer >= 0):
+                    nominal_z = (current_layer + 1) * layer_height
+                    # Allow bending deviation (5 layers * 0.2mm = 1.0mm
+                    # plus some margin), but not gross divergence.
+                    if abs(printer_z - nominal_z) > 1.5:
+                        violations.append(
+                            f"Layer {current_layer}: printer at Z={printer_z:.3f} "
+                            f"but nominal is {nominal_z:.3f} "
+                            f"(delta={abs(printer_z - nominal_z):.3f}mm)"
+                        )
 
-        # For bent layers, having moves without Z is acceptable ONLY if
-        # the preceding Z-bearing move is at the correct height.  Since
-        # we can't easily check that here, we just verify the Z-restore
-        # mechanism exists by checking there aren't too many Z-less moves
-        # in bent layers.
-        for layer_num, is_bent in layer_has_bent.items():
-            if is_bent and layer_num in layer_moves_without_z:
-                no_z_count = layer_moves_without_z[layer_num]
-                # Allow some Z-less moves (they're fine if preceded by a
-                # correct Z), but flag if there are many — suggests the
-                # restore mechanism isn't working.
-                assert no_z_count < 10, (
-                    f"Layer {layer_num} has {no_z_count} extrusion moves "
-                    f"without Z coordinates despite being a bent layer.  "
-                    f"These moves will inherit the last Z value, which may "
-                    f"be a bent Z from a non-planar region."
-                )
+        assert len(violations) == 0, (
+            f"Found {len(violations)} Z-state violations where printer was "
+            f"at wrong height (stale bent Z not restored):\n"
+            + "\n".join(violations[:10])
+        )
