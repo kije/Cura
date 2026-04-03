@@ -58,6 +58,9 @@ SETTING_SAFETY_MARGIN = "nonplanar_safety_margin"
 SETTING_MIN_BENEFIT_ANGLE = "nonplanar_min_benefit_angle"
 SETTING_MAX_FLOW_MULTIPLIER = "nonplanar_max_flow_multiplier"
 SETTING_MIN_FLOW_MULTIPLIER = "nonplanar_min_flow_multiplier"
+SETTING_LINE_TYPES = "nonplanar_line_types"
+SETTING_MAX_PATH_DEVIATION = "nonplanar_max_path_deviation"
+SETTING_MIN_REGION_WIDTH = "nonplanar_min_region_width"
 
 # Existing Cura settings we read from the printer profile
 MACHINE_HEAD_POLYGON = "machine_head_with_fans_polygon"
@@ -82,6 +85,9 @@ SETTINGS_INVALIDATE_ANALYSIS = frozenset([
     SETTING_HEIGHTMAP_RESOLUTION,
     SETTING_SAFETY_MARGIN,
     SETTING_MIN_BENEFIT_ANGLE,
+    SETTING_LINE_TYPES,
+    SETTING_MAX_PATH_DEVIATION,
+    SETTING_MIN_REGION_WIDTH,
     MACHINE_HEAD_POLYGON,
     MACHINE_GANTRY_HEIGHT,
     MACHINE_NOZZLE_EXPANSION_ANGLE,
@@ -332,6 +338,10 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "min_benefit_angle_deg": float(self._getSetting(SETTING_MIN_BENEFIT_ANGLE, 5.0)),
             "max_flow_multiplier": float(self._getSetting(SETTING_MAX_FLOW_MULTIPLIER, 2.0)),
             "min_flow_multiplier": float(self._getSetting(SETTING_MIN_FLOW_MULTIPLIER, 0.5)),
+            # Line type filtering and path quality
+            "nonplanar_line_types": str(self._getSetting(SETTING_LINE_TYPES, "skin_walls")),
+            "max_path_deviation": float(self._getSetting(SETTING_MAX_PATH_DEVIATION, 0.4)),
+            "min_region_width": float(self._getSetting(SETTING_MIN_REGION_WIDTH, 2.0)),
             # Machine settings (read-only from printer profile)
             "printhead_polygon": self._getSetting(MACHINE_HEAD_POLYGON, [[-20, 10], [10, 10], [10, -10], [-20, -10]]),
             "gantry_height": float(self._getSetting(MACHINE_GANTRY_HEIGHT, 99999)),
@@ -767,6 +777,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "nozzle_clearance": settings.get("nozzle_clearance_mm", 8.0),
             "max_flow_multiplier": settings.get("max_flow_multiplier", 2.0),
             "min_flow_multiplier": settings.get("min_flow_multiplier", 0.5),
+            "nonplanar_line_types": settings.get("nonplanar_line_types", "skin_walls"),
+            "max_path_deviation": settings.get("max_path_deviation", 0.4),
+            "nozzle_size": settings.get("nozzle_size_mm", 0.4),
         }
 
         return bend_gcode(
@@ -958,6 +971,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     total_layers=total_layers,
                     surface_mode=settings.get("surface_mode", "all_surfaces"),
                     nozzle_clearance=settings.get("nozzle_clearance_mm", 8.0),
+                    max_path_deviation=settings.get("max_path_deviation", settings.get("nozzle_size_mm", 0.4)),
                 )
 
                 if modifier.modify_layer_data(layer_data):
@@ -1299,10 +1313,33 @@ class _AnalysisJob(Job):
                    collision_result.safe_count, collision_result.collision_count,
                    time.time() - t0)
 
-        # Step 5: Compute blend map
+        # Step 5: Erode safe_map to remove isolated/narrow regions.
+        # This prevents isolated raised paths that would print without
+        # neighboring support.  The erosion radius is min_region_width.
+        safe_map = collision_result.safe_map
+        min_region_width = settings.get("min_region_width", 2.0)
+        resolution = settings["heightmap_resolution"]
+        if min_region_width > 0.0 and resolution > 0.0:
+            erosion_cells = max(1, int(round(min_region_width / resolution)))
+            try:
+                from scipy.ndimage import binary_erosion, binary_dilation
+                # Erode then dilate (opening) to remove narrow features
+                # while preserving the shape of wide regions.
+                structure = numpy.ones((2 * erosion_cells + 1, 2 * erosion_cells + 1), dtype=bool)
+                eroded = binary_erosion(safe_map, structure=structure)
+                safe_map = binary_dilation(eroded, structure=structure).astype(bool)
+                removed = int(numpy.count_nonzero(collision_result.safe_map) - numpy.count_nonzero(safe_map))
+                if removed > 0:
+                    Logger.log("d", "  Region erosion: removed %d isolated cells (radius=%d cells)",
+                               removed, erosion_cells)
+            except ImportError:
+                # scipy not available — skip erosion
+                Logger.log("w", "scipy not available — skipping safe_map erosion")
+
+        # Step 6: Compute blend map
         blend_map_arr = compute_blend_map(
-            collision_result.safe_map,
-            resolution=settings["heightmap_resolution"],
+            safe_map,
+            resolution=resolution,
             blend_distance=settings["blend_distance_mm"],
         )
 
@@ -1311,6 +1348,6 @@ class _AnalysisJob(Job):
             candidate_regions=candidates,
             height_map=height_map,
             collision_result=collision_result,
-            safe_map=collision_result.safe_map,
+            safe_map=safe_map,
             blend_map=blend_map_arr,
         )

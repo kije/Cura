@@ -33,19 +33,18 @@ from .gcode_parser import GCodeMove, ParsedGCode, parse_gcode, reconstruct_gcode
 
 logger = logging.getLogger(__name__)
 
-# Line types that should NOT be bent.
-_SKIP_LINE_TYPES = frozenset({
+# Line types that should NEVER be bent (regardless of settings).
+_NEVER_BEND_LINE_TYPES = frozenset({
     "SUPPORT", "SUPPORT-INTERFACE", "PRIME-TOWER", "SKIRT",
+})
+
+# Additional line types skipped in "skin_walls" mode.
+_INFILL_LINE_TYPES = frozenset({
+    "FILL",
 })
 
 # Default segment length for subdivision (mm).
 _DEFAULT_SEGMENT_LENGTH = 1.0
-
-# Maximum allowed layer gap as a factor of nominal layer height.
-# If the gap between a bent layer and the layer below exceeds this,
-# the bent Z is clamped back down to prevent unsupported extrusion.
-# 3.0 means the actual gap can be at most 3x the nominal layer height.
-_MAX_SAFE_LAYER_GAP_FACTOR = 3.0
 
 
 class HeightMapProtocol(Protocol):
@@ -251,16 +250,19 @@ def bend_gcode(
     max_flow_multiplier = float(settings.get("max_flow_multiplier", 2.0))
     min_flow_multiplier = float(settings.get("min_flow_multiplier", 0.5))
 
-    # Maximum Z displacement allowed from the original layer Z.
-    # This prevents bending a line so far that it ends up unsupported.
-    # Default: nozzle_clearance (if provided), otherwise layer_count * layer_height.
-    nozzle_clearance = float(settings.get("nozzle_clearance", 0.0))
-    _max_z_displacement = float(settings.get("max_z_displacement", 0.0))
-    if _max_z_displacement <= 0.0:
-        if nozzle_clearance > 0.0:
-            _max_z_displacement = nozzle_clearance
-        else:
-            _max_z_displacement = 20.0 * layer_height  # generous fallback
+    # Line type filtering: "skin_walls" skips infill, "all" bends everything.
+    nonplanar_line_types = str(settings.get("nonplanar_line_types", "skin_walls"))
+    skip_line_types = set(_NEVER_BEND_LINE_TYPES)
+    if nonplanar_line_types == "skin_walls":
+        skip_line_types |= _INFILL_LINE_TYPES
+
+    # Maximum Z deviation from the original path position.
+    # This is the PRIMARY safety clamp — prevents paths from shooting up
+    # into the air unsupported.  Default: nozzle_size (typically 0.4mm).
+    nozzle_size = float(settings.get("nozzle_size", 0.4))
+    max_path_deviation = float(settings.get("max_path_deviation", nozzle_size))
+    if max_path_deviation <= 0.0:
+        max_path_deviation = nozzle_size if nozzle_size > 0.0 else 0.4
 
     # G-code coordinates use machine origin (corner for most printers).
     # Analysis height maps use model-centered coordinates.  These offsets
@@ -330,12 +332,15 @@ def bend_gcode(
     logger.info(
         "Bending %d target layers (mode=%s), layer_height=%.3f, "
         "max_angle=%.1f deg, segment_length=%.2f mm, "
+        "max_path_deviation=%.3f mm, line_types=%s, "
         "gcode_offset=(%.1f, %.1f)",
         len(target_layers),
         surface_mode,
         layer_height,
         max_angle_deg,
         segment_length,
+        max_path_deviation,
+        nonplanar_line_types,
         gcode_offset_x,
         gcode_offset_y,
     )
@@ -396,7 +401,7 @@ def bend_gcode(
         elif not move.is_extrusion:
             _diag_not_extrusion += 1
             should_bend = False
-        elif move.line_type in _SKIP_LINE_TYPES:
+        elif move.line_type in skip_line_types:
             _diag_skip_type += 1
             should_bend = False
         elif move.is_travel:
@@ -507,27 +512,40 @@ def bend_gcode(
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor
 
-                # Clamp Z displacement to prevent unsupported extrusion.
-                # 1. Don't displace more than _max_z_displacement from original Z.
-                z_displacement = bent_z - sz
-                if abs(z_displacement) > _max_z_displacement:
-                    bent_z = sz + math.copysign(_max_z_displacement, z_displacement)
-                    _diag_z_clamped += 1
-
-                # 2. Don't go below zero (bed surface).
-                if bent_z < 0.0:
-                    bent_z = max(0.05, sz)  # Fall back to original Z or just above bed.
-                    _diag_z_clamped += 1
-
-                # 3. Don't let layer gap exceed max safe layer height.
-                #    The layer below should be at approximately:
-                #    surface_z - (layers_from_top + 1) * layer_height
-                #    Ensure we're not more than _MAX_LAYER_HEIGHT_FACTOR * layer_height
-                #    above it (which would mean unsupported filament).
+                # Clamp Z to prevent unsupported extrusion (spikes).
+                #
+                # The key insight: each bent layer should sit roughly
+                # one layer_height above the bent layer below it.
+                # The layer below (at layers_from_top+1) would be bent
+                # to: surface_z - (layers_from_top+1) * layer_height.
+                # So the gap between this layer and the one below
+                # should be close to layer_height.  We allow up to
+                # layer_height + max_path_deviation to accommodate
+                # curvature, but no more.
+                #
+                # This prevents the spike problem: a path at original
+                # Z=9mm won't jump to Z=12mm just because the surface
+                # is at 12mm, because the layer below it hasn't been
+                # bent that high either.
                 expected_layer_below_z = surface_z - (layers_from_top + 1) * layer_height
-                max_safe_gap = _MAX_SAFE_LAYER_GAP_FACTOR * layer_height
-                if bent_z - expected_layer_below_z > max_safe_gap:
-                    bent_z = expected_layer_below_z + max_safe_gap
+                max_gap = layer_height + max_path_deviation
+                if bent_z - expected_layer_below_z > max_gap:
+                    bent_z = expected_layer_below_z + max_gap
+                    _diag_z_clamped += 1
+
+                # Also clamp: don't deviate more than
+                # nonplanar_layer_count * layer_height + max_path_deviation
+                # from the original Z.  This prevents runaway bending
+                # when the surface is very far from the original layer.
+                max_total_deviation = nonplanar_layer_count * layer_height + max_path_deviation
+                z_displacement = bent_z - sz
+                if abs(z_displacement) > max_total_deviation:
+                    bent_z = sz + math.copysign(max_total_deviation, z_displacement)
+                    _diag_z_clamped += 1
+
+                # Don't go below zero (bed surface).
+                if bent_z < 0.0:
+                    bent_z = max(0.05, sz)
                     _diag_z_clamped += 1
 
                 # Track bending statistics.

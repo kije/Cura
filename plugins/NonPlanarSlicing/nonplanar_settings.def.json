@@ -196,6 +196,49 @@
             "settable_per_mesh": false,
             "settable_per_extruder": false,
             "settable_per_meshgroup": false
+        },
+        "nonplanar_line_types": {
+            "label": "Non-Planar Line Types",
+            "description": "Which G-code line types to bend non-planarly. 'Skin & Walls Only' keeps infill flat and only bends skin and wall extrusions — this produces more reliable results since infill provides a stable base. 'All Lines' bends everything including infill.",
+            "type": "enum",
+            "options": {
+                "skin_walls": "Skin & Walls Only",
+                "all": "All Lines"
+            },
+            "default_value": "skin_walls",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_max_path_deviation": {
+            "label": "Non-Planar Max Path Deviation",
+            "description": "Maximum Z deviation (mm) a bent path can have from the toolpath directly below it. Prevents unsupported extrusion. Default is 1x nozzle size — paths deviating more than this are clamped back.",
+            "type": "float",
+            "unit": "mm",
+            "default_value": 0.4,
+            "value": "machine_nozzle_size",
+            "minimum_value": "0.1",
+            "maximum_value": "2.0",
+            "maximum_value_warning": "1.0",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_min_region_width": {
+            "label": "Non-Planar Min Region Width",
+            "description": "Minimum width (mm) of a non-planar region. Regions narrower than this are excluded to prevent isolated raised paths that would print in mid-air without neighboring support. Measured as morphological erosion radius.",
+            "type": "float",
+            "unit": "mm",
+            "default_value": 2.0,
+            "minimum_value": "0.0",
+            "maximum_value": "10.0",
+            "maximum_value_warning": "5.0",
+            "enabled": "nonplanar_enabled",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
         }
     }
 }
