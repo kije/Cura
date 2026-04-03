@@ -287,21 +287,34 @@ class NonPlanarSlicingExtension(QObject, Extension):
     # -------------------------------------------------------------------------
 
     def _onSceneChanged(self, node) -> None:
-        """Called when the scene changes. Debounce and re-analyze if enabled."""
+        """Called when the scene changes. Debounce and re-analyze if enabled.
+
+        We aggressively filter events to avoid re-running the expensive
+        analysis pipeline on every scene update (convex hull recalc,
+        property changes, selection changes, etc.).  Only mesh-bearing
+        nodes that are sliceable should trigger re-analysis.
+        """
         if isinstance(node, Camera):
             return
         if not self._isEnabled():
             return
-        # Skip scene changes caused by our own overlay nodes — this breaks
-        # the infinite loop: analysis → overlay creation → sceneChanged → analysis
         if self._updating_overlays:
             return
+        # Skip overlay nodes we created
         try:
             from .visualization.region_overlay import NonPlanarOverlayNode
             if isinstance(node, NonPlanarOverlayNode):
                 return
         except ImportError:
             pass
+        # Only trigger for nodes that could be sliceable meshes.
+        # ConvexHullNode updates, ToolHandle moves, BuildPlate changes,
+        # etc. should NOT trigger analysis.
+        if node is not None:
+            if not hasattr(node, "callDecoration"):
+                return
+            if not node.callDecoration("isSliceable"):
+                return
         self._analysis_timer.start()
 
     def _runAnalysis(self) -> None:
@@ -327,13 +340,15 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 continue
 
             # Check cache: skip re-analysis if the mesh hasn't changed.
+            # Use vertex count + a sample hash as a stable fingerprint,
+            # since id(mesh_data) changes when Cura recreates MeshData.
             mesh_data = node.getMeshData()
-            mesh_id = id(mesh_data) if mesh_data is not None else None
+            mesh_key = self._meshFingerprint(mesh_data)
             node_id = id(node)
             cached = self._analysis_cache.get(node_id)
             if cached is not None:
-                cached_mesh_id, cached_result = cached
-                if cached_mesh_id == mesh_id:
+                cached_key, cached_result = cached
+                if cached_key == mesh_key:
                     # Mesh unchanged — reuse cached result.
                     result = cached_result
                     analyzed_count += 1
@@ -345,7 +360,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
             result = self._analyzeNode(node, settings)
             if result is not None:
-                self._analysis_cache[node_id] = (mesh_id, result)
+                self._analysis_cache[node_id] = (mesh_key, result)
                 analyzed_count += 1
                 if result.candidate_regions is not None:
                     for region in result.candidate_regions.regions:
@@ -495,6 +510,44 @@ class NonPlanarSlicingExtension(QObject, Extension):
     # -------------------------------------------------------------------------
     # G-code Post-Processing
     # -------------------------------------------------------------------------
+
+    def _bendGCodeInPlace(self) -> None:
+        """Bend G-code in-place right after slicing, so preview reflects changes."""
+        if not self._isEnabled():
+            return
+
+        scene = Application.getInstance().getController().getScene()
+        gcode_dict = getattr(scene, "gcode_dict", None)
+        if not gcode_dict:
+            return
+
+        from cura.CuraApplication import CuraApplication
+        active_plate = CuraApplication.getInstance().getMultiBuildPlateModel().activeBuildPlate
+        gcode_list = gcode_dict.get(active_plate)
+        if not gcode_list:
+            return
+
+        if gcode_list[0] and ";NON-PLANAR PROCESSED" in gcode_list[0]:
+            return
+
+        analysis_result = self._getActiveAnalysisResult()
+        if analysis_result is None or analysis_result.height_map is None:
+            Logger.log("d", "No non-planar analysis available for G-code bending")
+            return
+
+        if analysis_result.safe_map is None or not numpy.any(analysis_result.safe_map):
+            Logger.log("d", "No safe non-planar regions for G-code bending")
+            return
+
+        settings = self._getSettings()
+        try:
+            t0 = time.time()
+            modified_gcode = self._bendGCode(gcode_list, analysis_result, settings)
+            gcode_dict[active_plate] = modified_gcode
+            setattr(scene, "gcode_dict", gcode_dict)
+            Logger.log("i", "Non-planar G-code bending completed in %.2fs", time.time() - t0)
+        except Exception:
+            Logger.logException("e", "Failed to apply non-planar G-code bending after slicing")
 
     def _onWriteStarted(self, output_device) -> None:
         """Post-process G-code before export: apply non-planar bending."""
@@ -665,12 +718,22 @@ class NonPlanarSlicingExtension(QObject, Extension):
         """Called when ProcessSlicedLayersJob finishes building the layer mesh.
 
         At this point, the LayerData mesh is fully built and we can
-        modify its vertices for non-planar preview.
+        modify its vertices for non-planar preview.  We also bend the
+        G-code in-place so the preview and any subsequent export both
+        reflect non-planar changes.
         """
         if not self._isEnabled():
             return
         # Slight delay to ensure the decorator is set on the scene node.
-        QTimer.singleShot(100, self._modifyLayerData)
+        QTimer.singleShot(100, self._applyNonPlanarPostProcessing)
+
+    def _applyNonPlanarPostProcessing(self) -> None:
+        """Apply both layer data modification and G-code bending after slicing."""
+        # 1. Modify layer data for SimulationView preview
+        self._modifyLayerData()
+
+        # 2. Bend G-code in-place so preview and export match
+        self._bendGCodeInPlace()
 
     def _modifyLayerData(self) -> None:
         """Modify the built layer data mesh for non-planar preview."""
@@ -802,7 +865,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     continue
                 cached = self._analysis_cache.get(id(node))
                 if cached is not None:
-                    _mesh_id, result = cached
+                    _key, result = cached
                     self._updateOverlayForNode(node, result, settings)
         finally:
             self._updating_overlays = False
@@ -825,10 +888,31 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 continue
             cached = self._analysis_cache.get(id(node))
             if cached is not None:
-                _mesh_id, result = cached
+                _key, result = cached
                 if result.height_map is not None:
                     return result
         return None
+
+    @staticmethod
+    def _meshFingerprint(mesh_data) -> Optional[tuple]:
+        """Compute a stable fingerprint for a MeshData object.
+
+        Returns a tuple of (vertex_count, hash_sample) that stays the
+        same as long as the actual geometry is unchanged, even if Cura
+        recreates the MeshData wrapper.
+        """
+        if mesh_data is None:
+            return None
+        verts = mesh_data.getVertices()
+        if verts is None:
+            return None
+        n = len(verts)
+        # Sample a few vertices for a fast hash (full hash is too slow
+        # for large meshes).  Checking count + a few values catches
+        # any real geometry change.
+        sample_indices = [0, n // 4, n // 2, 3 * n // 4, n - 1] if n >= 5 else list(range(n))
+        sample = tuple(float(verts[i, j]) for i in sample_indices for j in range(3))
+        return (n, hash(sample))
 
     def _showAnalysisMessage(self, region_count: int, total_area: float) -> None:
         """Show a message about the analysis results."""

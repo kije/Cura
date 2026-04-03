@@ -170,12 +170,16 @@ class LayerDataModifier:
 
         flat_types = types.ravel() if types.ndim > 1 else types
         n_points = data.shape[0]
+        n_types = len(flat_types)
 
         # Build extrusion mask (skip travel moves).
+        # Note: _types and _data can differ in length for some polygons
+        # (e.g. first point has no type). Use the shorter length safely.
         extrusion_mask = numpy.ones(n_points, dtype=bool)
-        if _TRAVEL_TYPES:
+        if _TRAVEL_TYPES and n_types > 0:
+            usable = min(n_points, n_types)
             for travel_type in _TRAVEL_TYPES:
-                extrusion_mask &= flat_types[:n_points] != travel_type
+                extrusion_mask[:usable] &= flat_types[:usable] != travel_type
 
         modified = 0
 
