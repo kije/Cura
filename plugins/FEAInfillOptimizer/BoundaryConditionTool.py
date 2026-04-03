@@ -5,7 +5,7 @@ from typing import Optional
 
 import numpy
 
-from PyQt6.QtCore import Qt, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from UM.Application import Application
@@ -29,15 +29,10 @@ MODE_FORCE = "force"
 class BoundaryConditionTool(Tool):
     """Interactive tool for defining FEA boundary conditions on mesh faces.
 
-    Users click on model faces to mark them as fixed (Dirichlet BC) or
-    to apply force vectors (Neumann BC). The tool stores BC data via
-    FEABoundaryConditionDecorator on the scene node.
+    NOTE: UM.Tool is NOT a QObject — do not use pyqtSignal/pyqtSlot.
+    State changes are communicated to QML via ``self.propertyChanged``
+    (a UM.Signal) and ``setExposedProperties``.
     """
-
-    modeChanged = pyqtSignal()
-    forceVectorChanged = pyqtSignal()
-    selectionSummaryChanged = pyqtSignal()
-    currentSelectionChanged = pyqtSignal()
 
     def __init__(self, extension=None) -> None:
         super().__init__()
@@ -58,7 +53,7 @@ class BoundaryConditionTool(Tool):
                                   "CurrentSelectionCount", "SelectionSummary",
                                   "ConfirmForceGroup", "ClearAllBCs")
 
-    # -- Properties exposed to QML --
+    # -- Properties exposed to QML via UM.Controller.properties --
 
     def getMode(self) -> str:
         return self._mode
@@ -67,28 +62,27 @@ class BoundaryConditionTool(Tool):
         if mode in (MODE_FIXED, MODE_FORCE):
             self._mode = mode
             self._current_face_selection.clear()
-            self.currentSelectionChanged.emit()
             self.propertyChanged.emit()
 
     def getForceX(self) -> float:
         return self._force_x
 
     def setForceX(self, value: float) -> None:
-        self._force_x = value
+        self._force_x = float(value)
         self.propertyChanged.emit()
 
     def getForceY(self) -> float:
         return self._force_y
 
     def setForceY(self, value: float) -> None:
-        self._force_y = value
+        self._force_y = float(value)
         self.propertyChanged.emit()
 
     def getForceZ(self) -> float:
         return self._force_z
 
     def setForceZ(self, value: float) -> None:
-        self._force_z = value
+        self._force_z = float(value)
         self.propertyChanged.emit()
 
     def getCurrentSelectionCount(self) -> int:
@@ -115,16 +109,16 @@ class BoundaryConditionTool(Tool):
     def getConfirmForceGroup(self) -> bool:
         return False
 
-    def setConfirmForceGroup(self, value: bool) -> None:
+    def setConfirmForceGroup(self, value) -> None:
         if value:
-            self.confirmForceGroup()
+            self._confirmForceGroup()
 
     def getClearAllBCs(self) -> bool:
         return False
 
-    def setClearAllBCs(self, value: bool) -> None:
+    def setClearAllBCs(self, value) -> None:
         if value:
-            self.clearAllBCs()
+            self._clearAllBCs()
 
     # -- Event handling --
 
@@ -186,7 +180,6 @@ class BoundaryConditionTool(Tool):
                         self._current_face_selection.append(face_index)
                 else:
                     self._current_face_selection = [face_index]
-                self.currentSelectionChanged.emit()
                 self.propertyChanged.emit()
 
             return True
@@ -236,10 +229,9 @@ class BoundaryConditionTool(Tool):
             return decorator
         return bc
 
-    # -- QML Slots --
+    # -- Internal actions (triggered by exposed property setters) --
 
-    @pyqtSlot()
-    def confirmForceGroup(self) -> None:
+    def _confirmForceGroup(self) -> None:
         """Confirm the current face selection as a force group."""
         if not self._current_face_selection:
             return
@@ -253,11 +245,9 @@ class BoundaryConditionTool(Tool):
         bc.addForceGroup(list(self._current_face_selection), force)
 
         self._current_face_selection.clear()
-        self.currentSelectionChanged.emit()
         self.propertyChanged.emit()
 
-    @pyqtSlot()
-    def clearAllBCs(self) -> None:
+    def _clearAllBCs(self) -> None:
         """Clear all boundary conditions on the selected model."""
         selected = Selection.getSelectedObject(0)
         if selected is None:
@@ -266,10 +256,8 @@ class BoundaryConditionTool(Tool):
         if bc is not None:
             bc.clearAll()
         self._current_face_selection.clear()
-        self.currentSelectionChanged.emit()
         self.propertyChanged.emit()
 
-    @pyqtSlot(int)
     def deleteForceGroup(self, index: int) -> None:
         selected = Selection.getSelectedObject(0)
         if selected is None:
@@ -279,7 +267,6 @@ class BoundaryConditionTool(Tool):
             bc.removeForceGroup(index)
             self.propertyChanged.emit()
 
-    @pyqtSlot()
     def clearFixedFaces(self) -> None:
         selected = Selection.getSelectedObject(0)
         if selected is None:

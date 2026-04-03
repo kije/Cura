@@ -19,25 +19,29 @@ UM.Dialog
 
     property var manager  // bound to FEAInfillExtension Python object from caller
     property var sceneNodeModel: []
+    backgroundColor: UM.Theme.getColor("main_background")
 
     Component.onCompleted:
     {
         if (manager) sceneNodeModel = manager.getSceneNodes()
     }
 
-    UM.I18nCatalog { id: catalog; name: "cura" }
-
-    // ── Root scroll area ────────────────────────────────────────────────────
-    ScrollView
+    Item
     {
         anchors.fill: parent
-        anchors.margins: UM.Theme.getSize("default_margin").width
-        clip: true
-        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        ColumnLayout
+        UM.I18nCatalog { id: catalog; name: "cura" }
+
+        ScrollView
         {
-            width: feaDialog.width - 2 * UM.Theme.getSize("default_margin").width
+            anchors.fill: parent
+            anchors.margins: UM.Theme.getSize("default_margin").width
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+            ColumnLayout
+            {
+                width: feaDialog.width - 2 * UM.Theme.getSize("default_margin").width
             spacing: UM.Theme.getSize("default_margin").height
 
             // ── Dependency warning banner ────────────────────────────────────
@@ -402,5 +406,6 @@ UM.Dialog
             // Bottom spacer
             Item { height: UM.Theme.getSize("default_margin").height }
         }
-    }
+        }  // ScrollView
+    }  // Item
 }
