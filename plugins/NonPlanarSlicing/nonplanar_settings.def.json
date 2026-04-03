@@ -44,10 +44,10 @@
         },
         "nonplanar_layer_count": {
             "label": "Non-Planar Layer Count",
-            "description": "Number of layers below each candidate surface to apply non-planar bending to. More layers produce smoother transitions but increase processing time and collision risk.",
+            "description": "Number of layers below each candidate surface to apply non-planar bending to. Set to 0 for automatic (computes the necessary count from the surface height variation and layer height). More layers produce smoother transitions but increase processing time and collision risk.",
             "type": "int",
-            "default_value": 5,
-            "minimum_value": "1",
+            "default_value": 0,
+            "minimum_value": "0",
             "maximum_value": "20",
             "maximum_value_warning": "10",
             "enabled": "nonplanar_enabled",

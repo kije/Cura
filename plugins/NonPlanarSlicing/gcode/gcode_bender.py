@@ -235,7 +235,7 @@ def bend_gcode(
 
     # Extract settings with defaults.
     layer_height = float(settings.get("layer_height", 0.2))
-    nonplanar_layer_count = int(settings.get("nonplanar_layer_count", 3))
+    nonplanar_layer_count = int(settings.get("nonplanar_layer_count", 0))
     max_angle_deg = float(settings.get("max_angle_deg", 45.0))
     flow_compensation = bool(settings.get("flow_compensation", True))
     feedrate_compensation = bool(settings.get("feedrate_compensation", True))
@@ -263,6 +263,27 @@ def bend_gcode(
         return gcode_list
 
     max_layer = parsed.total_layers - 1
+
+    # Auto-compute layer count if set to 0 (automatic mode).
+    # Derive from the maximum Z variation in the height map.
+    if nonplanar_layer_count == 0 and layer_height > 0.0:
+        try:
+            candidate_z = getattr(height_map, "candidate_z_values", None)
+            if candidate_z is not None:
+                finite_z = candidate_z[np.isfinite(candidate_z)]
+                if finite_z.size > 0:
+                    max_z_delta = float(np.max(finite_z) - np.min(finite_z))
+                    nonplanar_layer_count = max(1, int(math.ceil(max_z_delta / layer_height)) + 1)
+                    nonplanar_layer_count = min(nonplanar_layer_count, 20)  # clamp
+                    logger.info(
+                        "Auto layer count: z_delta=%.2f mm, layer_height=%.3f mm → %d layers",
+                        max_z_delta, layer_height, nonplanar_layer_count,
+                    )
+        except Exception:
+            logger.warning("Failed to auto-compute layer count; falling back to 5")
+
+        if nonplanar_layer_count == 0:
+            nonplanar_layer_count = 5
 
     # In "all_surfaces" mode, all layers are candidates — eligibility
     # is determined per-move based on proximity to the surface height
@@ -432,9 +453,16 @@ def bend_gcode(
             # Flow compensation.
             final_e_delta = e_delta
             if flow_compensation and layer_height > 0.0:
+                # Compute the Z of the layer directly below at this XY.
+                # For conformal layers that follow the surface contour,
+                # the layer below sits at: surface_z - (layers_from_top+1) * layer_height.
+                if not math.isnan(surface_z):
+                    layer_below_z = surface_z - (layers_from_top + 1) * layer_height
+                else:
+                    layer_below_z = None
                 actual_lh = compute_actual_layer_height(
                     bent_z,
-                    sub_prev_bent_z,  # Use actual previous bent Z.
+                    layer_below_z,
                     layer_height,
                 )
                 # Path length ratio: the bent 3D path is longer than

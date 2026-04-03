@@ -15,7 +15,10 @@ Cura's STL reader are interpreted directly (no axis swap). So we output
 vertices in Y-up format: X = left/right, Y = height, Z = depth.
 
 Internally, geometry functions work in "design space" (Z-up) and we convert
-to Y-up at write time via ``to_yup()``.
+**Coordinate convention**: Cura's STL reader (Uranium) internally converts
+Z-up STL coordinates to its Y-up scene space. Therefore, STL files should
+be written in standard Z-up format: X = left/right, Y = depth, Z = height.
+No manual axis conversion is needed.
 """
 
 import struct
@@ -24,23 +27,12 @@ import numpy as np
 from pathlib import Path
 
 
-def to_yup(point):
-    """Convert a point from Z-up design space to Y-up STL/Cura space.
-
-    Z-up: (x, y, z)  where z = height
-    Y-up: (x, z, -y) where y = height
-
-    Cura scene convention: X = left/right, Y = up, Z = -depth.
-    """
-    x, y, z = point
-    return (x, z, -y)
-
-
 def write_binary_stl(filepath: str, triangles: list[tuple]) -> None:
     """Write triangles to a binary STL file.
 
     Each triangle is (normal, v0, v1, v2) where each is (x, y, z) in
-    Z-up design space.  We convert to Y-up at write time.
+    standard Z-up coordinate space.  Cura's STL reader handles the
+    conversion to Y-up scene space internally.
     """
     with open(filepath, "wb") as f:
         # 80-byte header
@@ -48,17 +40,12 @@ def write_binary_stl(filepath: str, triangles: list[tuple]) -> None:
         # Number of triangles
         f.write(struct.pack("<I", len(triangles)))
         for normal, v0, v1, v2 in triangles:
-            # Convert from Z-up design space to Y-up STL space
-            n_yup = to_yup(normal)
-            v0_yup = to_yup(v0)
-            v1_yup = to_yup(v1)
-            v2_yup = to_yup(v2)
             # Normal vector
-            f.write(struct.pack("<3f", *n_yup))
+            f.write(struct.pack("<3f", *normal))
             # Vertices
-            f.write(struct.pack("<3f", *v0_yup))
-            f.write(struct.pack("<3f", *v1_yup))
-            f.write(struct.pack("<3f", *v2_yup))
+            f.write(struct.pack("<3f", *v0))
+            f.write(struct.pack("<3f", *v1))
+            f.write(struct.pack("<3f", *v2))
             # Attribute byte count
             f.write(struct.pack("<H", 0))
 
@@ -146,15 +133,12 @@ def make_ramp(x0: float, y0: float, width: float, depth: float,
     triangles.append((n, bl, bbl, bbr))
     triangles.append((n, bl, bbr, br))
 
-    # Front face (Y=y0, vertical)
-    n = (0, -1, 0)
-    triangles.append((n, bl, br, br))  # degenerate — front is just an edge
-    # Actually front face is just the edge bl-br at z=0, no face needed
+    # Front face: at Y=y0, just the edge bl-br at z=0, no face needed (degenerate line).
 
-    # Back face (Y=y0+depth, vertical rectangle)
-    n = _compute_normal(bbl, bbr, tr)
-    triangles.append((n, bbl, bbr, tr))
-    triangles.append((n, bbl, tr, tl))
+    # Back face (Y=y0+depth, vertical rectangle) — normal should point +Y (outward)
+    n = _compute_normal(bbl, tr, bbr)
+    triangles.append((n, bbl, tr, bbr))
+    triangles.append((n, bbl, tl, tr))
 
     # Left side (X=x0, triangle)
     n = _compute_normal(bl, tl, bbl)

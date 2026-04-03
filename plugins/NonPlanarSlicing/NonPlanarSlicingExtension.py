@@ -8,6 +8,7 @@ import os
 import collections
 import logging
 import time
+import weakref
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 import numpy
@@ -67,6 +68,21 @@ HEIGHTMAP_RESOLUTION = 0.5  # mm
 SEGMENT_LENGTH = 1.0  # mm, max G-code segment length for subdivision
 SAFETY_MARGIN = 1.0  # mm, subtracted from nozzle clearance
 
+# Settings whose changes should invalidate the analysis cache and trigger
+# re-analysis.  These affect candidate detection, height maps, or collision
+# checking — NOT settings that only affect G-code output.
+SETTINGS_INVALIDATE_ANALYSIS = frozenset([
+    SETTING_MAX_ANGLE,
+    SETTING_SURFACE_MODE,
+    SETTING_NOZZLE_CLEARANCE,
+    SETTING_MIN_REGION_AREA,
+    SETTING_BLEND_DISTANCE,
+    MACHINE_HEAD_POLYGON,
+    MACHINE_GANTRY_HEIGHT,
+    MACHINE_NOZZLE_EXPANSION_ANGLE,
+    MACHINE_NOZZLE_SIZE,
+])
+
 
 class NonPlanarSlicingExtension(QObject, Extension):
     """Main extension class for the Non-Planar Slicing plugin.
@@ -90,11 +106,12 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
         self._overlay_visible = True
 
-        # Analysis results: maps CuraSceneNode → _AnalysisResult.
-        # We use a list of (node_weakref, result) to avoid preventing GC.
-        self._analysis_results: Dict[int, _AnalysisResult] = {}
-        # Set of node ids that have been analyzed (prevents re-analysis)
-        self._analyzed_node_ids: set = set()
+        # Analysis results: maps node weakref → _AnalysisResult.
+        # Using a list of (weakref, result) pairs allows automatic cleanup
+        # when nodes are garbage collected.  No separate ID set needed.
+        self._analysis_entries: List[tuple] = []  # [(weakref.ref(node), _AnalysisResult), ...]
+        # Nodes we have connected transformationChanged on
+        self._transform_watched_nodes: List[weakref.ref] = []
 
         # Overlay manager
         self._overlay: Optional[NonPlanarRegionOverlay] = None
@@ -105,6 +122,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
         # Guard against re-entrant scene change signals
         self._updating_overlays = False
+
+        # Track the currently connected global stack to avoid duplicate signal connections
+        self._connected_stack = None
 
         # Load settings definitions from JSON
         self._loadSettingsDefinitions()
@@ -282,24 +302,48 @@ class NonPlanarSlicingExtension(QObject, Extension):
     def _onGlobalStackChanged(self) -> None:
         """Called when the global container stack changes (printer switch, etc.).
 
-        Connects to propertyChanged on the new stack so we detect when
-        the user toggles ``nonplanar_enabled``.
+        Disconnects from the old stack and connects to the new one to avoid
+        duplicate signal connections.
         """
+        # Disconnect from old stack
+        if self._connected_stack is not None:
+            try:
+                self._connected_stack.propertyChanged.disconnect(self._onSettingChanged)
+            except Exception:
+                pass
+
         stack = self._getGlobalStack()
+        self._connected_stack = stack
         if stack is not None:
-            # propertyChanged fires for ANY setting change; we filter in the handler.
             stack.propertyChanged.connect(self._onSettingChanged)
 
+        # Printer change means machine settings (head polygon, gantry height) changed.
+        # Invalidate analysis that depends on collision checking.
+        if self._analysis_entries:
+            Logger.log("d", "Printer changed — invalidating non-planar analysis cache")
+            self._forceReanalyze()
+
     def _onSettingChanged(self, key: str, property_name: str) -> None:
-        """Called when any setting changes.  We only care about nonplanar_enabled."""
-        if key != SETTING_ENABLED or property_name != "value":
+        """Called when any setting changes.
+
+        Handles:
+        - ``nonplanar_enabled``: toggle analysis on/off
+        - Analysis-affecting settings: invalidate cache and re-analyze
+        """
+        if property_name != "value":
             return
-        if self._isEnabled():
-            Logger.log("d", "Non-planar slicing enabled — scheduling analysis")
-            QTimer.singleShot(300, self._runAnalysis)
-        else:
-            Logger.log("d", "Non-planar slicing disabled — clearing overlays")
-            self._clearOverlays()
+
+        if key == SETTING_ENABLED:
+            if self._isEnabled():
+                Logger.log("d", "Non-planar slicing enabled — scheduling analysis")
+                QTimer.singleShot(300, self._runAnalysis)
+            else:
+                Logger.log("d", "Non-planar slicing disabled — clearing overlays")
+                self._clearOverlays()
+        elif key in SETTINGS_INVALIDATE_ANALYSIS:
+            if self._isEnabled() and self._analysis_entries:
+                Logger.log("d", "Setting '%s' changed — re-analyzing", key)
+                QTimer.singleShot(300, self._forceReanalyze)
 
     def _onFileLoaded(self, file_name: str) -> None:
         """Called when a file finishes loading. Triggers analysis on new models.
@@ -318,8 +362,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
     def _runAnalysis(self) -> None:
         """Run mesh analysis on all sliceable nodes in the scene.
 
-        Only analyzes nodes not already in ``_analyzed_node_ids``.
-        Analysis runs once per model, not on every scene change.
+        Only analyzes nodes that don't already have a cached result.
+        Analysis runs once per model; cache is invalidated by
+        setting/transform/removal changes.
         """
         if not self._isEnabled():
             self._clearOverlays()
@@ -331,17 +376,18 @@ class NonPlanarSlicingExtension(QObject, Extension):
         total_candidate_area = 0.0
         total_regions = 0
 
+        # Prune dead weakrefs first
+        self._pruneDeadEntries()
+
         for node in DepthFirstIterator(scene.getRoot()):
             if not self._isSliceableNode(node):
                 continue
 
-            node_id = id(node)
-
-            # Skip nodes that have already been analyzed
-            if node_id in self._analyzed_node_ids:
-                result = self._analysis_results.get(node_id)
-                if result is not None and result.candidate_regions is not None:
-                    for region in result.candidate_regions.regions:
+            # Check if already analyzed (by identity, not id)
+            existing = self._getResultForNode(node)
+            if existing is not None:
+                if existing.candidate_regions is not None:
+                    for region in existing.candidate_regions.regions:
                         total_candidate_area += region.total_area
                         total_regions += 1
                     analyzed_count += 1
@@ -351,13 +397,15 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
             result = self._analyzeNode(node, settings)
             if result is not None:
-                self._analysis_results[node_id] = result
-                self._analyzed_node_ids.add(node_id)
+                self._analysis_entries.append((weakref.ref(node), result))
                 analyzed_count += 1
                 if result.candidate_regions is not None:
                     for region in result.candidate_regions.regions:
                         total_candidate_area += region.total_area
                         total_regions += 1
+
+                # Watch for transform changes on this node
+                self._watchNodeTransform(node)
 
                 # Update overlay visualization
                 self._updating_overlays = True
@@ -370,6 +418,56 @@ class NonPlanarSlicingExtension(QObject, Extension):
             self._showAnalysisMessage(total_regions, total_candidate_area)
         elif analyzed_count > 0:
             Logger.log("d", "Non-planar analysis: no candidate regions found")
+
+    def _getResultForNode(self, node) -> Optional[_AnalysisResult]:
+        """Look up cached analysis for a node (by identity, not id)."""
+        for ref, result in self._analysis_entries:
+            n = ref()
+            if n is node:
+                return result
+        return None
+
+    def _removeResultForNode(self, node) -> None:
+        """Remove the cached result for a specific node."""
+        self._analysis_entries = [
+            (ref, res) for ref, res in self._analysis_entries
+            if ref() is not None and ref() is not node
+        ]
+
+    def _pruneDeadEntries(self) -> None:
+        """Remove entries whose node weakrefs have died (node removed from scene)."""
+        before = len(self._analysis_entries)
+        self._analysis_entries = [
+            (ref, res) for ref, res in self._analysis_entries if ref() is not None
+        ]
+        self._transform_watched_nodes = [
+            ref for ref in self._transform_watched_nodes if ref() is not None
+        ]
+        pruned = before - len(self._analysis_entries)
+        if pruned:
+            Logger.log("d", "Pruned %d stale analysis cache entries", pruned)
+
+    def _watchNodeTransform(self, node) -> None:
+        """Connect to a node's transformationChanged signal (once per node)."""
+        for ref in self._transform_watched_nodes:
+            if ref() is node:
+                return  # Already watching
+        try:
+            node.transformationChanged.connect(self._onNodeTransformChanged)
+            self._transform_watched_nodes.append(weakref.ref(node))
+        except Exception:
+            pass
+
+    def _onNodeTransformChanged(self, node) -> None:
+        """Called when a watched node's transform changes (move/rotate/scale).
+
+        Invalidates the analysis for this node so it will be re-analyzed
+        with the new transform.
+        """
+        self._removeResultForNode(node)
+        if self._isEnabled():
+            Logger.log("d", "Node '%s' transformed — scheduling re-analysis", node.getName())
+            QTimer.singleShot(500, self._runAnalysis)
 
     def _isSliceableNode(self, node) -> bool:
         """Check if a node is a sliceable mesh."""
@@ -857,22 +955,18 @@ class NonPlanarSlicingExtension(QObject, Extension):
         if not self._overlay_visible:
             return
         settings = self._getSettings()
-        scene = Application.getInstance().getController().getScene()
         self._updating_overlays = True
         try:
-            for node in DepthFirstIterator(scene.getRoot()):
-                if not self._isSliceableNode(node):
-                    continue
-                result = self._analysis_results.get(id(node))
-                if result is not None:
+            for ref, result in self._analysis_entries:
+                node = ref()
+                if node is not None and self._isSliceableNode(node):
                     self._updateOverlayForNode(node, result, settings)
         finally:
             self._updating_overlays = False
 
     def _forceReanalyze(self) -> None:
         """Clear cache and re-run analysis on all models."""
-        self._analysis_results.clear()
-        self._analyzed_node_ids.clear()
+        self._analysis_entries.clear()
         self._clearOverlays()
         self._runAnalysis()
 
@@ -882,11 +976,12 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
     def _getActiveAnalysisResult(self) -> Optional[_AnalysisResult]:
         """Get the analysis result for the active/visible scene nodes."""
+        self._pruneDeadEntries()
         scene = Application.getInstance().getController().getScene()
         for node in DepthFirstIterator(scene.getRoot()):
             if not self._isSliceableNode(node):
                 continue
-            result = self._analysis_results.get(id(node))
+            result = self._getResultForNode(node)
             if result is not None and result.height_map is not None:
                 return result
         return None
