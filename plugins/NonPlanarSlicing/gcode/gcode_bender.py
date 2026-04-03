@@ -344,12 +344,16 @@ def bend_gcode(
 
         region_original_moves[current_region_id].append(move)
 
-        # Subdivide the move.
+        # Always subdivide using absolute E values for correct
+        # interpolation across sub-segments.
+        move_e_abs = move.abs_e if not is_relative else (
+            prev_abs_e + (move.e if move.e is not None else 0.0)
+        )
         sub_points = subdivide_segment(
             prev_x, prev_y, prev_z,
-            prev_abs_e if not is_relative else 0.0,
+            prev_abs_e,
             move.abs_x, move.abs_y, move.abs_z,
-            move.abs_e if not is_relative else (move.e if move.e is not None else 0.0),
+            move_e_abs,
             current_feedrate if current_feedrate > 0 else move.f,
             segment_length,
         )
@@ -361,9 +365,10 @@ def bend_gcode(
         sub_prev_x = prev_x
         sub_prev_y = prev_y
         sub_prev_z = prev_z
+        sub_prev_bent_z = prev_z  # Track bent Z for layer height estimation.
         sub_prev_abs_e = prev_abs_e
 
-        for seg_idx, (sx, sy, sz, se, sf) in enumerate(sub_points):
+        for seg_idx, (sx, sy, sz, se_abs, sf) in enumerate(sub_points):
             # Look up surface Z from height map.
             surface_z = height_map.interpolate(sx, sy)
 
@@ -380,24 +385,34 @@ def bend_gcode(
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor
 
+            # Compute E delta for this sub-segment.
+            e_delta = se_abs - sub_prev_abs_e
+
             # Flow compensation.
-            final_e = se
+            final_e_delta = e_delta
             if flow_compensation and layer_height > 0.0:
                 actual_lh = compute_actual_layer_height(
                     bent_z,
-                    bent_z - layer_height,  # Approximate layer below Z.
+                    sub_prev_bent_z,  # Use actual previous bent Z.
                     layer_height,
                 )
-                final_e = compensate_flow(
-                    se, actual_lh, layer_height, is_relative, sub_prev_abs_e,
+                # Always compensate in relative terms (delta), then
+                # reconstruct absolute or relative as needed.
+                final_e_delta = compensate_flow(
+                    e_delta, actual_lh, layer_height,
+                    is_relative=True,  # Operate on delta.
                 )
+
+            # Compute final absolute E and the output E value.
+            final_abs_e = sub_prev_abs_e + final_e_delta
+            output_e = final_e_delta if is_relative else final_abs_e
 
             # Feedrate compensation.
             final_f = sf
             if feedrate_compensation and sf is not None and sf > 0.0:
                 dx = sx - sub_prev_x
                 dy = sy - sub_prev_y
-                dz = bent_z - sub_prev_z
+                dz = bent_z - sub_prev_bent_z
                 final_f = adjust_feedrate(sf, dx, dy, dz)
 
             # Build the new move.
@@ -406,12 +421,12 @@ def bend_gcode(
                 x=sx,
                 y=sy,
                 z=bent_z,
-                e=final_e,
+                e=output_e,
                 f=final_f,
                 abs_x=sx,
                 abs_y=sy,
                 abs_z=bent_z,
-                abs_e=final_e if not is_relative else sub_prev_abs_e + final_e,
+                abs_e=final_abs_e,
                 line_type=move.line_type,
                 layer_number=move.layer_number,
                 original_line=move.original_line,
@@ -424,9 +439,9 @@ def bend_gcode(
 
             sub_prev_x = sx
             sub_prev_y = sy
-            sub_prev_z = bent_z
-            if not is_relative:
-                sub_prev_abs_e = final_e
+            sub_prev_z = sz
+            sub_prev_bent_z = bent_z
+            sub_prev_abs_e = final_abs_e
 
     # Close any open region.
     if in_region:
@@ -455,19 +470,6 @@ def bend_gcode(
 
     # Apply reversions: replace region moves with originals.
     if reverted_regions:
-        new_modified: list[GCodeMove] = []
-        for rid in sorted(region_start_indices.keys()):
-            start = region_start_indices[rid]
-            end = region_end_indices.get(rid, len(modified_moves))
-
-            # Add any moves before this region (between end of previous
-            # region and start of this one).
-            # This is handled by iterating through all moves in order.
-            pass
-
-        # Simpler approach: rebuild from scratch.
-        new_modified = []
-        # Track which ranges to replace.
         revert_ranges: dict[int, tuple[int, int]] = {}
         for rid in reverted_regions:
             revert_ranges[rid] = (
@@ -480,6 +482,7 @@ def bend_gcode(
         for rid, (s, e) in revert_ranges.items():
             reverted_indices.update(range(s, e))
 
+        new_modified: list[GCodeMove] = []
         i = 0
         while i < len(modified_moves):
             # Check if this index starts a reverted region.
