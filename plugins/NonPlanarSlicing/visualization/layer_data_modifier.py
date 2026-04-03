@@ -422,15 +422,7 @@ class LayerDataModifier:
         # Blend between original height and non-planar target.
         bent_z = original_height + blend * (target_z - original_height)
 
-        # Safety clamp: don't let a layer deviate more than
-        # max_path_deviation from its conformal target position.
-        conformal_deviation = abs(bent_z - target_z)
-        if conformal_deviation > self._max_z_displacement and blend > 0.5:
-            bent_z = target_z + math.copysign(
-                self._max_z_displacement, bent_z - target_z
-            )
-
-        # Don't go below zero (bed surface).
+        # Safety: don't go below zero (bed surface).
         if bent_z < 0.0:
             bent_z = max(0.05, original_height)
 

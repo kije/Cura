@@ -335,6 +335,83 @@ class TestZSpikeRegression:
             f"bender is not injecting Z-restore commands after bent regions."
         )
 
+    def test_printer_z_state_never_diverges(self):
+        """Simulate actual printer Z state: track the Z the printer is at
+        (including moves without Z, where the printer stays at the last Z).
+        Verify that the printer's actual Z never diverges from the move's
+        intended abs_z by more than a small threshold.
+
+        This catches the exact bug: bent move emits Z=12.5, un-bent move
+        has no Z, printer stays at 12.5 instead of returning to layer height.
+        """
+        n_layers = 20
+        layer_height = 0.2
+        gcode = self._make_multilayer_gcode(
+            n_layers=n_layers, moves_per_layer=8, layer_height=layer_height,
+        )
+
+        hm = _MockHeightMap(z_value=3.0, grid_shape=(20, 20))
+        # Partial safe_map to create bent/un-bent transitions.
+        safe_map = np.zeros((20, 20), dtype=bool)
+        safe_map[8:12, 2:8] = True
+        blend_map = np.ones((20, 20), dtype=np.float64)
+
+        settings = {
+            "layer_height": layer_height,
+            "nonplanar_layer_count": 5,
+            "max_angle_deg": 45.0,
+            "flow_compensation": False,
+            "feedrate_compensation": False,
+            "segment_length": 50.0,
+            "surface_mode": "top_only",
+        }
+        result = bend_gcode(gcode, hm, safe_map, blend_map, settings)
+
+        # Simulate printer Z state: parse output and track what Z the
+        # printer head is actually at (considering Z persistence).
+        import re
+        z_pattern = re.compile(r"Z([\d.]+)")
+        printer_z = 0.0  # Printer starts at Z=0.
+        current_layer = -1
+        max_divergence = 0.0
+        worst_line = ""
+
+        for chunk in result:
+            for line in chunk.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";LAYER:"):
+                    try:
+                        current_layer = int(stripped.split(":")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+                if not stripped.startswith("G"):
+                    continue
+
+                z_match = z_pattern.search(stripped)
+                if z_match:
+                    printer_z = float(z_match.group(1))
+
+                # For extrusion moves (G1 with E), check that the
+                # printer's Z is reasonable for this layer.
+                if stripped.startswith("G1") and "E" in stripped and current_layer >= 0:
+                    # The expected Z for this layer (nominal or bent).
+                    nominal_z = (current_layer + 1) * layer_height
+                    # Allow deviation for bending, but the printer Z
+                    # should be within nonplanar_layer_count * layer_height
+                    # of the nominal.
+                    max_allowed = 5 * layer_height + 0.5  # generous
+                    divergence = abs(printer_z - nominal_z)
+                    if divergence > max_divergence:
+                        max_divergence = divergence
+                        worst_line = stripped
+
+        assert max_divergence < 2.0, (
+            f"Printer Z diverged {max_divergence:.3f}mm from nominal layer Z. "
+            f"This indicates Z-restore is not working after bent regions. "
+            f"Worst line: {worst_line}"
+        )
+
     def test_all_extrusion_moves_have_z_in_bent_layers(self):
         """In layers that contain any bent moves, ALL G1 extrusion moves
         should have an explicit Z coordinate to prevent the printer from

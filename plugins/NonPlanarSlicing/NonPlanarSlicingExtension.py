@@ -339,7 +339,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "max_flow_multiplier": float(self._getSetting(SETTING_MAX_FLOW_MULTIPLIER, 2.0)),
             "min_flow_multiplier": float(self._getSetting(SETTING_MIN_FLOW_MULTIPLIER, 0.5)),
             # Line type filtering and path quality
-            "nonplanar_line_types": str(self._getSetting(SETTING_LINE_TYPES, "skin_walls")),
+            "nonplanar_line_types": str(self._getSetting(SETTING_LINE_TYPES, "all")),
             "max_path_deviation": float(self._getSetting(SETTING_MAX_PATH_DEVIATION, 0.4)),
             "min_region_width": float(self._getSetting(SETTING_MIN_REGION_WIDTH, 2.0)),
             # Machine settings (read-only from printer profile)
@@ -777,7 +777,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "nozzle_clearance": settings.get("nozzle_clearance_mm", 8.0),
             "max_flow_multiplier": settings.get("max_flow_multiplier", 2.0),
             "min_flow_multiplier": settings.get("min_flow_multiplier", 0.5),
-            "nonplanar_line_types": settings.get("nonplanar_line_types", "skin_walls"),
+            "nonplanar_line_types": settings.get("nonplanar_line_types", "all"),
             "max_path_deviation": settings.get("max_path_deviation", 0.4),
             "nozzle_size": settings.get("nozzle_size_mm", 0.4),
         }

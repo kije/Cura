@@ -251,7 +251,7 @@ def bend_gcode(
     min_flow_multiplier = float(settings.get("min_flow_multiplier", 0.5))
 
     # Line type filtering: "skin_walls" skips infill, "all" bends everything.
-    nonplanar_line_types = str(settings.get("nonplanar_line_types", "skin_walls"))
+    nonplanar_line_types = str(settings.get("nonplanar_line_types", "all"))
     skip_line_types = set(_NEVER_BEND_LINE_TYPES)
     if nonplanar_line_types == "skin_walls":
         skip_line_types |= _INFILL_LINE_TYPES
@@ -364,13 +364,7 @@ def bend_gcode(
     # Track current feedrate.
     current_feedrate = 0.0
 
-    # Track whether the last emitted Z differs from the current layer Z.
-    # When a bent region ends, we must inject an explicit Z on the next
-    # move to restore the printer to the correct height.  Without this,
-    # the printer stays at the last bent Z because most G1 lines don't
-    # include a Z coordinate.
-    _last_emitted_z: float | None = None  # Last Z value written to output.
-    _diag_z_restored = 0  # Count of moves where we injected a Z restore.
+    _diag_z_restored = 0  # Count of moves where Z-restore was injected (post-reversion pass).
 
     # Diagnostic counters.
     _diag_not_target = 0
@@ -450,42 +444,7 @@ def bend_gcode(
                 region_end_indices[current_region_id] = len(modified_moves)
                 in_region = False
 
-            # CRITICAL FIX: If the last emitted Z was a bent value that
-            # differs from this move's actual Z, we must inject an
-            # explicit Z coordinate.  Without this, the printer stays at
-            # the bent Z because most G1 lines omit the Z parameter.
-            if (_last_emitted_z is not None
-                    and move.z is None
-                    and abs(_last_emitted_z - move.abs_z) > 0.001):
-                # Create a copy of the move with an explicit Z to
-                # restore the printer to the correct layer height.
-                restored_move = GCodeMove(
-                    command=move.command,
-                    x=move.x,
-                    y=move.y,
-                    z=move.abs_z,  # Inject explicit Z
-                    e=move.e,
-                    f=move.f,
-                    abs_x=move.abs_x,
-                    abs_y=move.abs_y,
-                    abs_z=move.abs_z,
-                    abs_e=move.abs_e,
-                    line_type=move.line_type,
-                    layer_number=move.layer_number,
-                    original_line=move.original_line,
-                    chunk_index=move.chunk_index,
-                    line_index_in_chunk=move.line_index_in_chunk,
-                    is_travel=move.is_travel,
-                    is_extrusion=move.is_extrusion,
-                )
-                modified_moves.append(restored_move)
-                _last_emitted_z = move.abs_z
-                _diag_z_restored += 1
-            else:
-                modified_moves.append(move)
-                # Track emitted Z if this move has an explicit Z.
-                if move.z is not None:
-                    _last_emitted_z = move.z
+            modified_moves.append(move)
             continue
 
         # Start a new region if not already in one.
@@ -555,27 +514,7 @@ def bend_gcode(
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor
 
-                # Safety clamps for Z displacement.
-                #
-                # The blend_factor from the blend_map naturally constrains
-                # displacement (0.0 at edges, 1.0 at center).  These
-                # clamps are safety nets for edge cases.
-                #
-                # 1. Don't let any single layer deviate more than
-                #    max_path_deviation from its conformal target.
-                #    The conformal target is: surface_z - layers_from_top * layer_height
-                #    and bent_z should be close to it (modulated by blend_factor).
-                #    This prevents individual paths from going rogue.
-                conformal_deviation = abs(bent_z - target_z)
-                if conformal_deviation > max_path_deviation and blend_factor > 0.5:
-                    # Only clamp when blend_factor is high — at low blend
-                    # the move is supposed to be close to its original Z.
-                    bent_z = target_z + math.copysign(
-                        max_path_deviation, bent_z - target_z
-                    )
-                    _diag_z_clamped += 1
-
-                # 2. Don't go below zero (bed surface).
+                # Safety: don't go below zero (bed surface).
                 if bent_z < 0.0:
                     bent_z = max(0.05, sz)
                     _diag_z_clamped += 1
@@ -676,7 +615,6 @@ def bend_gcode(
                 is_extrusion=True,
             )
             modified_moves.append(new_move)
-            _last_emitted_z = bent_z
 
             sub_prev_x = sx
             sub_prev_y = sy
@@ -810,6 +748,54 @@ def bend_gcode(
                 i += 1
 
         modified_moves = new_modified
+
+    # POST-REVERSION Z-RESTORE PASS
+    #
+    # CuraEngine G-code typically omits Z from most G1 moves (Z is only
+    # emitted when it changes, e.g., at layer boundaries).  After bending,
+    # bent moves have explicit Z values, but un-bent moves following them
+    # don't -- causing the printer to stay at the last bent Z.
+    #
+    # This pass runs AFTER reversion so we see the final move sequence.
+    # It injects explicit Z coordinates on un-bent moves that follow bent
+    # moves to restore the printer to the correct layer height.
+    last_emitted_z: float | None = None
+    z_restored_moves: list[GCodeMove] = []
+    for move in modified_moves:
+        if move.z is not None:
+            # This move has an explicit Z -- track it.
+            last_emitted_z = move.z
+            z_restored_moves.append(move)
+        elif (last_emitted_z is not None
+              and abs(last_emitted_z - move.abs_z) > 0.001):
+            # This move lacks Z, but the printer is at the wrong height.
+            # Inject an explicit Z to restore the correct height.
+            restored_move = GCodeMove(
+                command=move.command,
+                x=move.x,
+                y=move.y,
+                z=move.abs_z,
+                e=move.e,
+                f=move.f,
+                abs_x=move.abs_x,
+                abs_y=move.abs_y,
+                abs_z=move.abs_z,
+                abs_e=move.abs_e,
+                line_type=move.line_type,
+                layer_number=move.layer_number,
+                original_line=move.original_line,
+                chunk_index=move.chunk_index,
+                line_index_in_chunk=move.line_index_in_chunk,
+                is_travel=move.is_travel,
+                is_extrusion=move.is_extrusion,
+            )
+            z_restored_moves.append(restored_move)
+            last_emitted_z = move.abs_z
+            _diag_z_restored += 1
+        else:
+            z_restored_moves.append(move)
+
+    modified_moves = z_restored_moves
 
     # Add region comment markers by inserting comment pseudo-moves.
     # We do this by directly manipulating the chunks after reconstruction.
