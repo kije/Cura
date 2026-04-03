@@ -928,6 +928,10 @@ class NonPlanarSlicingExtension(QObject, Extension):
         if vertices is None:
             return
 
+        # Get scene root for ConvexHullNode-style parenting (world-space
+        # overlay vertices parented to the root avoid transform caching issues).
+        scene_root = Application.getInstance().getController().getScene().getRoot()
+
         try:
             self._overlay.create_overlay(
                 parent_node=node,
@@ -936,6 +940,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 candidate_regions=result.candidate_regions,
                 collision_result=result.collision_result,
                 height_map=result.height_map,
+                scene_root=scene_root,
             )
         except Exception:
             Logger.logException("w", "Failed to create non-planar region overlay")

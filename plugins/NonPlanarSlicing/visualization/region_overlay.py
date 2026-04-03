@@ -139,12 +139,18 @@ class NonPlanarRegionOverlay:
         candidate_regions: "CandidateRegions",
         collision_result: Optional["CollisionResult"] = None,
         height_map=None,
+        scene_root=None,
     ) -> Optional[List[object]]:
-        """Create and attach overlay mesh nodes to the parent scene node.
+        """Create and attach overlay mesh nodes to the scene.
 
         Creates up to three overlay nodes (safe/borderline/rejected), each
         with its own uniform colour, because the shader does not support
         per-vertex colours.
+
+        Following the ConvexHullNode pattern, overlay vertices are
+        transformed to **world space** and the nodes are parented to the
+        *scene_root* (not the model node) to avoid transform-inheritance
+        timing issues.
 
         Returns a list of created overlay nodes.
         """
@@ -176,7 +182,7 @@ class NonPlanarRegionOverlay:
             return None
 
         # Get the world transform for converting model-space vertices
-        # to slicing coordinates (Z-up) for height map lookups.
+        # to world / slicing coordinates.
         world_transform = None
         if parent_node is not None:
             try:
@@ -185,6 +191,14 @@ class NonPlanarRegionOverlay:
                     world_transform = t.getData()
             except Exception:
                 pass
+
+        # Transform local vertices to world space (ConvexHullNode pattern).
+        if world_transform is not None:
+            rot_scale = world_transform[:3, :3]
+            translate = world_transform[:3, 3]
+            world_vertices = vertices.dot(rot_scale.T) + translate
+        else:
+            world_vertices = vertices
 
         # Classify candidate faces.
         num_faces = indices.shape[0]
@@ -203,8 +217,13 @@ class NonPlanarRegionOverlay:
             collision_result, height_map, world_transform,
         )
 
-        # Compute face normals in model space for the offset.
-        face_normals = self._compute_face_normals(vertices, indices, candidate_face_ids)
+        # Compute face normals from world-space vertices for the offset.
+        face_normals = self._compute_face_normals(world_vertices, indices, candidate_face_ids)
+
+        # Determine the parent for overlay nodes: prefer scene_root
+        # (ConvexHullNode pattern) so we use world-space coordinates
+        # directly, avoiding parent-child transform caching issues.
+        overlay_parent = scene_root if scene_root is not None else parent_node
 
         # Build one overlay node per colour category.
         color_map = {
@@ -223,12 +242,12 @@ class NonPlanarRegionOverlay:
             cls_normals = face_normals[mask]
 
             mesh_data = self._build_mesh_for_faces(
-                vertices, indices, cls_face_ids, cls_normals,
+                world_vertices, indices, cls_face_ids, cls_normals,
             )
             if mesh_data is None:
                 continue
 
-            overlay_node = NonPlanarOverlayNode(parent=parent_node, color_rgba=color_rgba)
+            overlay_node = NonPlanarOverlayNode(parent=overlay_parent, color_rgba=color_rgba)
             overlay_node.setMeshData(mesh_data)
             self._overlay_nodes.append(overlay_node)
             created_nodes.append(overlay_node)
