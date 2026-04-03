@@ -17,13 +17,14 @@ from UM.Settings.SettingInstance import SettingInstance
 
 _OVERLAY_NAME = "FEA Stress Overlay"
 
-# Colour map control points: (normalised_value, (R, G, B))
+# Viridis colour map control points: (normalised_value, (R, G, B))
+# Perceptually uniform and colorblind-safe (purple → blue → teal → green → yellow).
 _COLORMAP = [
-    (0.00, (0.0, 0.0, 1.0)),  # blue
-    (0.25, (0.0, 1.0, 1.0)),  # cyan
-    (0.50, (0.0, 1.0, 0.0)),  # green
-    (0.75, (1.0, 1.0, 0.0)),  # yellow
-    (1.00, (1.0, 0.0, 0.0)),  # red
+    (0.00, (0.267, 0.004, 0.329)),  # dark purple
+    (0.25, (0.282, 0.140, 0.458)),  # blue-purple
+    (0.50, (0.127, 0.566, 0.551)),  # teal
+    (0.75, (0.544, 0.773, 0.247)),  # yellow-green
+    (1.00, (0.993, 0.906, 0.144)),  # yellow
 ]
 
 

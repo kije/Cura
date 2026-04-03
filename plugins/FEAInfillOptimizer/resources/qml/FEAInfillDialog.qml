@@ -349,6 +349,16 @@ UM.Dialog
                 }
             }
 
+            // ── Analysis stage label ─────────────────────────────────────────
+            UM.Label
+            {
+                visible: manager !== undefined && manager.analysisStatus === "running"
+                Layout.fillWidth: true
+                text: manager ? manager.analysisStage : ""
+                color: UM.Theme.getColor("text_medium")
+                font: UM.Theme.getFont("small")
+            }
+
             // ── Error state ──────────────────────────────────────────────────
             Rectangle
             {

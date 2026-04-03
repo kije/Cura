@@ -68,6 +68,7 @@ class FEAInfillExtension(QObject, Extension):
         # Analysis state
         self._analysis_status = "idle"  # idle, running, complete, error
         self._progress = 0.0
+        self._analysis_stage = ""
         self._results: Optional[Dict[str, Any]] = None
 
         # Settings
@@ -219,6 +220,10 @@ class FEAInfillExtension(QObject, Extension):
     @pyqtProperty(float, notify=progressChanged)
     def progress(self) -> float:
         return self._progress
+
+    @pyqtProperty(str, notify=progressChanged)
+    def analysisStage(self) -> str:
+        return self._analysis_stage
 
     # -- Results --
 
@@ -399,6 +404,17 @@ class FEAInfillExtension(QObject, Extension):
         # background Job thread via UM.Signal (C15: thread safety).
         def _update() -> None:
             self._progress = progress
+            if progress <= 10:
+                self._analysis_stage = "Extracting mesh..."
+            elif progress <= 30:
+                self._analysis_stage = "Building volume mesh..."
+            elif progress <= 90:
+                iteration = max(1, int((progress - 30) / 12) + 1)
+                self._analysis_stage = "Solving FEA (iteration %d)..." % iteration
+            elif progress <= 95:
+                self._analysis_stage = "Discretizing density..."
+            else:
+                self._analysis_stage = "Building zone meshes..."
             self.progressChanged.emit()
         CuraApplication.getInstance().callLater(_update)
 
