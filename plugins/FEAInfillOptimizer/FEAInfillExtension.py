@@ -224,6 +224,21 @@ class FEAInfillExtension(QObject, Extension):
     def hasResults(self) -> bool:
         return self._results is not None
 
+    @pyqtProperty(str, notify=resultsChanged)
+    def safetyVerdict(self) -> str:
+        if self._results is None:
+            return ""
+        sf = self._results.get("safety_factor", 0.0)
+        if sf <= 0:
+            return ""
+        if sf < 1.0:
+            return "unsafe"
+        if sf < 1.5:
+            return "marginal"
+        if sf < 3.0:
+            return "safe"
+        return "conservative"
+
     # -- Boundary condition summary --
 
     @pyqtSlot(str, result=str)

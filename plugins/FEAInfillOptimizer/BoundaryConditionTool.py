@@ -60,7 +60,8 @@ class BoundaryConditionTool(Tool):
 
         self.setExposedProperties("Mode", "ForceX", "ForceY", "ForceZ",
                                   "CurrentSelectionCount", "SelectionSummary",
-                                  "ConfirmForceGroup", "ClearAllBCs")
+                                  "ConfirmForceGroup", "ClearAllBCs",
+                                  "ClearFixedFaces", "ClearForceGroups")
 
     # -- Properties exposed to QML via UM.Controller.properties --
 
@@ -129,6 +130,27 @@ class BoundaryConditionTool(Tool):
     def setClearAllBCs(self, value) -> None:
         if value:
             self._clearAllBCs()
+
+    def getClearFixedFaces(self) -> bool:
+        return False
+
+    def setClearFixedFaces(self, value) -> None:
+        if value:
+            self.clearFixedFaces()
+
+    def getClearForceGroups(self) -> bool:
+        return False
+
+    def setClearForceGroups(self, value) -> None:
+        if value:
+            selected = Selection.getSelectedObject(0)
+            if selected is None:
+                return
+            bc = selected.callDecoration("getBoundaryConditions")
+            if bc is not None:
+                bc.clearForceGroups()
+            self.propertyChanged.emit()
+            self._update_highlights()
 
     # -- Event handling --
 

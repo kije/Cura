@@ -80,8 +80,8 @@ UM.Dialog
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@info:warning",
-                            "Required Python dependencies are missing. " +
-                            "Click 'Install Dependencies' to install them.")
+                            "Required Python libraries are missing. " +
+                            "Click 'Install Dependencies' below, then restart Cura.")
                         wrapMode: Text.WordWrap
                         color: UM.Theme.getColor("warning_text")
                     }
@@ -101,10 +101,20 @@ UM.Dialog
                 font: UM.Theme.getFont("medium_bold")
             }
 
+            UM.Label
+            {
+                visible: feaDialog.sceneNodeModel.length === 0
+                Layout.fillWidth: true
+                text: catalog.i18nc("@info", "No models loaded. Load a model first, then re-open this dialog.")
+                color: UM.Theme.getColor("text_medium")
+                wrapMode: Text.WordWrap
+            }
+
             Cura.ComboBox
             {
                 id: nodeSelector
                 Layout.fillWidth: true
+                visible: feaDialog.sceneNodeModel.length > 0
                 textRole: "name"
                 valueRole: "id"
                 model: feaDialog.sceneNodeModel
@@ -135,11 +145,29 @@ UM.Dialog
                 valueRole: "value"
             }
 
+            UM.Label
+            {
+                Layout.fillWidth: true
+                text: catalog.i18nc("@info", "Select your printing material. This determines stiffness and strength for analysis.")
+                color: UM.Theme.getColor("text_medium")
+                font: UM.Theme.getFont("small")
+                wrapMode: Text.WordWrap
+            }
+
             // ── Boundary condition summary ───────────────────────────────────
             UM.Label
             {
-                text: catalog.i18nc("@label", "Boundary Conditions")
+                text: catalog.i18nc("@label", "Loads and Supports")
                 font: UM.Theme.getFont("medium_bold")
+            }
+
+            UM.Label
+            {
+                Layout.fillWidth: true
+                text: catalog.i18nc("@info", "Define where your part is held and where forces act before running analysis.")
+                color: UM.Theme.getColor("text_medium")
+                font: UM.Theme.getFont("small")
+                wrapMode: Text.WordWrap
             }
 
             Rectangle
@@ -169,6 +197,18 @@ UM.Dialog
                 }
             }
 
+            Cura.SecondaryButton
+            {
+                Layout.fillWidth: true
+                text: catalog.i18nc("@action:button", "Open BC Tool to Define Loads")
+                visible: manager !== undefined && nodeSelector.currentValue !== undefined
+                onClicked:
+                {
+                    UM.Controller.setActiveTool("FEAInfillOptimizer")
+                    feaDialog.visible = false
+                }
+            }
+
             // ── Analysis settings ────────────────────────────────────────────
             UM.Label
             {
@@ -183,7 +223,7 @@ UM.Dialog
                 columnSpacing: UM.Theme.getSize("default_margin").width
                 rowSpacing: UM.Theme.getSize("default_margin").height / 2
 
-                UM.Label { text: catalog.i18nc("@label", "Min Density (%)") }
+                UM.Label { text: catalog.i18nc("@label", "Lightest area infill (%)") }
                 SpinBox
                 {
                     id: minDensitySpinBox
@@ -191,7 +231,7 @@ UM.Dialog
                     Layout.fillWidth: true
                 }
 
-                UM.Label { text: catalog.i18nc("@label", "Max Density (%)") }
+                UM.Label { text: catalog.i18nc("@label", "Heaviest area infill (%)") }
                 SpinBox
                 {
                     id: maxDensitySpinBox
@@ -199,7 +239,7 @@ UM.Dialog
                     Layout.fillWidth: true
                 }
 
-                UM.Label { text: catalog.i18nc("@label", "Number of Zones") }
+                UM.Label { text: catalog.i18nc("@label", "Density steps") }
                 SpinBox
                 {
                     id: nZonesSpinBox
@@ -207,7 +247,7 @@ UM.Dialog
                     Layout.fillWidth: true
                 }
 
-                UM.Label { text: catalog.i18nc("@label", "Max Iterations") }
+                UM.Label { text: catalog.i18nc("@label", "Analysis passes") }
                 SpinBox
                 {
                     id: maxIterSpinBox
@@ -215,7 +255,7 @@ UM.Dialog
                     Layout.fillWidth: true
                 }
 
-                UM.Label { text: catalog.i18nc("@label", "Safety Factor") }
+                UM.Label { text: catalog.i18nc("@label", "Safety margin (×10)") }
                 SpinBox
                 {
                     // Integer SpinBox scaled by 10: value 20 = SF 2.0, range 1.0–5.0
@@ -291,6 +331,32 @@ UM.Dialog
                 }
             }
 
+            // ── Error state ──────────────────────────────────────────────────
+            Rectangle
+            {
+                Layout.fillWidth: true
+                visible: manager !== undefined && manager.analysisStatus === "error"
+                height: visible ? errorLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
+                color: "#442222"
+                border.color: "#aa4444"
+                border.width: UM.Theme.getSize("default_lining").width
+                radius: UM.Theme.getSize("default_radius").width
+
+                UM.Label
+                {
+                    id: errorLabel
+                    anchors
+                    {
+                        left: parent.left; right: parent.right
+                        verticalCenter: parent.verticalCenter
+                        margins: UM.Theme.getSize("default_margin").width
+                    }
+                    text: catalog.i18nc("@info:error", "Analysis failed. Check that boundary conditions are correctly defined, then try a coarser mesh resolution.")
+                    wrapMode: Text.WordWrap
+                    color: "#ff6666"
+                }
+            }
+
             // ── Results section ──────────────────────────────────────────────
             ColumnLayout
             {
@@ -303,6 +369,38 @@ UM.Dialog
                 {
                     text: catalog.i18nc("@label", "Results")
                     font: UM.Theme.getFont("medium_bold")
+                }
+
+                Rectangle
+                {
+                    Layout.fillWidth: true
+                    visible: manager !== undefined && manager.hasResults
+                    height: visible ? verdictLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                    radius: UM.Theme.getSize("default_radius").width
+                    color: {
+                        var v = manager ? manager.safetyVerdict : ""
+                        if (v === "unsafe")       return "#442222"
+                        if (v === "marginal")     return "#443322"
+                        if (v === "safe")         return "#224422"
+                        if (v === "conservative") return "#222244"
+                        return UM.Theme.getColor("main_background")
+                    }
+
+                    UM.Label
+                    {
+                        id: verdictLabel
+                        anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width }
+                        wrapMode: Text.WordWrap
+                        color: "#ffffff"
+                        text: {
+                            var v = manager ? manager.safetyVerdict : ""
+                            if (v === "unsafe")       return catalog.i18nc("@info", "Warning: Part may fail under this load. Increase max infill or redesign.")
+                            if (v === "marginal")     return catalog.i18nc("@info", "Marginal safety. Consider increasing max infill density.")
+                            if (v === "safe")         return catalog.i18nc("@info", "Part should handle this load safely with optimized infill.")
+                            if (v === "conservative") return catalog.i18nc("@info", "Part is over-engineered. You could reduce max infill to save material.")
+                            return ""
+                        }
+                    }
                 }
 
                 Rectangle
@@ -363,6 +461,17 @@ UM.Dialog
                 }
 
                 // ── Action buttons ────────────────────────────────────────────
+                Cura.PrimaryButton
+                {
+                    Layout.fillWidth: true
+                    text: catalog.i18nc("@action:button", "Apply Optimized Infill to Print")
+                    onClicked:
+                    {
+                        if (manager && nodeSelector.currentValue !== undefined)
+                            manager.applyModifierMeshes(nodeSelector.currentValue)
+                    }
+                }
+
                 RowLayout
                 {
                     Layout.fillWidth: true
@@ -372,33 +481,13 @@ UM.Dialog
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Show Stress Map")
-                        onClicked:
-                        {
-                            if (manager && nodeSelector.currentValue !== undefined)
-                                manager.showStressOverlay(nodeSelector.currentValue)
-                        }
+                        onClicked: { if (manager && nodeSelector.currentValue !== undefined) manager.showStressOverlay(nodeSelector.currentValue) }
                     }
-
-                    Cura.SecondaryButton
-                    {
-                        Layout.fillWidth: true
-                        text: catalog.i18nc("@action:button", "Apply Modifier Meshes")
-                        onClicked:
-                        {
-                            if (manager && nodeSelector.currentValue !== undefined)
-                                manager.applyModifierMeshes(nodeSelector.currentValue)
-                        }
-                    }
-
                     Cura.SecondaryButton
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Clear Results")
-                        onClicked:
-                        {
-                            if (manager && nodeSelector.currentValue !== undefined)
-                                manager.clearResults(nodeSelector.currentValue)
-                        }
+                        onClicked: { if (manager && nodeSelector.currentValue !== undefined) manager.clearResults(nodeSelector.currentValue) }
                     }
                 }
             }

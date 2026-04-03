@@ -35,7 +35,7 @@ Item
         // ── Mode selector ────────────────────────────────────────────────────
         UM.Label
         {
-            text: catalog.i18nc("@label", "Constraint Mode")
+            text: catalog.i18nc("@label", "What are you marking?")
             font: UM.Theme.getFont("medium_bold")
         }
 
@@ -48,7 +48,7 @@ Item
                 id: fixedModeButton
                 checkable: true
                 checked: bcPanel.currentMode === "fixed"
-                text: catalog.i18nc("@action:button", "Fixed")
+                text: catalog.i18nc("@action:button", "Support / Mount")
                 toolItem: UM.ColorImage
                 {
                     source: UM.Theme.getIcon("Lock")
@@ -64,7 +64,7 @@ Item
                 id: forceModeButton
                 checkable: true
                 checked: bcPanel.currentMode === "force"
-                text: catalog.i18nc("@action:button", "Force")
+                text: catalog.i18nc("@action:button", "Apply Load")
                 toolItem: UM.ColorImage
                 {
                     source: UM.Theme.getIcon("ArrowRight")
@@ -74,6 +74,25 @@ Item
                 }
                 onClicked: UM.Controller.setProperty("Mode", "force")
             }
+        }
+
+        UM.Label
+        {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            font: UM.Theme.getFont("small")
+            color: UM.Theme.getColor("text_medium")
+            text: bcPanel.currentMode === "fixed"
+                ? catalog.i18nc("@info", "Click faces where the part is held, screwed down, or resting on a surface.")
+                : catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
+        }
+
+        UM.Label
+        {
+            Layout.fillWidth: true
+            font: UM.Theme.getFont("small")
+            color: UM.Theme.getColor("text_inactive")
+            text: catalog.i18nc("@info", "Shift+click: add face | Ctrl+click: remove face")
         }
 
         // ── Force vector inputs (force mode only) ────────────────────────────
@@ -181,19 +200,43 @@ Item
         }
 
         // ── Action buttons ───────────────────────────────────────────────────
+        UM.Label
+        {
+            Layout.fillWidth: true
+            visible: bcPanel.currentMode === "force"
+            wrapMode: Text.WordWrap
+            font: UM.Theme.getFont("small")
+            color: UM.Theme.getColor("text_medium")
+            text: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+                ? catalog.i18nc("@info", "%1 face(s) selected. Click 'Confirm Load' to save, or Shift+click to add more.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
+                : catalog.i18nc("@info", "Click faces where the load acts. Hold Shift to add more faces.")
+        }
+
         Cura.PrimaryButton
         {
             Layout.fillWidth: true
-            text: catalog.i18nc("@action:button", "Confirm Force Group")
+            text: catalog.i18nc("@action:button", "Confirm Load on Selected Faces")
             enabled: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
             onClicked: UM.Controller.setProperty("ConfirmForceGroup", true)
         }
 
-        Cura.SecondaryButton
+        RowLayout
         {
             Layout.fillWidth: true
-            text: catalog.i18nc("@action:button", "Clear All")
-            onClicked: UM.Controller.setProperty("ClearAllBCs", true)
+            spacing: UM.Theme.getSize("default_margin").width / 2
+
+            Cura.SecondaryButton
+            {
+                Layout.fillWidth: true
+                text: catalog.i18nc("@action:button", "Clear Supports")
+                onClicked: UM.Controller.setProperty("ClearFixedFaces", true)
+            }
+            Cura.SecondaryButton
+            {
+                Layout.fillWidth: true
+                text: catalog.i18nc("@action:button", "Clear Loads")
+                onClicked: UM.Controller.setProperty("ClearForceGroups", true)
+            }
         }
 
         // Bottom spacer
