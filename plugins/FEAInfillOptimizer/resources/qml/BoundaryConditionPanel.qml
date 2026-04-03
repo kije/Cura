@@ -43,7 +43,7 @@ Item
         {
             spacing: UM.Theme.getSize("default_margin").width / 2
 
-            Cura.ToolbarButton
+            UM.ToolbarButton
             {
                 id: fixedModeButton
                 checkable: true
@@ -59,7 +59,7 @@ Item
                 onClicked: UM.Controller.setProperty("Mode", "fixed")
             }
 
-            Cura.ToolbarButton
+            UM.ToolbarButton
             {
                 id: forceModeButton
                 checkable: true
