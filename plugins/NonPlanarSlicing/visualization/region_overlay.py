@@ -86,7 +86,7 @@ if _CURA_AVAILABLE:
 
         def render(self, renderer):
             """Render with a transparent shader."""
-            if not self.getMeshData():
+            if not self.getMeshData() or not self.isVisible():
                 return True
 
             if self._shader is None:
@@ -98,6 +98,7 @@ if _CURA_AVAILABLE:
 
             renderer.queueNode(
                 self,
+                mesh=self.getMeshData(),
                 shader=self._shader,
                 transparent=True,
                 backface_cull=False,
@@ -292,6 +293,7 @@ class NonPlanarRegionOverlay:
         builder = MeshBuilder()
         builder.setVertices(overlay_verts)
         builder.setIndices(overlay_indices)
+        builder.calculateNormals()
 
         return builder.build()
 

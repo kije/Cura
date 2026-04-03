@@ -243,6 +243,12 @@ def bend_gcode(
     segment_length = float(settings.get("segment_length", _DEFAULT_SEGMENT_LENGTH))
     surface_mode = str(settings.get("surface_mode", "all_surfaces"))
 
+    # G-code coordinates use machine origin (corner for most printers).
+    # Analysis height maps use model-centered coordinates.  These offsets
+    # convert G-code XY → analysis XY:  analysis = gcode - offset.
+    gcode_offset_x = float(settings.get("gcode_offset_x", 0.0))
+    gcode_offset_y = float(settings.get("gcode_offset_y", 0.0))
+
     # Parse.
     parsed = parse_gcode(gcode_list)
 
@@ -304,12 +310,15 @@ def bend_gcode(
 
     logger.info(
         "Bending %d target layers (mode=%s), layer_height=%.3f, "
-        "max_angle=%.1f deg, segment_length=%.2f mm",
+        "max_angle=%.1f deg, segment_length=%.2f mm, "
+        "gcode_offset=(%.1f, %.1f)",
         len(target_layers),
         surface_mode,
         layer_height,
         max_angle_deg,
         segment_length,
+        gcode_offset_x,
+        gcode_offset_y,
     )
 
     # Process moves: build list of modified moves, potentially with
@@ -351,15 +360,18 @@ def bend_gcode(
         )
 
         if should_bend:
+            # Convert G-code XY to analysis/height-map XY.
+            ax = move.abs_x - gcode_offset_x
+            ay = move.abs_y - gcode_offset_y
             # Check if XY is in a non-planar region.
-            is_safe = _lookup_safe(safe_map, height_map, move.abs_x, move.abs_y)
+            is_safe = _lookup_safe(safe_map, height_map, ax, ay)
             if not is_safe:
                 should_bend = False
 
         if should_bend and all_surfaces_mode:
             # In all_surfaces mode, only bend moves whose Z is within
             # max_bend_depth below the surface at this XY.
-            surface_z_check = height_map.interpolate(move.abs_x, move.abs_y)
+            surface_z_check = height_map.interpolate(ax, ay)
             if math.isnan(surface_z_check):
                 should_bend = False
             elif move.abs_z > surface_z_check + layer_height:
@@ -406,7 +418,7 @@ def bend_gcode(
         if all_surfaces_mode:
             # In all_surfaces mode, compute how many layers below the
             # local surface this move sits, based on its Z vs surface Z.
-            _local_surface_z = height_map.interpolate(move.abs_x, move.abs_y)
+            _local_surface_z = height_map.interpolate(ax, ay)
             if not math.isnan(_local_surface_z):
                 layers_from_top = max(0, round(
                     (_local_surface_z - move.abs_z) / layer_height
@@ -424,8 +436,11 @@ def bend_gcode(
         sub_prev_abs_e = prev_abs_e
 
         for seg_idx, (sx, sy, sz, se_abs, sf) in enumerate(sub_points):
+            # Convert sub-segment G-code XY to analysis space.
+            sax = sx - gcode_offset_x
+            say = sy - gcode_offset_y
             # Look up surface Z from height map.
-            surface_z = height_map.interpolate(sx, sy)
+            surface_z = height_map.interpolate(sax, say)
 
             if math.isnan(surface_z):
                 # Outside the height map -- no bending, pass through.
@@ -435,7 +450,7 @@ def bend_gcode(
                 target_z = surface_z - layers_from_top * layer_height
 
                 # Look up blend factor.
-                blend_factor = _lookup_blend_factor(blend_map, height_map, sx, sy)
+                blend_factor = _lookup_blend_factor(blend_map, height_map, sax, say)
 
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor

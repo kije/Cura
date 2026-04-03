@@ -236,6 +236,76 @@ class TestEndToEnd:
             f"All Z values: {sorted(bent_z)[:10]}"
         )
 
+    def test_gcode_bending_with_machine_offset(self):
+        """G-code bending must work when G-code uses machine coordinates.
+
+        Cura outputs G-code in machine coordinates (corner origin), while the
+        analysis height map uses model-centered coordinates.  The bender must
+        apply the gcode_offset_x/y to translate between the two.
+        """
+        verts = _read_stl(_TEST_MODELS / "non_planar_test.stl")
+        analysis = analyze_mesh(verts, None)
+        candidates = detect_candidates(
+            analysis, None, max_angle_deg=30.0, min_region_area_mm2=50.0,
+        )
+        height_map = generate_height_map(
+            verts, None, candidates.all_candidate_mask, resolution=0.5,
+        )
+        collision = check_collisions(
+            height_map, printhead_polygon=_DEFAULT_PRINTHEAD,
+            nozzle_clearance_mm=8.0,
+        )
+        blend_map = compute_blend_map(
+            collision.safe_map, resolution=0.5, blend_distance=3.0,
+        )
+
+        # Simulate Cura machine coordinates: offset by (165, 120) like
+        # an Ultimaker S5 (330x240 build plate, center_is_zero=False).
+        ox, oy = 165.0, 120.0
+
+        # Build G-code with machine-offset coordinates.
+        layer_height = 0.2
+        n_layers = 80
+        chunks = [
+            f";FLAVOR:Marlin\n;Layer height: {layer_height}\n",
+            f"G28\nM82\nG1 Z{layer_height + 0.1:.3f} F3000\n",
+        ]
+        e_total = 0.0
+        for layer in range(n_layers):
+            z = layer_height * (layer + 1)
+            lines = [f";LAYER:{layer}\n;TYPE:WALL-OUTER\n"]
+            for x in range(-15, 16, 2):
+                for y in [-10, -5, 0, 5, 10]:
+                    e_total += 0.02
+                    lines.append(
+                        f"G1 X{x + ox:.1f} Y{y + oy:.1f} "
+                        f"Z{z:.3f} E{e_total:.4f} F1200\n"
+                    )
+            chunks.append("".join(lines))
+
+        result = bend_gcode(
+            chunks,
+            height_map=height_map,
+            safe_map=collision.safe_map,
+            blend_map=blend_map,
+            settings={
+                "layer_height": 0.2,
+                "nonplanar_layer_count": 0,
+                "max_angle_deg": 30.0,
+                "flow_compensation": True,
+                "feedrate_compensation": True,
+                "segment_length": 1.0,
+                "surface_mode": "all_surfaces",
+                "gcode_offset_x": ox,
+                "gcode_offset_y": oy,
+            },
+        )
+
+        has_marker = any(";NON-PLANAR PROCESSED" in c for c in result)
+        assert has_marker, (
+            "Expected ;NON-PLANAR PROCESSED marker with machine offset G-code"
+        )
+
     def test_layer_count_auto(self):
         """layer_count=0 should auto-derive from height map Z delta."""
         verts = _read_stl(_TEST_MODELS / "non_planar_test.stl")

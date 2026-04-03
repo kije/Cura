@@ -710,6 +710,21 @@ class NonPlanarSlicingExtension(QObject, Extension):
         # Detect layer height from G-code
         layer_height = self._detectLayerHeight(gcode_list, settings)
 
+        # Compute G-code ↔ analysis coordinate offset.
+        # CuraEngine maps: gcode_X = scene_X + W/2, gcode_Y = -scene_Z + D/2
+        # Analysis maps:   analysis_X = scene_X,     analysis_Y = -scene_Z
+        # So: analysis = gcode - (W/2, D/2)
+        gcode_offset_x = 0.0
+        gcode_offset_y = 0.0
+        stack = self._getGlobalStack()
+        if stack is not None:
+            center_is_zero = stack.getProperty("machine_center_is_zero", "value")
+            if not center_is_zero:
+                machine_width = float(stack.getProperty("machine_width", "value") or 0)
+                machine_depth = float(stack.getProperty("machine_depth", "value") or 0)
+                gcode_offset_x = machine_width / 2.0
+                gcode_offset_y = machine_depth / 2.0
+
         bender_settings = {
             "layer_height": layer_height,
             "nonplanar_layer_count": settings["nonplanar_layer_count"],
@@ -718,6 +733,8 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "feedrate_compensation": settings["feedrate_compensation"],
             "segment_length": settings.get("segment_length", SEGMENT_LENGTH),
             "surface_mode": settings.get("surface_mode", "all_surfaces"),
+            "gcode_offset_x": gcode_offset_x,
+            "gcode_offset_y": gcode_offset_y,
         }
 
         return bend_gcode(
