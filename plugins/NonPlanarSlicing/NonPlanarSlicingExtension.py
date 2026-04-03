@@ -354,9 +354,15 @@ class NonPlanarSlicingExtension(QObject, Extension):
             transform = node.getWorldTransformation()
             transform_matrix = transform.getData() if transform is not None else None
 
-            # Step 1: Surface analysis
+            # Transform vertices from Cura Y-up scene space to Z-up slicing
+            # space BEFORE surface analysis.  analyze_mesh checks
+            # face_normals[:,2] (Z component) for "upward", which is only
+            # correct in Z-up coordinates.
+            zup_vertices = self._transformVertices(vertices, transform_matrix)
+
+            # Step 1: Surface analysis (in Z-up space, no extra transform)
             t0 = time.time()
-            analysis = analyze_mesh(vertices, indices, transform_matrix)
+            analysis = analyze_mesh(zup_vertices, indices, transform_matrix=None)
             Logger.log("d", "Surface analysis: %d faces in %.2fs",
                        len(analysis.face_normals), time.time() - t0)
 
@@ -381,11 +387,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
             # Step 3: Height map generation
             t0 = time.time()
 
-            # Transform vertices to world space for height map
-            world_vertices = self._transformVertices(vertices, transform_matrix)
-
+            # Reuse the Z-up transformed vertices for height map
             height_map = generate_height_map(
-                world_vertices, indices, candidates.all_candidate_mask,
+                zup_vertices, indices, candidates.all_candidate_mask,
                 resolution=settings["heightmap_resolution"],
             )
             Logger.log("d", "Height map: %dx%d grid in %.2fs",

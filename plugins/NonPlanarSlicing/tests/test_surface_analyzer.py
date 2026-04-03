@@ -167,3 +167,63 @@ class TestAnalyzeMesh:
         verts, indices = _make_flat_square(z=0.0)
         result = analyze_mesh(verts, indices)
         assert (result.face_areas >= 0).all()
+
+    def test_sphere_has_top_surfaces(self):
+        """A sphere in Z-up space should have top surfaces on upper hemisphere."""
+        # Generate a UV sphere with ~200 faces
+        n_lat, n_lon = 10, 20
+        verts = []
+        faces = []
+        for i in range(n_lat + 1):
+            theta = math.pi * i / n_lat  # 0 (north) to pi (south)
+            for j in range(n_lon):
+                phi = 2 * math.pi * j / n_lon
+                x = 10.0 * math.sin(theta) * math.cos(phi)
+                y = 10.0 * math.sin(theta) * math.sin(phi)
+                z = 10.0 * math.cos(theta)
+                verts.append([x, y, z])
+        for i in range(n_lat):
+            for j in range(n_lon):
+                v0 = i * n_lon + j
+                v1 = i * n_lon + (j + 1) % n_lon
+                v2 = (i + 1) * n_lon + j
+                v3 = (i + 1) * n_lon + (j + 1) % n_lon
+                faces.append([v0, v1, v2])
+                faces.append([v1, v3, v2])
+
+        vertices = np.array(verts, dtype=np.float64)
+        indices = np.array(faces, dtype=np.intp)
+
+        result = analyze_mesh(vertices, indices)
+
+        # Upper hemisphere faces should be top surfaces
+        n_top = int(np.count_nonzero(result.is_top_surface))
+        assert n_top > 0, "Sphere should have top surface faces"
+        # Roughly half the faces should be top surfaces (upper hemisphere)
+        assert n_top > len(faces) * 0.3, (
+            f"Expected >30% top surfaces, got {n_top}/{len(faces)}"
+        )
+
+    def test_z_component_determines_top_surface(self):
+        """analyze_mesh uses face_normals[:,2] (Z component) for top detection.
+
+        A face with normal pointing in +Y but Z=0 should NOT be detected
+        as top surface. Only faces with positive Z normal component count.
+        This confirms that Y-up data must be converted to Z-up before calling
+        analyze_mesh.
+        """
+        # Face in XZ plane at Y=5: normal points +Y (or -Y depending on winding)
+        # Either way, the Z component of the normal is 0
+        verts = np.array([
+            [0, 5, 0], [1, 5, 0], [1, 5, 1],
+            [0, 5, 0], [1, 5, 1], [0, 5, 1],
+        ], dtype=np.float64)
+        indices = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.intp)
+
+        result = analyze_mesh(verts, indices)
+        # Normal has no Z component — should not be detected as top surface
+        for n in result.face_normals:
+            assert abs(n[2]) < 1e-10, "Normal Z component should be ~0"
+        assert not result.is_top_surface.any(), (
+            "Face with normal in XZ plane should NOT be top surface"
+        )
