@@ -6,10 +6,24 @@ try:
 except ImportError:
     NonPlanarSlicingExtension = None  # type: ignore[assignment,misc]
 
+try:
+    from .visualization.NonPlanarView import NonPlanarView
+except ImportError:
+    NonPlanarView = None  # type: ignore[assignment,misc]
+
 
 def getMetaData():
-    return {}
+    metadata = {}
+    if NonPlanarView is not None:
+        metadata["view"] = {
+            "name": "Non-Planar Regions",
+            "weight": 2,
+        }
+    return metadata
 
 
 def register(app):
-    return {"extension": NonPlanarSlicingExtension.NonPlanarSlicingExtension()}
+    result = {"extension": NonPlanarSlicingExtension.NonPlanarSlicingExtension()}
+    if NonPlanarView is not None:
+        result["view"] = NonPlanarView()
+    return result
