@@ -62,6 +62,16 @@ class HeightMap:
     # Public helpers
     # ------------------------------------------------------------------
 
+    def in_bounds(self, x: float, y: float) -> bool:
+        """Return True if (x, y) is within the grid bounding box.
+
+        The point must be within half a cell of the grid boundary to be
+        considered in-bounds (consistent with nearest-neighbor rounding).
+        """
+        half = self.resolution * 0.5
+        return (self.x_min - half <= x <= self.x_max + half and
+                self.y_min - half <= y <= self.y_max + half)
+
     def get_grid_coords(self, x: float, y: float) -> Tuple[int, int]:
         """Convert world (x, y) to integer grid ``(row, col)``.
 
@@ -76,51 +86,64 @@ class HeightMap:
         return (row, col)
 
     def is_valid(self, x: float, y: float) -> bool:
-        """Return True if the grid cell nearest to *(x, y)* has a finite Z."""
+        """Return True if (x, y) is within bounds and the nearest cell has finite Z."""
+        if not self.in_bounds(x, y):
+            return False
         row, col = self.get_grid_coords(x, y)
         return bool(np.isfinite(self.z_values[row, col]))
 
     def interpolate(self, x: float, y: float) -> float:
         """Bilinearly interpolate the Z value at world coordinates *(x, y)*.
 
-        Returns ``NaN`` if any of the four surrounding grid cells is
-        ``NaN`` or if the point is outside the grid bounds.
+        Falls back to nearest-neighbor lookup when the point is near
+        the grid boundary or when a bilinear neighbour is NaN.  Returns
+        ``NaN`` if the point is outside the grid bounds or the nearest
+        cell has no data.
         """
+        if not self.in_bounds(x, y):
+            return float("nan")
+
+        rows, cols = self.grid_shape
+
         # Continuous grid coordinates.
         cx = (x - self.x_min) / self.resolution
         cy = (y - self.y_min) / self.resolution
 
-        rows, cols = self.grid_shape
-
-        # Integer corners.
+        # Integer corners for bilinear interpolation.
         c0 = int(np.floor(cx))
         r0 = int(np.floor(cy))
         c1 = c0 + 1
         r1 = r0 + 1
 
-        if c0 < 0 or r0 < 0 or c1 >= cols or r1 >= rows:
-            return float("nan")
+        # Try bilinear interpolation first (interior points).
+        if 0 <= c0 and 0 <= r0 and c1 < cols and r1 < rows:
+            fx = cx - c0
+            fy = cy - r0
 
-        # Fractional parts.
-        fx = cx - c0
-        fy = cy - r0
+            z00 = self.z_values[r0, c0]
+            z01 = self.z_values[r0, c1]
+            z10 = self.z_values[r1, c0]
+            z11 = self.z_values[r1, c1]
 
-        z00 = self.z_values[r0, c0]
-        z01 = self.z_values[r0, c1]
-        z10 = self.z_values[r1, c0]
-        z11 = self.z_values[r1, c1]
+            if (np.isfinite(z00) and np.isfinite(z01) and
+                    np.isfinite(z10) and np.isfinite(z11)):
+                z = (
+                    z00 * (1 - fx) * (1 - fy)
+                    + z01 * fx * (1 - fy)
+                    + z10 * (1 - fx) * fy
+                    + z11 * fx * fy
+                )
+                return float(z)
 
-        if not (np.isfinite(z00) and np.isfinite(z01) and
-                np.isfinite(z10) and np.isfinite(z11)):
-            return float("nan")
-
-        z = (
-            z00 * (1 - fx) * (1 - fy)
-            + z01 * fx * (1 - fy)
-            + z10 * (1 - fx) * fy
-            + z11 * fx * fy
-        )
-        return float(z)
+        # Fall back to nearest-neighbor (handles boundary cells and
+        # partial NaN neighbours).  This keeps interpolate() consistent
+        # with is_valid() which also uses nearest-neighbor via
+        # get_grid_coords().
+        row, col = self.get_grid_coords(x, y)
+        val = self.z_values[row, col]
+        if np.isfinite(val):
+            return float(val)
+        return float("nan")
 
 
 # ======================================================================

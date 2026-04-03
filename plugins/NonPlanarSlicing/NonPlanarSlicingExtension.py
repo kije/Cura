@@ -887,6 +887,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     layer_height=layer_height,
                     nonplanar_layer_count=settings["nonplanar_layer_count"],
                     total_layers=total_layers,
+                    surface_mode=settings.get("surface_mode", "all_surfaces"),
                 )
 
                 if modifier.modify_layer_data(layer_data):

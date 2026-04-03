@@ -350,6 +350,13 @@ def bend_gcode(
     _diag_above = 0
     _diag_below = 0
     _diag_bent = 0
+    _diag_nan_interp = 0
+    _diag_actually_bent = 0
+    _diag_zero_delta = 0
+    _diag_zero_blend = 0
+    _diag_target_equals_sz = 0
+    _diag_max_z_delta = 0.0
+    _diag_sample_count = 0
 
     for move_idx, move in enumerate(parsed.moves):
         # Update tracking state from previous moves.
@@ -469,6 +476,7 @@ def bend_gcode(
             if math.isnan(surface_z):
                 # Outside the height map -- no bending, pass through.
                 bent_z = sz
+                _diag_nan_interp += 1
             else:
                 # Compute target Z: surface minus layers_from_top offsets.
                 target_z = surface_z - layers_from_top * layer_height
@@ -478,6 +486,33 @@ def bend_gcode(
 
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor
+
+                # Track bending statistics.
+                z_delta = abs(bent_z - sz)
+                if z_delta > 0.001:
+                    _diag_actually_bent += 1
+                    _diag_max_z_delta = max(_diag_max_z_delta, z_delta)
+                else:
+                    _diag_zero_delta += 1
+                    if blend_factor < 0.001:
+                        _diag_zero_blend += 1
+                    elif abs(target_z - sz) < 0.001:
+                        _diag_target_equals_sz += 1
+
+                # Log detailed info for the first few bent sub-segments.
+                if _diag_sample_count < 20:
+                    _diag_sample_count += 1
+                    logger.info(
+                        "BEND SAMPLE %d: layer=%d, gcode_xy=(%.2f,%.2f), "
+                        "analysis_xy=(%.2f,%.2f), surface_z=%.4f, "
+                        "original_z=%.4f, layers_from_top=%d, "
+                        "target_z=%.4f, blend=%.4f, bent_z=%.4f, "
+                        "delta_z=%.4f",
+                        _diag_sample_count, move.layer_number,
+                        sx, sy, sax, say, surface_z,
+                        sz, layers_from_top, target_z, blend_factor,
+                        bent_z, bent_z - sz,
+                    )
 
             # Compute E delta for this sub-segment.
             e_delta = se_abs - sub_prev_abs_e
@@ -567,13 +602,49 @@ def bend_gcode(
         _diag_not_safe, _diag_no_surface, _diag_above, _diag_below,
     )
 
-    # Log height map bounds for debugging coordinate mismatches.
+    # Log Z-bending effectiveness diagnostics.
+    logger.info(
+        "Z-bending detail: actually_bent=%d (delta>0.001mm), "
+        "zero_delta=%d, nan_interp=%d, max_z_delta=%.4fmm, "
+        "zero_blend=%d, target_eq_sz=%d",
+        _diag_actually_bent, _diag_zero_delta, _diag_nan_interp,
+        _diag_max_z_delta, _diag_zero_blend, _diag_target_equals_sz,
+    )
+
+    # Log height map bounds and Z range for debugging coordinate mismatches.
     if hasattr(height_map, "x_min"):
         logger.info(
             "Height map bounds: x=[%.1f, %.1f], y=[%.1f, %.1f]",
             height_map.x_min, height_map.x_max,
             height_map.y_min, height_map.y_max,
         )
+        try:
+            z_vals = height_map.z_values
+            finite_z = z_vals[np.isfinite(z_vals)]
+            if finite_z.size > 0:
+                logger.info(
+                    "Height map Z range: [%.4f, %.4f], variation=%.4fmm, "
+                    "valid_cells=%d/%d",
+                    float(np.min(finite_z)), float(np.max(finite_z)),
+                    float(np.max(finite_z) - np.min(finite_z)),
+                    finite_z.size, z_vals.size,
+                )
+        except Exception:
+            pass
+
+    # Log blend map statistics.
+    try:
+        nonzero_blend = blend_map[blend_map > 0.001]
+        logger.info(
+            "Blend map: shape=%s, nonzero_cells=%d, "
+            "min_nonzero=%.4f, max=%.4f, mean_nonzero=%.4f",
+            blend_map.shape, nonzero_blend.size,
+            float(np.min(nonzero_blend)) if nonzero_blend.size > 0 else 0.0,
+            float(np.max(blend_map)),
+            float(np.mean(nonzero_blend)) if nonzero_blend.size > 0 else 0.0,
+        )
+    except Exception:
+        pass
 
     # Log sample G-code coordinate ranges.
     if parsed.moves:

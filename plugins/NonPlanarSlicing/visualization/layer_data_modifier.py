@@ -70,6 +70,7 @@ class LayerDataModifier:
         layer_height: float,
         nonplanar_layer_count: int,
         total_layers: int,
+        surface_mode: str = "all_surfaces",
     ) -> None:
         self._height_map = height_map
         self._safe_map = numpy.asarray(safe_map, dtype=bool)
@@ -77,6 +78,7 @@ class LayerDataModifier:
         self._layer_height = float(layer_height)
         self._nonplanar_layer_count = int(nonplanar_layer_count)
         self._total_layers = int(total_layers)
+        self._surface_mode = surface_mode
 
     def modify_layer_data(self, layer_data) -> bool:
         """Modify layer data vertices in-place for non-planar visualization.
@@ -103,10 +105,20 @@ class LayerDataModifier:
         if not sorted_layer_numbers:
             return False
 
-        first_nonplanar = max(
-            0, len(sorted_layer_numbers) - self._nonplanar_layer_count
-        )
-        target_layer_numbers = sorted_layer_numbers[first_nonplanar:]
+        all_surfaces_mode = self._surface_mode == "all_surfaces"
+        max_bend_depth = self._nonplanar_layer_count * self._layer_height
+
+        if all_surfaces_mode:
+            # In all_surfaces mode, any layer could have vertices near
+            # the surface.  Process all of them; _compute_bent_z filters
+            # per-vertex based on proximity to the height map surface.
+            target_layer_numbers = sorted_layer_numbers
+        else:
+            first_nonplanar = max(
+                0, len(sorted_layer_numbers) - self._nonplanar_layer_count
+            )
+            target_layer_numbers = sorted_layer_numbers[first_nonplanar:]
+
         if not target_layer_numbers:
             return False
 
@@ -123,12 +135,19 @@ class LayerDataModifier:
                 continue
 
             layer_position = sorted_layer_numbers.index(layer_number)
-            layers_from_top = top_layer_idx - layer_position
+
+            if all_surfaces_mode:
+                # layers_from_top will be computed per-vertex in
+                # _compute_bent_z based on surface proximity.
+                layers_from_top = None
+            else:
+                layers_from_top = top_layer_idx - layer_position
 
             for polygon in layer.polygons:
                 modified = self._modify_polygon(
                     polygon, layers_from_top,
                     mesh_vertices if has_mesh_vertices else None,
+                    max_bend_depth=max_bend_depth,
                 )
                 total_modified += modified
 
@@ -152,8 +171,9 @@ class LayerDataModifier:
     def _modify_polygon(
         self,
         polygon,
-        layers_from_top: int,
+        layers_from_top: Optional[int],
         mesh_vertices: Optional[numpy.ndarray],
+        max_bend_depth: float = 0.0,
     ) -> int:
         """Modify vertices of a single LayerPolygon.
 
@@ -188,17 +208,18 @@ class LayerDataModifier:
                 continue
 
             # Layer data coordinates:
-            # col 0 = X (mm), col 1 = height (mm), col 2 = -world_Y (mm)
-            world_x = float(data[i, 0])
-            # For height map lookup we need slicing coordinates:
-            # slicing X = world X = col 0
-            # slicing Y = world Y = -col 2
-            slicing_x = world_x
+            # col 0 = X (mm), col 1 = height (mm), col 2 = scene_Z (depth)
+            # For height map lookup we need analysis/slicing coordinates:
+            # analysis X = scene_X = col 0
+            # analysis Y = -scene_Z = -col 2
+            slicing_x = float(data[i, 0])
             slicing_y = -float(data[i, 2])
+            original_height = float(data[i, 1])
 
             bent_z = self._compute_bent_z(
                 layers_from_top, slicing_x, slicing_y,
-                float(data[i, 1]),  # original height
+                original_height,
+                max_bend_depth=max_bend_depth,
             )
             if bent_z is None:
                 continue
@@ -248,19 +269,26 @@ class LayerDataModifier:
 
     def _compute_bent_z(
         self,
-        layers_from_top: int,
+        layers_from_top: Optional[int],
         slicing_x: float,
         slicing_y: float,
         original_height: float,
+        max_bend_depth: float = 0.0,
     ) -> Optional[float]:
         """Compute the bent Z (height) for a vertex.
 
         Parameters
         ----------
+        layers_from_top:
+            Fixed layers-from-top value (top_only mode), or None to
+            auto-compute based on vertex height vs surface (all_surfaces).
         slicing_x, slicing_y:
-            Position in slicing coordinates (Z-up: X, Y on horizontal plane).
+            Position in analysis/slicing coordinates.
         original_height:
-            Original layer height in mm.
+            Original vertex height in mm.
+        max_bend_depth:
+            Maximum depth below the surface to bend (for all_surfaces
+            mode filtering).
 
         Returns the new height in mm, or None if outside non-planar region.
         """
@@ -284,6 +312,20 @@ class LayerDataModifier:
         blend = float(self._blend_map[row, col])
         if blend <= 0.0:
             return None
+
+        # Determine layers_from_top.
+        if layers_from_top is None:
+            # All-surfaces mode: compute per vertex.
+            if self._layer_height <= 0.0:
+                return None
+            # Skip vertices too far above or below the surface.
+            if original_height > surface_z + self._layer_height:
+                return None
+            if original_height < surface_z - max_bend_depth:
+                return None
+            layers_from_top = max(0, round(
+                (surface_z - original_height) / self._layer_height
+            ))
 
         # Target Z: surface minus layer offset.
         target_z = surface_z - layers_from_top * self._layer_height
