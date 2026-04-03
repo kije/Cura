@@ -23,7 +23,25 @@ UM.Dialog
 
     onVisibleChanged:
     {
-        if (visible && manager) sceneNodeModel = manager.getSceneNodes()
+        if (visible && manager)
+        {
+            sceneNodeModel = manager.getSceneNodes()
+
+            // If a node was pre-selected (from BC tool's "Confirm and Optimize"),
+            // find and select it in the ComboBox.
+            var preKey = manager.preselectedNodeKey
+            if (preKey && preKey !== "")
+            {
+                for (var i = 0; i < sceneNodeModel.length; i++)
+                {
+                    if (sceneNodeModel[i].id === preKey)
+                    {
+                        nodeSelector.currentIndex = i
+                        break
+                    }
+                }
+            }
+        }
     }
 
     Item

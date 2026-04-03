@@ -90,6 +90,7 @@ class BoundaryConditionTool(Tool):
             "CurrentSelectionCount", "SelectionSummary",
             "ConfirmForceGroup", "ClearAllBCs",
             "ClearFixedFaces", "ClearForceGroups",
+            "OpenOptimizeDialog",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -214,6 +215,19 @@ class BoundaryConditionTool(Tool):
             self._rotating_group_index = -1
             self.propertyChanged.emit()
             self._update_highlights()
+
+    def getOpenOptimizeDialog(self) -> bool:
+        return False
+
+    def setOpenOptimizeDialog(self, value) -> None:
+        if value and self._extension:
+            # Get the currently selected node's cache key
+            selected = Selection.getSelectedObject(0)
+            if selected is not None:
+                node_key = str(id(selected))
+                self._extension.showDialogForNode(node_key)
+            else:
+                self._extension.showDialog()
 
     # ── Event handling ─────────────────────────────────────────────────────
 

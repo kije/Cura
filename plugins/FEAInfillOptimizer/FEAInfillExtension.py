@@ -43,6 +43,7 @@ class FEAInfillExtension(QObject, Extension):
     depsAvailableChanged = pyqtSignal()
     sceneNodesChanged = pyqtSignal()
     settingsChanged = pyqtSignal()
+    preselectedNodeChanged = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         QObject.__init__(self, parent)
@@ -60,6 +61,9 @@ class FEAInfillExtension(QObject, Extension):
 
         # Weak-reference cache for scene node lookup (C11: safe id-based lookup)
         self._node_cache: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+        # Pre-selected node for dialog opening from tool
+        self._preselected_node_key = ""
 
         # Analysis state
         self._analysis_status = "idle"  # idle, running, complete, error
@@ -89,6 +93,28 @@ class FEAInfillExtension(QObject, Extension):
     # -- Dialog --
 
     def showDialog(self) -> None:
+        self._ensureDialog()
+        if self._dialog:
+            self._dialog.show()
+
+    def showDialogForNode(self, node_key: str) -> None:
+        """Open the dialog with a specific model pre-selected.
+
+        Called from the BoundaryConditionTool's "Confirm and Optimize"
+        button so the user transitions seamlessly from BC definition
+        to analysis.
+        """
+        # Ensure the node is in our cache before opening
+        self.getSceneNodes()
+
+        self._ensureDialog()
+        if self._dialog:
+            # Set the pre-selected node key so the dialog can select it
+            self._preselected_node_key = node_key
+            self.preselectedNodeChanged.emit()
+            self._dialog.show()
+
+    def _ensureDialog(self) -> None:
         if self._dialog is None:
             plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
             if not plugin_path:
@@ -98,8 +124,6 @@ class FEAInfillExtension(QObject, Extension):
             self._dialog = CuraApplication.getInstance().createQmlComponent(
                 qml_path, {"manager": self}
             )
-        if self._dialog:
-            self._dialog.show()
 
     # -- Dependency management --
 
@@ -136,6 +160,12 @@ class FEAInfillExtension(QObject, Extension):
                 self._deps_available = self._dep_manager.all_available()
                 self.depsAvailableChanged.emit()
         CuraApplication.getInstance().callLater(_apply)
+
+    # -- Pre-selected node (set by tool's "Confirm and Optimize" button) --
+
+    @pyqtProperty(str, notify=preselectedNodeChanged)
+    def preselectedNodeKey(self) -> str:
+        return self._preselected_node_key
 
     # -- Scene node listing --
 

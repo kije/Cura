@@ -298,6 +298,17 @@ Item
             }
         }
 
+        // ── Optimize button ──────────────────────────────────────────────────
+        Item { height: UM.Theme.getSize("default_margin").height }
+
+        Cura.PrimaryButton
+        {
+            Layout.fillWidth: true
+            text: catalog.i18nc("@action:button", "Confirm and Optimize")
+            enabled: bcPanel.selectionSummary !== "" && bcPanel.selectionSummary !== "No model selected." && bcPanel.selectionSummary !== "No BCs defined. Click faces to begin."
+            onClicked: UM.Controller.setProperty("OpenOptimizeDialog", true)
+        }
+
         // Bottom spacer
         Item { Layout.fillHeight: true }
     }
