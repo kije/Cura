@@ -364,6 +364,14 @@ def bend_gcode(
     # Track current feedrate.
     current_feedrate = 0.0
 
+    # Track whether the last emitted Z differs from the current layer Z.
+    # When a bent region ends, we must inject an explicit Z on the next
+    # move to restore the printer to the correct height.  Without this,
+    # the printer stays at the last bent Z because most G1 lines don't
+    # include a Z coordinate.
+    _last_emitted_z: float | None = None  # Last Z value written to output.
+    _diag_z_restored = 0  # Count of moves where we injected a Z restore.
+
     # Diagnostic counters.
     _diag_not_target = 0
     _diag_not_extrusion = 0
@@ -442,7 +450,42 @@ def bend_gcode(
                 region_end_indices[current_region_id] = len(modified_moves)
                 in_region = False
 
-            modified_moves.append(move)
+            # CRITICAL FIX: If the last emitted Z was a bent value that
+            # differs from this move's actual Z, we must inject an
+            # explicit Z coordinate.  Without this, the printer stays at
+            # the bent Z because most G1 lines omit the Z parameter.
+            if (_last_emitted_z is not None
+                    and move.z is None
+                    and abs(_last_emitted_z - move.abs_z) > 0.001):
+                # Create a copy of the move with an explicit Z to
+                # restore the printer to the correct layer height.
+                restored_move = GCodeMove(
+                    command=move.command,
+                    x=move.x,
+                    y=move.y,
+                    z=move.abs_z,  # Inject explicit Z
+                    e=move.e,
+                    f=move.f,
+                    abs_x=move.abs_x,
+                    abs_y=move.abs_y,
+                    abs_z=move.abs_z,
+                    abs_e=move.abs_e,
+                    line_type=move.line_type,
+                    layer_number=move.layer_number,
+                    original_line=move.original_line,
+                    chunk_index=move.chunk_index,
+                    line_index_in_chunk=move.line_index_in_chunk,
+                    is_travel=move.is_travel,
+                    is_extrusion=move.is_extrusion,
+                )
+                modified_moves.append(restored_move)
+                _last_emitted_z = move.abs_z
+                _diag_z_restored += 1
+            else:
+                modified_moves.append(move)
+                # Track emitted Z if this move has an explicit Z.
+                if move.z is not None:
+                    _last_emitted_z = move.z
             continue
 
         # Start a new region if not already in one.
@@ -512,38 +555,27 @@ def bend_gcode(
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor
 
-                # Clamp Z to prevent unsupported extrusion (spikes).
+                # Safety clamps for Z displacement.
                 #
-                # The key insight: each bent layer should sit roughly
-                # one layer_height above the bent layer below it.
-                # The layer below (at layers_from_top+1) would be bent
-                # to: surface_z - (layers_from_top+1) * layer_height.
-                # So the gap between this layer and the one below
-                # should be close to layer_height.  We allow up to
-                # layer_height + max_path_deviation to accommodate
-                # curvature, but no more.
+                # The blend_factor from the blend_map naturally constrains
+                # displacement (0.0 at edges, 1.0 at center).  These
+                # clamps are safety nets for edge cases.
                 #
-                # This prevents the spike problem: a path at original
-                # Z=9mm won't jump to Z=12mm just because the surface
-                # is at 12mm, because the layer below it hasn't been
-                # bent that high either.
-                expected_layer_below_z = surface_z - (layers_from_top + 1) * layer_height
-                max_gap = layer_height + max_path_deviation
-                if bent_z - expected_layer_below_z > max_gap:
-                    bent_z = expected_layer_below_z + max_gap
+                # 1. Don't let any single layer deviate more than
+                #    max_path_deviation from its conformal target.
+                #    The conformal target is: surface_z - layers_from_top * layer_height
+                #    and bent_z should be close to it (modulated by blend_factor).
+                #    This prevents individual paths from going rogue.
+                conformal_deviation = abs(bent_z - target_z)
+                if conformal_deviation > max_path_deviation and blend_factor > 0.5:
+                    # Only clamp when blend_factor is high — at low blend
+                    # the move is supposed to be close to its original Z.
+                    bent_z = target_z + math.copysign(
+                        max_path_deviation, bent_z - target_z
+                    )
                     _diag_z_clamped += 1
 
-                # Also clamp: don't deviate more than
-                # nonplanar_layer_count * layer_height + max_path_deviation
-                # from the original Z.  This prevents runaway bending
-                # when the surface is very far from the original layer.
-                max_total_deviation = nonplanar_layer_count * layer_height + max_path_deviation
-                z_displacement = bent_z - sz
-                if abs(z_displacement) > max_total_deviation:
-                    bent_z = sz + math.copysign(max_total_deviation, z_displacement)
-                    _diag_z_clamped += 1
-
-                # Don't go below zero (bed surface).
+                # 2. Don't go below zero (bed surface).
                 if bent_z < 0.0:
                     bent_z = max(0.05, sz)
                     _diag_z_clamped += 1
@@ -644,6 +676,7 @@ def bend_gcode(
                 is_extrusion=True,
             )
             modified_moves.append(new_move)
+            _last_emitted_z = bent_z
 
             sub_prev_x = sx
             sub_prev_y = sy
@@ -669,10 +702,10 @@ def bend_gcode(
     logger.info(
         "Z-bending detail: actually_bent=%d (delta>0.001mm), "
         "zero_delta=%d, nan_interp=%d, max_z_delta=%.4fmm, "
-        "zero_blend=%d, target_eq_sz=%d, z_clamped=%d",
+        "zero_blend=%d, target_eq_sz=%d, z_clamped=%d, z_restored=%d",
         _diag_actually_bent, _diag_zero_delta, _diag_nan_interp,
         _diag_max_z_delta, _diag_zero_blend, _diag_target_equals_sz,
-        _diag_z_clamped,
+        _diag_z_clamped, _diag_z_restored,
     )
 
     # Log height map bounds and Z range for debugging coordinate mismatches.

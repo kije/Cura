@@ -422,19 +422,13 @@ class LayerDataModifier:
         # Blend between original height and non-planar target.
         bent_z = original_height + blend * (target_z - original_height)
 
-        # Clamp Z to prevent unsupported extrusion (spikes).
-        # Each bent layer should sit roughly one layer_height above the
-        # bent layer below it.  Allow layer_height + max_path_deviation.
-        expected_layer_below_z = surface_z - (layers_from_top + 1) * self._layer_height
-        max_gap = self._layer_height + self._max_z_displacement
-        if bent_z - expected_layer_below_z > max_gap:
-            bent_z = expected_layer_below_z + max_gap
-
-        # Also clamp total deviation from original Z.
-        max_total = self._nonplanar_layer_count * self._layer_height + self._max_z_displacement
-        z_displacement = bent_z - original_height
-        if abs(z_displacement) > max_total:
-            bent_z = original_height + math.copysign(max_total, z_displacement)
+        # Safety clamp: don't let a layer deviate more than
+        # max_path_deviation from its conformal target position.
+        conformal_deviation = abs(bent_z - target_z)
+        if conformal_deviation > self._max_z_displacement and blend > 0.5:
+            bent_z = target_z + math.copysign(
+                self._max_z_displacement, bent_z - target_z
+            )
 
         # Don't go below zero (bed surface).
         if bent_z < 0.0:

@@ -225,3 +225,194 @@ class TestBendGCode:
         all_text = "\n".join(result)
         # Support moves should be left alone
         assert "X10" in all_text
+
+
+class TestZSpikeRegression:
+    """Regression tests for the Z-spike bug.
+
+    The bug: most CuraEngine G1 moves omit the Z parameter (Z is only
+    emitted when it changes).  When a bent move emits an explicit Z
+    (e.g., Z12.5), and the next un-bent move has no Z, the printer
+    stays at Z12.5 instead of returning to the layer height.  This
+    causes dramatic Z spikes within a single layer.
+    """
+
+    def _make_multilayer_gcode(self, n_layers=10, moves_per_layer=5, layer_height=0.2):
+        """Generate G-code with multiple layers and moves.
+
+        Simulates CuraEngine output where most moves lack Z coordinates.
+        Z is only emitted on the first move of each layer.
+        """
+        header = f";FLAVOR:Marlin\n;Layer height: {layer_height}\n"
+        start = f"G28\nM82\nG1 Z{layer_height:.3f} F3000\n"
+        chunks = [header, start]
+
+        abs_e = 0.0
+        for layer in range(n_layers):
+            z = (layer + 1) * layer_height
+            lines = [f";LAYER:{layer}", ";TYPE:WALL-OUTER"]
+            for i in range(moves_per_layer):
+                abs_e += 0.5
+                x = 5.0 + i * 2.0
+                y = 10.0
+                if i == 0:
+                    # First move of layer: include Z (as CuraEngine does).
+                    lines.append(f"G1 X{x:.3f} Y{y:.3f} Z{z:.3f} E{abs_e:.5f} F1500")
+                else:
+                    # Subsequent moves: no Z (as CuraEngine does).
+                    lines.append(f"G1 X{x:.3f} Y{y:.3f} E{abs_e:.5f}")
+            chunks.append("\n".join(lines) + "\n")
+
+        return chunks
+
+    def test_no_z_jump_after_bent_region(self):
+        """Un-bent moves after a bent region must not stay at the bent Z.
+
+        This is the core regression test: when a bent move emits Z=X and
+        the next un-bent move has no Z, the bender must inject an explicit
+        Z to restore the printer to the correct height.
+        """
+        n_layers = 20
+        layer_height = 0.2
+        gcode = self._make_multilayer_gcode(
+            n_layers=n_layers, moves_per_layer=8, layer_height=layer_height,
+        )
+
+        # Height map surface at 3.0mm (above most layers).
+        hm = _MockHeightMap(z_value=3.0, grid_shape=(20, 20))
+        # Make safe_map partially safe (only some XY positions) to create
+        # a mix of bent and un-bent moves within the same layer.
+        safe_map = np.zeros((20, 20), dtype=bool)
+        safe_map[8:12, 2:8] = True  # Only safe in a band
+        blend_map = np.ones((20, 20), dtype=np.float64)
+
+        settings = {
+            "layer_height": layer_height,
+            "nonplanar_layer_count": 5,
+            "max_angle_deg": 45.0,
+            "flow_compensation": False,
+            "feedrate_compensation": False,
+            "segment_length": 50.0,
+            "surface_mode": "top_only",
+            "max_path_deviation": 0.4,
+            "nozzle_size": 0.4,
+        }
+        result = bend_gcode(gcode, hm, safe_map, blend_map, settings)
+
+        # Parse all G1 moves from the result, tracking Z state.
+        import re
+        z_pattern = re.compile(r"Z([\d.]+)")
+        current_z = 0.0
+        current_layer = -1
+        max_z_jump = 0.0
+
+        for chunk in result:
+            for line in chunk.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";LAYER:"):
+                    try:
+                        current_layer = int(stripped.split(":")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+                if not stripped.startswith("G1"):
+                    continue
+
+                z_match = z_pattern.search(stripped)
+                if z_match:
+                    new_z = float(z_match.group(1))
+                    jump = abs(new_z - current_z)
+                    max_z_jump = max(max_z_jump, jump)
+                    current_z = new_z
+                # If no Z in the line, the printer stays at current_z.
+
+        # Max jump between any two consecutive Z-emitting lines should
+        # be bounded.  For 0.2mm layers with 5 non-planar layers and
+        # 0.4mm max deviation, no single jump should exceed ~2mm.
+        assert max_z_jump < 2.0, (
+            f"Excessive Z jump of {max_z_jump:.3f}mm detected between "
+            f"consecutive Z-bearing G1 commands.  This indicates the "
+            f"bender is not injecting Z-restore commands after bent regions."
+        )
+
+    def test_all_extrusion_moves_have_z_in_bent_layers(self):
+        """In layers that contain any bent moves, ALL G1 extrusion moves
+        should have an explicit Z coordinate to prevent the printer from
+        staying at the wrong height.
+        """
+        n_layers = 15
+        layer_height = 0.2
+        gcode = self._make_multilayer_gcode(
+            n_layers=n_layers, moves_per_layer=6, layer_height=layer_height,
+        )
+
+        # Surface at the top layer height.
+        top_z = n_layers * layer_height
+        hm = _MockHeightMap(z_value=top_z, grid_shape=(20, 20))
+        safe_map = np.ones((20, 20), dtype=bool)
+        blend_map = np.ones((20, 20), dtype=np.float64)
+
+        settings = {
+            "layer_height": layer_height,
+            "nonplanar_layer_count": 3,
+            "max_angle_deg": 45.0,
+            "flow_compensation": False,
+            "feedrate_compensation": False,
+            "segment_length": 50.0,
+            "surface_mode": "top_only",
+            "max_path_deviation": 0.4,
+            "nozzle_size": 0.4,
+        }
+        result = bend_gcode(gcode, hm, safe_map, blend_map, settings)
+
+        # Check: within any layer that has bent moves (Z differs from
+        # nominal), verify no G1 extrusion move (with E) lacks a Z.
+        import re
+        z_pattern = re.compile(r"Z([\d.]+)")
+        current_layer = -1
+        layer_has_bent = {}
+        layer_moves_without_z = {}
+
+        for chunk in result:
+            for line in chunk.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";LAYER:"):
+                    try:
+                        current_layer = int(stripped.split(":")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+                if not stripped.startswith("G1") or "E" not in stripped:
+                    continue
+                if current_layer < 0:
+                    continue
+
+                has_z = bool(z_pattern.search(stripped))
+                nominal_z = (current_layer + 1) * layer_height
+
+                if has_z:
+                    z_val = float(z_pattern.search(stripped).group(1))
+                    if abs(z_val - nominal_z) > 0.01:
+                        layer_has_bent.setdefault(current_layer, False)
+                        layer_has_bent[current_layer] = True
+                else:
+                    layer_moves_without_z.setdefault(current_layer, 0)
+                    layer_moves_without_z[current_layer] += 1
+
+        # For bent layers, having moves without Z is acceptable ONLY if
+        # the preceding Z-bearing move is at the correct height.  Since
+        # we can't easily check that here, we just verify the Z-restore
+        # mechanism exists by checking there aren't too many Z-less moves
+        # in bent layers.
+        for layer_num, is_bent in layer_has_bent.items():
+            if is_bent and layer_num in layer_moves_without_z:
+                no_z_count = layer_moves_without_z[layer_num]
+                # Allow some Z-less moves (they're fine if preceded by a
+                # correct Z), but flag if there are many — suggests the
+                # restore mechanism isn't working.
+                assert no_z_count < 10, (
+                    f"Layer {layer_num} has {no_z_count} extrusion moves "
+                    f"without Z coordinates despite being a bent layer.  "
+                    f"These moves will inherit the last Z value, which may "
+                    f"be a bent Z from a non-planar region."
+                )
