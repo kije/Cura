@@ -3,6 +3,7 @@
 
 import json
 import os
+import weakref
 from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import QObject, pyqtProperty, pyqtSignal, pyqtSlot
@@ -41,6 +42,7 @@ class FEAInfillExtension(QObject, Extension):
     boundaryConditionsChanged = pyqtSignal()
     depsAvailableChanged = pyqtSignal()
     sceneNodesChanged = pyqtSignal()
+    settingsChanged = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         QObject.__init__(self, parent)
@@ -55,6 +57,9 @@ class FEAInfillExtension(QObject, Extension):
         self._dialog = None
         self._dep_manager: Optional[DependencyManager] = None
         self._deps_available = False
+
+        # Weak-reference cache for scene node lookup (C11: safe id-based lookup)
+        self._node_cache: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
         # Analysis state
         self._analysis_status = "idle"  # idle, running, complete, error
@@ -119,8 +124,14 @@ class FEAInfillExtension(QObject, Extension):
 
     @pyqtSlot(result="QVariantList")
     def getSceneNodes(self) -> List[Dict[str, Any]]:
-        """Return list of printable scene nodes for the target model dropdown."""
+        """Return list of printable scene nodes for the target model dropdown.
+
+        Populates ``_node_cache`` (WeakValueDictionary) so that
+        ``_getNodeById`` can resolve nodes without relying on id() stability
+        across GC cycles (C11).
+        """
         nodes = []
+        self._node_cache.clear()
         scene = CuraApplication.getInstance().getController().getScene()
         for node in DepthFirstIterator(scene.getRoot()):
             if not isinstance(node, CuraSceneNode):
@@ -132,16 +143,28 @@ class FEAInfillExtension(QObject, Extension):
             mesh_data = node.getMeshData()
             if mesh_data is None or mesh_data.getVertices() is None:
                 continue
+            node_key = str(id(node))
+            self._node_cache[node_key] = node
             nodes.append({
                 "name": node.getName(),
-                "id": id(node)
+                "id": node_key
             })
         return nodes
 
-    def _getNodeById(self, node_id: int) -> Optional[CuraSceneNode]:
+    def _getNodeById(self, node_id) -> Optional[CuraSceneNode]:
+        """Resolve a node from the cache populated by ``getSceneNodes``.
+
+        Falls back to a full scene walk if the cache entry is missing (e.g.
+        the cache was not yet populated for this call site).
+        """
+        node_key = str(node_id)
+        cached = self._node_cache.get(node_key)
+        if cached is not None:
+            return cached
+        # Fallback: walk the scene comparing by identity via str(id)
         scene = CuraApplication.getInstance().getController().getScene()
         for node in DepthFirstIterator(scene.getRoot()):
-            if id(node) == node_id:
+            if str(id(node)) == node_key:
                 return node
         return None
 
@@ -207,45 +230,55 @@ class FEAInfillExtension(QObject, Extension):
 
     # -- Analysis settings --
 
-    @pyqtProperty(str, notify=analysisStatusChanged)
+    @pyqtProperty(str, notify=settingsChanged)
     def materialName(self) -> str:
         return self._material_name
 
     @materialName.setter
     def materialName(self, value: str) -> None:
-        self._material_name = value
+        if self._material_name != value:
+            self._material_name = value
+            self.settingsChanged.emit()
 
-    @pyqtProperty(float, notify=analysisStatusChanged)
+    @pyqtProperty(float, notify=settingsChanged)
     def minDensity(self) -> float:
         return self._min_density
 
     @minDensity.setter
     def minDensity(self, value: float) -> None:
-        self._min_density = value
+        if self._min_density != value:
+            self._min_density = value
+            self.settingsChanged.emit()
 
-    @pyqtProperty(float, notify=analysisStatusChanged)
+    @pyqtProperty(float, notify=settingsChanged)
     def maxDensity(self) -> float:
         return self._max_density
 
     @maxDensity.setter
     def maxDensity(self, value: float) -> None:
-        self._max_density = value
+        if self._max_density != value:
+            self._max_density = value
+            self.settingsChanged.emit()
 
-    @pyqtProperty(int, notify=analysisStatusChanged)
+    @pyqtProperty(int, notify=settingsChanged)
     def numZones(self) -> int:
         return self._num_zones
 
     @numZones.setter
     def numZones(self, value: int) -> None:
-        self._num_zones = value
+        if self._num_zones != value:
+            self._num_zones = value
+            self.settingsChanged.emit()
 
-    @pyqtProperty(int, notify=analysisStatusChanged)
+    @pyqtProperty(int, notify=settingsChanged)
     def maxIterations(self) -> int:
         return self._max_iterations
 
     @maxIterations.setter
     def maxIterations(self, value: int) -> None:
-        self._max_iterations = value
+        if self._max_iterations != value:
+            self._max_iterations = value
+            self.settingsChanged.emit()
 
     # -- FEA Actions --
 
@@ -300,8 +333,12 @@ class FEAInfillExtension(QObject, Extension):
         JobQueue.getInstance().add(job)
 
     def _onFEAProgress(self, job, progress: float) -> None:
-        self._progress = progress
-        self.progressChanged.emit()
+        # Marshal to the main thread; this slot may be called from the
+        # background Job thread via UM.Signal (C15: thread safety).
+        def _update() -> None:
+            self._progress = progress
+            self.progressChanged.emit()
+        CuraApplication.getInstance().callLater(_update)
 
     def _onFEAFinished(self, job) -> None:
         result = job.getResult()

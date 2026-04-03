@@ -103,6 +103,15 @@ _MATERIALS: Dict[str, Material] = {
 class MaterialDatabase:
     """Static accessor for the built-in material property database.
 
+    Notes:
+        - ``E_z`` (through-layer modulus) is stored per material but the
+          current isotropic FEA solver uses only ``E_xy``.  Anisotropic support
+          is planned for a future release.
+        - **TPU_95A** has ``nu=0.48``, which is near the incompressible limit.
+          Linear tetrahedral elements exhibit volumetric locking at high
+          Poisson's ratios (nu > 0.45).  Results for TPU should be treated as
+          approximate until a mixed or reduced-integration formulation is used.
+
     Example::
 
         mat = MaterialDatabase.get_material("PLA")

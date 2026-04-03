@@ -55,7 +55,8 @@ class BoundaryConditionTool(Tool):
         self._current_face_selection: list = []
 
         self.setExposedProperties("Mode", "ForceX", "ForceY", "ForceZ",
-                                  "CurrentSelectionCount", "SelectionSummary")
+                                  "CurrentSelectionCount", "SelectionSummary",
+                                  "ConfirmForceGroup", "ClearAllBCs")
 
     # -- Properties exposed to QML --
 
@@ -108,6 +109,22 @@ class BoundaryConditionTool(Tool):
         if self._current_face_selection:
             parts.append(f"Current selection: {len(self._current_face_selection)} faces")
         return "\n".join(parts) if parts else "No BCs defined. Click faces to begin."
+
+    # -- Action trigger properties (QML sets these to True to trigger actions) --
+
+    def getConfirmForceGroup(self) -> bool:
+        return False
+
+    def setConfirmForceGroup(self, value: bool) -> None:
+        if value:
+            self.confirmForceGroup()
+
+    def getClearAllBCs(self) -> bool:
+        return False
+
+    def setClearAllBCs(self, value: bool) -> None:
+        if value:
+            self.clearAllBCs()
 
     # -- Event handling --
 

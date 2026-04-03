@@ -128,8 +128,14 @@ class FEABoundaryConditionDecorator(SceneNodeDecorator):
         ]
         self._material_name = data.get("material_name")
 
-    def __deepcopy__(self, memo):
+    def __deepcopy__(self, memo: dict) -> "FEABoundaryConditionDecorator":
+        # SceneNodeDecorator.__deepcopy__ raises NotImplementedError by design;
+        # construct the copy manually and reset _node to None (the node
+        # relationship is re-established when the decorator is added to a copied
+        # scene node via setNode()).
         copy = FEABoundaryConditionDecorator()
+        memo[id(self)] = copy
+        copy._node = None
         copy._fixed_faces = list(self._fixed_faces)
         copy._force_groups = [
             ForceGroup(list(fg.face_indices), Vector(fg.force.x, fg.force.y, fg.force.z))

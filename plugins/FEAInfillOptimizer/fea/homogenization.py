@@ -3,19 +3,21 @@
 
 """Homogenization: compute effective elastic properties for infill regions.
 
-Uses a power-law model (also known as SIMP — Solid Isotropic Material with
-Penalization) to relate infill density fraction to effective stiffness.
+Uses a power-law model to relate infill density fraction to effective stiffness.
+Note: the exponents below are *infill homogenization exponents* specific to each
+infill geometry — they are NOT the SIMP (Solid Isotropic Material with
+Penalization) topology-optimisation penalty, which is a separate concept.
 
     E_eff = E_bulk × density_fraction^n
 
-where *n* (the penalization exponent) depends on the infill pattern.
+where *n* (the homogenization exponent) depends on the infill pattern.
 """
 
 from typing import Tuple
 
 import numpy as np
 
-# Penalization exponents per infill pattern.
+# Homogenization exponents per infill pattern.
 # Higher n → stronger contrast between dense and sparse regions (more aggressive
 # material redistribution).
 _PATTERN_EXPONENTS: dict[str, float] = {
@@ -38,12 +40,13 @@ def effective_properties(
 ) -> Tuple[float, float]:
     """Compute effective Young's modulus and Poisson's ratio for an infill region.
 
-    Uses the SIMP power law::
+    Uses a power-law (infill homogenization) model::
 
         E_eff = E_bulk × density_fraction^n
 
-    Poisson's ratio is treated as approximately constant with density (a common
-    assumption in structural topology optimisation for moderate density ranges).
+    where *n* is a pattern-specific homogenization exponent (not the SIMP
+    topology-optimisation penalty).  Poisson's ratio is treated as approximately
+    constant with density (a common assumption for moderate density ranges).
 
     Args:
         E_bulk: Young's modulus of the solid material in MPa.
@@ -72,7 +75,8 @@ def build_constitutive_matrix(E: float, nu: float) -> np.ndarray:
 
     Args:
         E: Young's modulus in MPa (or any consistent pressure unit).
-        nu: Poisson's ratio (dimensionless), must satisfy 0 < nu < 0.5.
+        nu: Poisson's ratio (dimensionless), must satisfy -1 < nu < 0.5.
+            Values > 0.45 risk volumetric locking with linear tetrahedra.
 
     Returns:
         6×6 numpy ndarray of dtype float64.
@@ -80,9 +84,17 @@ def build_constitutive_matrix(E: float, nu: float) -> np.ndarray:
     Raises:
         ValueError: If ``nu`` is outside the physically admissible range.
     """
-    if not (0.0 < nu < 0.5):
+    import warnings
+    if not (-1.0 < nu < 0.5):
         raise ValueError(
-            f"Poisson's ratio nu={nu} is outside the admissible range (0, 0.5)."
+            f"Poisson's ratio nu={nu} is outside the admissible range (-1, 0.5)."
+        )
+    if nu > 0.45:
+        warnings.warn(
+            f"Poisson's ratio nu={nu} > 0.45 risks volumetric locking with linear "
+            "tetrahedral elements. Consider using a reduced integration scheme.",
+            UserWarning,
+            stacklevel=2,
         )
 
     lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))  # first Lamé parameter

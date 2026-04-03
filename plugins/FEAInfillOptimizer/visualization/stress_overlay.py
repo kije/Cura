@@ -4,6 +4,7 @@
 from typing import Any, Dict, List, Optional
 
 import numpy
+import scipy.spatial
 
 from cura.CuraApplication import CuraApplication
 from cura.Scene.CuraSceneNode import CuraSceneNode
@@ -72,15 +73,11 @@ def _map_element_stress_to_vertices(
     vertex_stress = numpy.zeros(n_vertices, dtype=numpy.float64)
     vertex_count = numpy.zeros(n_vertices, dtype=numpy.int32)
 
-    # Map each surface vertex to the nearest tet node index
-    # Brute-force: acceptable for typical mesh sizes in Cura
-    nearest_tet_node = numpy.argmin(
-        numpy.linalg.norm(
-            tet_nodes[numpy.newaxis, :, :] - surface_vertices[:, numpy.newaxis, :],
-            axis=2,
-        ),
-        axis=1,
-    )  # shape: (V,)
+    # Map each surface vertex to the nearest tet node index using a KDTree
+    # (O(V log N) vs the O(V×N) brute-force, critical for large meshes).
+    kd_tree = scipy.spatial.KDTree(tet_nodes)
+    _, nearest_tet_node = kd_tree.query(surface_vertices, workers=1)
+    # nearest_tet_node: shape (V,)
 
     # Build a mapping: tet_node_index → list of element indices
     node_to_elements: Dict[int, List[int]] = {}
@@ -157,9 +154,10 @@ class StressOverlayManager:
         if source_mesh is None:
             return
 
-        surface_verts = numpy.asarray(source_mesh.getVertices(), dtype=numpy.float64)
-        if surface_verts is None or len(surface_verts) == 0:
+        raw_verts = source_mesh.getVertices()
+        if raw_verts is None or len(raw_verts) == 0:
             return
+        surface_verts = numpy.asarray(raw_verts, dtype=numpy.float64)
 
         # Map element stress to surface vertices
         vertex_stress = _map_element_stress_to_vertices(
@@ -209,12 +207,16 @@ class StressOverlayManager:
             overlay_node.addDecorator(SliceableObjectDecorator())
             stack = overlay_node.callDecoration("getStack")
             if stack is not None:
-                definition = global_stack.getSettingDefinition("anti_overhang_mesh")
+                # Use the top container of the stack for SettingInstance target,
+                # and retrieve the definition from the stack itself (not global_stack)
+                # to stay within the node's own container hierarchy.
+                top_container = stack.getTop()
+                definition = stack.getSettingDefinition("anti_overhang_mesh")
                 if definition is not None:
-                    instance = SettingInstance(definition, stack)
+                    instance = SettingInstance(definition, top_container)
                     instance.setProperty("value", True)
                     instance.resetState()
-                    stack.addInstance(instance)
+                    top_container.addInstance(instance)
 
         controller = application.getController()
         scene = controller.getScene()
@@ -226,6 +228,9 @@ class StressOverlayManager:
         from cura.Operations.SetParentOperation import SetParentOperation
         grouped_op.addOperation(SetParentOperation(overlay_node, node))
         grouped_op.push()
+
+        # Notify the scene so renderers pick up the new node immediately
+        scene.sceneChanged.emit(overlay_node)
 
     # ------------------------------------------------------------------
     # Private helpers

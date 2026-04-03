@@ -5,9 +5,14 @@ import importlib
 import importlib.util
 import os
 import sys
-from typing import Dict
+from typing import Dict, List
 
 from UM.Logger import Logger
+
+
+def _is_frozen() -> bool:
+    """Return True when running inside a PyInstaller-frozen Cura bundle."""
+    return getattr(sys, "frozen", False)
 
 
 REQUIRED_PACKAGES = {
@@ -51,8 +56,20 @@ class DependencyManager:
     def get_vendor_dir(self) -> str:
         return self._vendor_dir
 
-    def get_install_command(self) -> list:
-        """Return the pip install command arguments."""
+    def get_install_command(self) -> List[str]:
+        """Return the pip install command arguments.
+
+        Returns an empty list when running in a PyInstaller-frozen build —
+        dependencies must be pre-bundled at package time and cannot be
+        installed at runtime (C16).
+        """
+        if _is_frozen():
+            Logger.log(
+                "w",
+                "FEA Infill: Running in a frozen (PyInstaller) build. "
+                "Dependencies must be pre-bundled; runtime pip install is not supported."
+            )
+            return []
         missing = self.missing_packages()
         if not missing:
             return []

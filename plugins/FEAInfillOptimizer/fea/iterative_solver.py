@@ -24,6 +24,11 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+try:
+    import trimesh as _trimesh
+except ImportError:
+    _trimesh = None  # type: ignore[assignment]
+
 from .fea_solver import LinearElasticitySolver
 from .homogenization import effective_properties
 from .material_database import Material
@@ -53,6 +58,7 @@ class IterativeFEASolver:
         material: Material,
         config: Dict[str, Any],
         progress_callback: Optional[Callable[[float], None]] = None,
+        surface_mesh: Any = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Run the fixed-point density iteration.
 
@@ -74,6 +80,12 @@ class IterativeFEASolver:
 
             progress_callback: Optional callable receiving a float in [0, 1]
                 after each iteration.
+            surface_mesh: The original ``trimesh.Trimesh`` surface mesh.  When
+                provided, face indices returned by the BC decorator are expanded
+                to vertex indices via ``surface_mesh.faces[face_idx]`` before
+                lookup in ``tet_mesh.surface_node_map``.  If ``None``, the
+                face indices are treated as vertex indices directly (legacy
+                behaviour).
 
         Returns:
             Tuple ``(density_field, stress_field, info_dict)`` where:
@@ -91,8 +103,8 @@ class IterativeFEASolver:
         pattern = str(config.get("infill_pattern", "gyroid"))
 
         # --- Build boundary condition arrays from surface face → tet node map ---
-        fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh)
-        force_vector = _build_force_vector(boundary_conditions, tet_mesh)
+        fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh, surface_mesh)
+        force_vector = _build_force_vector(boundary_conditions, tet_mesh, surface_mesh)
 
         fea_solver = LinearElasticitySolver()
 
@@ -102,6 +114,7 @@ class IterativeFEASolver:
 
         converged = False
         max_change = float("inf")
+        iteration = 0
 
         for iteration in range(max_iter):
             # --- Homogenize ---
@@ -150,7 +163,7 @@ class IterativeFEASolver:
                 break
 
         info: Dict[str, Any] = {
-            "iterations": iteration + 1,  # noqa: F821  (defined by loop)
+            "iterations": iteration + 1,
             "converged": converged,
             "max_change": max_change,
         }
@@ -163,16 +176,41 @@ class IterativeFEASolver:
 # ---------------------------------------------------------------------------
 
 
-def _fixed_nodes_from_bc(bc, tet_mesh: TetMesh) -> np.ndarray:
+def _face_indices_to_vertex_indices(
+    face_indices: List[int], surface_mesh: Any
+) -> List[int]:
+    """Expand triangle face indices to unique surface vertex indices.
+
+    Args:
+        face_indices: List of triangle face indices into ``surface_mesh.faces``.
+        surface_mesh: ``trimesh.Trimesh`` surface mesh providing ``.faces``
+            (shape F×3, int).
+
+    Returns:
+        Deduplicated list of vertex indices referenced by the given faces.
+    """
+    vertex_set: Set[int] = set()
+    faces = surface_mesh.faces  # (F, 3) int array
+    for fi in face_indices:
+        for vi in faces[int(fi)]:
+            vertex_set.add(int(vi))
+    return list(vertex_set)
+
+
+def _fixed_nodes_from_bc(bc, tet_mesh: TetMesh, surface_mesh: Any = None) -> np.ndarray:
     """Resolve fixed-face triangle indices to tet-mesh node indices.
 
-    Each fixed face (triangle) consists of 3 surface vertex indices.  These
-    are looked up in ``tet_mesh.surface_node_map`` to get tet-mesh node
-    indices.  Duplicates are removed.
+    The BC decorator stores *face* indices into the surface trimesh.  Each face
+    references 3 surface vertices which are then looked up in
+    ``tet_mesh.surface_node_map`` (keyed by surface vertex index) to obtain the
+    corresponding tet-mesh node indices.
 
     Args:
         bc: ``FEABoundaryConditionDecorator`` instance.
         tet_mesh: Tetrahedral mesh with ``surface_node_map``.
+        surface_mesh: Original ``trimesh.Trimesh`` used to expand face indices
+            to vertex indices.  If ``None``, face indices are treated as vertex
+            indices directly (legacy fallback).
 
     Returns:
         1-D ndarray of unique tet-mesh node indices (int64).
@@ -180,32 +218,34 @@ def _fixed_nodes_from_bc(bc, tet_mesh: TetMesh) -> np.ndarray:
     smap = tet_mesh.surface_node_map
     fixed_face_indices: List[int] = bc.getFixedFaces()
 
-    # surface_node_map keys are surface *vertex* indices, not face indices.
-    # The caller stores face indices; we need to resolve them via the trimesh
-    # face→vertex adjacency.  However, at this layer we only have
-    # surface_node_map (vertex → tet node).  We use a heuristic: treat
-    # fixed_face_indices as surface vertex indices directly.
-    # (FEABoundaryConditionDecorator stores face indices; the job layer should
-    # expand these to vertex indices before reaching the solver.  If they are
-    # already vertex indices this works directly.)
+    if surface_mesh is not None:
+        sv_indices = _face_indices_to_vertex_indices(fixed_face_indices, surface_mesh)
+    else:
+        sv_indices = [int(fi) for fi in fixed_face_indices]
+
     tet_node_set: Set[int] = set()
-    for sv_idx in fixed_face_indices:
-        tn = smap.get(int(sv_idx))
+    for sv_idx in sv_indices:
+        tn = smap.get(sv_idx)
         if tn is not None:
             tet_node_set.add(tn)
 
     return np.array(sorted(tet_node_set), dtype=np.int64)
 
 
-def _build_force_vector(bc, tet_mesh: TetMesh) -> np.ndarray:
+def _build_force_vector(bc, tet_mesh: TetMesh, surface_mesh: Any = None) -> np.ndarray:
     """Distribute force groups onto the global force vector.
 
     For each force group the total force vector is divided equally among the
-    tet-mesh nodes that correspond to the face indices in the group.
+    tet-mesh nodes that correspond to the face indices in the group.  Face
+    indices are expanded to vertex indices via ``surface_mesh.faces`` when the
+    surface mesh is provided.
 
     Args:
         bc: ``FEABoundaryConditionDecorator`` instance.
         tet_mesh: Tetrahedral mesh.
+        surface_mesh: Original ``trimesh.Trimesh`` used to expand face indices
+            to vertex indices.  If ``None``, face indices are treated as vertex
+            indices directly (legacy fallback).
 
     Returns:
         Global force vector, shape (n_nodes × 3,), float64.
@@ -218,10 +258,17 @@ def _build_force_vector(bc, tet_mesh: TetMesh) -> np.ndarray:
         fv = force_group.force  # UM Vector
         fx, fy, fz = float(fv.x), float(fv.y), float(fv.z)
 
-        # Collect tet nodes for this group's face/vertex indices
+        if surface_mesh is not None:
+            sv_indices = _face_indices_to_vertex_indices(
+                [int(fi) for fi in force_group.face_indices], surface_mesh
+            )
+        else:
+            sv_indices = [int(fi) for fi in force_group.face_indices]
+
+        # Collect tet nodes for this group's vertex indices
         tet_nodes_in_group: List[int] = []
-        for sv_idx in force_group.face_indices:
-            tn = smap.get(int(sv_idx))
+        for sv_idx in sv_indices:
+            tn = smap.get(sv_idx)
             if tn is not None:
                 tet_nodes_in_group.append(tn)
 

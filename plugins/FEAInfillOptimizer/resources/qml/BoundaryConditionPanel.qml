@@ -5,6 +5,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import UM 1.5 as UM
+import Cura 1.0 as Cura
 
 Item
 {
@@ -96,7 +97,7 @@ Item
                 rowSpacing: UM.Theme.getSize("default_margin").height / 2
 
                 UM.Label { text: catalog.i18nc("@label", "Fx:") }
-                UM.TextField
+                TextField
                 {
                     id: forceXField
                     Layout.fillWidth: true
@@ -107,7 +108,7 @@ Item
                 }
 
                 UM.Label { text: catalog.i18nc("@label", "Fy:") }
-                UM.TextField
+                TextField
                 {
                     id: forceYField
                     Layout.fillWidth: true
@@ -118,7 +119,7 @@ Item
                 }
 
                 UM.Label { text: catalog.i18nc("@label", "Fz:") }
-                UM.TextField
+                TextField
                 {
                     id: forceZField
                     Layout.fillWidth: true
@@ -184,15 +185,15 @@ Item
         {
             Layout.fillWidth: true
             text: catalog.i18nc("@action:button", "Confirm Force Group")
-            enabled: bcPanel.selectionSummary !== ""
-            onClicked: UM.Controller.triggerAction("confirmForceGroup")
+            enabled: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+            onClicked: UM.Controller.setProperty("ConfirmForceGroup", true)
         }
 
         Cura.SecondaryButton
         {
             Layout.fillWidth: true
             text: catalog.i18nc("@action:button", "Clear All")
-            onClicked: UM.Controller.triggerAction("clearAll")
+            onClicked: UM.Controller.setProperty("ClearAllBCs", true)
         }
 
         // Bottom spacer

@@ -72,8 +72,19 @@ def create_all_modifier_meshes(
         if stack is not None:
             settings = stack.getTop()
 
+            # First pass: set infill_mesh=True so the definition resolves
+            # correctly before the companion settings are applied.
+            definition = stack.getSettingDefinition("infill_mesh")
+            if definition is not None:
+                instance = SettingInstance(definition, settings)
+                instance.setProperty("value", True)
+                instance.resetState()
+                settings.addInstance(instance)
+
+            # Second pass: companion settings required by Cura on infill meshes.
             for key, value in [
-                ("infill_mesh", True),
+                ("wall_thickness", 0),
+                ("top_bottom_thickness", 0),
                 ("infill_sparse_density", density_pct),
                 ("infill_pattern", infill_pattern),
             ]:
@@ -88,3 +99,4 @@ def create_all_modifier_meshes(
         grouped_op.addOperation(SetParentOperation(node, parent_node))
 
     grouped_op.push()
+    scene.sceneChanged.emit(parent_node)

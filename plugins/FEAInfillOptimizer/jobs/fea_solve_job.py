@@ -4,18 +4,16 @@
 import math
 from typing import Any, Callable, Dict
 
+import numpy
+
 from UM.Job import Job
-from UM.Message import Message
 from UM.Signal import Signal
-from UM.i18n import i18nCatalog
 
 from ..fea.mesh_extraction import extract_trimesh
 from ..fea.tetrahedralization import tetrahedralize
 from ..fea.iterative_solver import IterativeFEASolver
 from ..mesh_generation.density_discretizer import discretize_density
 from ..mesh_generation.zone_mesh_builder import build_zone_mesh
-
-catalog = i18nCatalog("cura")
 
 
 class FEASolveJob(Job):
@@ -27,7 +25,8 @@ class FEASolveJob(Job):
     Args:
         node: The CuraSceneNode to analyse.
         bc_decorator: FEABoundaryConditionDecorator attached to the node.
-        material: Dict of material properties (e.g. ``{"E": 210e9, "nu": 0.3}``).
+        material: :class:`~fea.material_database.Material` dataclass instance
+            with ``yield_strength``, ``E_xy``, ``nu``, and other properties.
         config: Analysis configuration dict with keys:
 
             * ``"mesh_resolution"`` (str): ``"coarse"``, ``"medium"``, or
@@ -44,7 +43,7 @@ class FEASolveJob(Job):
         self,
         node: Any,
         bc_decorator: Any,
-        material: Dict[str, float],
+        material: Any,
         config: Dict[str, Any],
     ) -> None:
         super().__init__()
@@ -86,34 +85,28 @@ class FEASolveJob(Job):
         ``zones``, ``max_stress``, ``min_stress``, ``safety_factor``,
         ``iterations``, ``converged``, ``stress_field``, ``density_field``,
         ``tet_mesh``.
-        """
-        message = Message(
-            catalog.i18nc("@info:status", "Running FEA analysis…"),
-            lifetime=0,
-            dismissable=False,
-            progress=0,
-            title=catalog.i18nc("@info:title", "FEA Infill Optimizer"),
-        )
-        message.show()
 
+        Note: Message.show/setProgress/hide must NOT be called from a background
+        thread. Progress is communicated to the UI via ``self.progress`` signal
+        only; the caller (Extension) is responsible for displaying status UI on
+        the main thread.
+        """
         try:
             # ── Step 1: Extract trimesh ──────────────────────────────── 10 %
             self._emit_progress(0.0)
-            trimesh = extract_trimesh(self._node)
+            surface_mesh = extract_trimesh(self._node)
             self._emit_progress(10.0)
-            message.setProgress(10)
 
             # Compute bounding-box diagonal for element size heuristic
-            verts = trimesh.vertices
+            verts = surface_mesh.vertices
             bbox_min = verts.min(axis=0)
             bbox_max = verts.max(axis=0)
             bbox_diag = float(math.sqrt(((bbox_max - bbox_min) ** 2).sum()))
 
             # ── Step 2: Tetrahedralize ───────────────────────────────── 30 %
             element_size = self._resolve_element_size(bbox_diag)
-            tet_mesh = tetrahedralize(trimesh, element_size=element_size)
+            tet_mesh = tetrahedralize(surface_mesh, element_size=element_size)
             self._emit_progress(30.0)
-            message.setProgress(30)
 
             # ── Step 3: Run iterative FEA solver ────────────────────── 30–90 %
             solver = IterativeFEASolver()
@@ -122,7 +115,6 @@ class FEASolveJob(Job):
                 """Translate solver [0, 1] fraction to overall [30, 90] range."""
                 overall = 30.0 + fraction * 60.0
                 self._emit_progress(overall)
-                message.setProgress(int(overall))
 
             density_field, stress_field, info = solver.solve(
                 tet_mesh=tet_mesh,
@@ -130,13 +122,13 @@ class FEASolveJob(Job):
                 material=self._material,
                 config=self._config,
                 progress_callback=_solver_progress_cb,
+                surface_mesh=surface_mesh,
             )
             iterations = info["iterations"]
             converged = info["converged"]
 
             # ── Step 5: Discretize density ───────────────────────────── 92 %
             self._emit_progress(92.0)
-            message.setProgress(92)
             zone_objects = discretize_density(
                 density_per_element=density_field,
                 n_zones=self._config.get("n_zones", 5),
@@ -150,20 +142,17 @@ class FEASolveJob(Job):
             for i, zone_obj in enumerate(zone_objects):
                 progress_val = 95.0 + (i / max(n_zones, 1)) * 5.0
                 self._emit_progress(progress_val)
-                message.setProgress(int(progress_val))
 
                 mesh_data = build_zone_mesh(tet_mesh, zone_obj.element_indices)
                 zones.append({"density": zone_obj.density, "mesh_data": mesh_data})
 
             # Compute aggregate statistics
-            import numpy
             max_stress = float(numpy.max(stress_field)) if len(stress_field) > 0 else 0.0
             min_stress = float(numpy.min(stress_field)) if len(stress_field) > 0 else 0.0
-            yield_strength = self._material.get("yield_strength", 250e6)
+            yield_strength = self._material.yield_strength
             safety_factor = (yield_strength / max_stress) if max_stress > 0.0 else float("inf")
 
             self._emit_progress(100.0)
-            message.setProgress(100)
 
             self.setResult(
                 {
@@ -182,6 +171,3 @@ class FEASolveJob(Job):
         except Exception as exc:
             self.setResult(None)
             self.setError(exc)
-        finally:
-            message.hide()
-            self.finished.emit(self)

@@ -61,13 +61,15 @@ def extract_trimesh(node) -> "trimesh.Trimesh":
 
     # Apply world transformation
     world_transform: Matrix = node.getWorldTransformation()
-    # UM Matrix stores data in column-major order; getData() returns a 4×4 ndarray
+    # getData() returns a row-major 4×4 ndarray (standard math convention):
+    # translation is in column 3, rotation/scale in the upper-left 3×3.
     transform_matrix = np.array(world_transform.getData(), dtype=np.float64)
 
     # Homogeneous coordinates: (N, 4)
     ones = np.ones((vertices.shape[0], 1), dtype=np.float64)
     verts_h = np.hstack([vertices, ones])
-    # transform_matrix is column-major from UM, so transpose for row-vector convention
+    # (M @ v_h.T).T applies the 4×4 transform to each column-vector v_h[i],
+    # producing transformed row-vectors. Correct for the row-major convention above.
     verts_world = (transform_matrix @ verts_h.T).T
     vertices = verts_world[:, :3]
 

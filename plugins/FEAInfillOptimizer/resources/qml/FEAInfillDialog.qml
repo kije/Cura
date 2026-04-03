@@ -18,6 +18,12 @@ UM.Dialog
     minimumHeight: 600 * screenScaleFactor
 
     property var manager  // bound to FEAInfillExtension Python object from caller
+    property var sceneNodeModel: []
+
+    Component.onCompleted:
+    {
+        if (manager) sceneNodeModel = manager.getSceneNodes()
+    }
 
     UM.I18nCatalog { id: catalog; name: "cura" }
 
@@ -97,7 +103,7 @@ UM.Dialog
                 Layout.fillWidth: true
                 textRole: "name"
                 valueRole: "id"
-                model: (manager !== undefined) ? manager.getSceneNodes() : []
+                model: feaDialog.sceneNodeModel
             }
 
             // ── Material preset ─────────────────────────────────────────────
@@ -174,7 +180,7 @@ UM.Dialog
                 rowSpacing: UM.Theme.getSize("default_margin").height / 2
 
                 UM.Label { text: catalog.i18nc("@label", "Min Density (%)") }
-                UM.SpinBox
+                SpinBox
                 {
                     id: minDensitySpinBox
                     from: 5; to: 90; value: 10; stepSize: 5
@@ -182,7 +188,7 @@ UM.Dialog
                 }
 
                 UM.Label { text: catalog.i18nc("@label", "Max Density (%)") }
-                UM.SpinBox
+                SpinBox
                 {
                     id: maxDensitySpinBox
                     from: 10; to: 100; value: 80; stepSize: 5
@@ -190,7 +196,7 @@ UM.Dialog
                 }
 
                 UM.Label { text: catalog.i18nc("@label", "Number of Zones") }
-                UM.SpinBox
+                SpinBox
                 {
                     id: nZonesSpinBox
                     from: 2; to: 20; value: 5; stepSize: 1
@@ -198,7 +204,7 @@ UM.Dialog
                 }
 
                 UM.Label { text: catalog.i18nc("@label", "Max Iterations") }
-                UM.SpinBox
+                SpinBox
                 {
                     id: maxIterSpinBox
                     from: 1; to: 10; value: 5; stepSize: 1
@@ -212,9 +218,9 @@ UM.Dialog
                     Layout.fillWidth: true
                     model: ListModel
                     {
-                        ListElement { text: qsTr("Coarse"); value: "coarse" }
-                        ListElement { text: qsTr("Medium"); value: "medium" }
-                        ListElement { text: qsTr("Fine");   value: "fine"   }
+                        ListElement { text: "Coarse"; value: "coarse" }
+                        ListElement { text: "Medium"; value: "medium" }
+                        ListElement { text: "Fine";   value: "fine"   }
                     }
                     textRole: "text"
                     valueRole: "value"
@@ -251,6 +257,24 @@ UM.Dialog
                 from: 0; to: 100
                 value: (manager !== undefined) ? manager.progress : 0
                 visible: manager !== undefined && manager.analysisStatus === "running"
+
+                background: Rectangle
+                {
+                    implicitHeight: UM.Theme.getSize("default_lining").height * 2
+                    color: UM.Theme.getColor("lining")
+                    radius: UM.Theme.getSize("default_radius").width
+                }
+
+                contentItem: Item
+                {
+                    Rectangle
+                    {
+                        width: progressBar.visualPosition * parent.width
+                        height: parent.height
+                        radius: UM.Theme.getSize("default_radius").width
+                        color: UM.Theme.getColor("primary")
+                    }
+                }
             }
 
             // ── Results section ──────────────────────────────────────────────

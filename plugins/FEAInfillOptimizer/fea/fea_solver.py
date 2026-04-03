@@ -75,6 +75,10 @@ class LinearElasticitySolver:
         cols: list[np.ndarray] = []
         vals: list[np.ndarray] = []
 
+        # NOTE (W5 performance): This Python loop over elements is the dominant
+        # cost for large meshes (O(M) iterations with Python overhead per tet).
+        # A future optimisation could vectorise assembly using numpy broadcasting
+        # or move it to a compiled extension (e.g. Cython/numba/C++).
         for e_idx, (elem, E, nu) in enumerate(
             zip(elements, E_per_element, nu_per_element)
         ):
@@ -167,6 +171,12 @@ class LinearElasticitySolver:
             Displacement vector u, shape (ndof,), same units as f/K implies.
         """
         u = spla.spsolve(K, f)
+        if not np.isfinite(u).all():
+            raise RuntimeError(
+                "FEA solve produced non-finite displacements. "
+                "Check that boundary conditions constrain all rigid-body modes "
+                "and that the stiffness matrix is non-singular."
+            )
         return u
 
     # ------------------------------------------------------------------
@@ -268,7 +278,18 @@ def _strain_displacement_matrix(
     detJ = np.linalg.det(J)
     V = abs(detJ) / 6.0  # tet volume
 
-    if abs(detJ) < 1e-14:
+    # Degenerate threshold: relative to max edge length cubed so it scales
+    # correctly with the element size instead of using a fixed absolute value.
+    max_edge = max(
+        np.linalg.norm(x1 - x0),
+        np.linalg.norm(x2 - x0),
+        np.linalg.norm(x3 - x0),
+        np.linalg.norm(x2 - x1),
+        np.linalg.norm(x3 - x1),
+        np.linalg.norm(x3 - x2),
+    )
+    degen_threshold = (max_edge ** 3) * 1e-10 if max_edge > 0.0 else 1e-30
+    if abs(detJ) < degen_threshold:
         return np.zeros((6, 12), dtype=np.float64), 0.0
 
     J_inv = np.linalg.inv(J)  # (3, 3)

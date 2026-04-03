@@ -5,6 +5,7 @@
 
 import os
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from typing import Dict
 
@@ -21,6 +22,9 @@ except ImportError:
     gmsh = None  # type: ignore[assignment]
 
 from UM.Logger import Logger
+
+# Gmsh is not thread-safe; serialise all calls with this lock.
+_GMSH_LOCK = threading.Lock()
 
 # Element-size presets as fractions of the bounding-box diagonal
 _PRESET_FRACTIONS: Dict[str, float] = {
@@ -119,60 +123,63 @@ def _run_gmsh(
     Returns:
         Populated :class:`TetMesh`.
     """
-    gmsh.initialize()
-    gmsh.option.setNumber("General.Verbosity", 1)
+    with _GMSH_LOCK:
+        try:
+            gmsh.initialize()
+            gmsh.option.setNumber("General.Verbosity", 1)
 
-    try:
-        gmsh.merge(stl_path)
+            gmsh.merge(stl_path)
 
-        # Classify surfaces and create a volume
-        angle = 40.0  # angle threshold for feature detection (degrees)
-        gmsh.model.mesh.classifySurfaces(
-            np.deg2rad(angle), True, True, np.deg2rad(180.0)
-        )
-        gmsh.model.mesh.createGeometry()
-
-        # Create volume from all surfaces
-        surfaces = gmsh.model.getEntities(2)
-        surface_loops = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
-        gmsh.model.geo.addVolume([surface_loops])
-        gmsh.model.geo.synchronize()
-
-        # Mesh options
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.1)
-        gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay
-
-        gmsh.model.mesh.generate(3)
-        gmsh.model.mesh.optimize("Netgen")
-
-        # Extract nodes
-        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-        nodes = np.array(node_coords, dtype=np.float64).reshape(-1, 3)
-
-        # Build 0-based tag → index map
-        tag_to_idx: Dict[int, int] = {int(tag): i for i, tag in enumerate(node_tags)}
-
-        # Extract tetrahedral elements (Gmsh element type 4 = 4-node tet)
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements()
-        tet_nodes: list[np.ndarray] = []
-        for etype, _, enodes in zip(elem_types, elem_tags, elem_node_tags):
-            if etype == 4:  # linear tetrahedron
-                connectivity = np.array(enodes, dtype=np.int64).reshape(-1, 4)
-                tet_nodes.append(connectivity)
-
-        if not tet_nodes:
-            raise RuntimeError(
-                "Gmsh produced no tetrahedral elements. "
-                "Check that the surface mesh is closed and watertight."
+            # Classify surfaces and create a volume.
+            # classifySurfaces + createGeometry switch the model to the OCC kernel,
+            # so all subsequent geometry calls must use gmsh.model.occ.
+            angle = 40.0  # angle threshold for feature detection (degrees)
+            gmsh.model.mesh.classifySurfaces(
+                np.deg2rad(angle), True, True, np.deg2rad(180.0)
             )
+            gmsh.model.mesh.createGeometry()
 
-        elements_gmsh = np.vstack(tet_nodes)
-        # Convert Gmsh 1-based tags to 0-based indices
-        elements = np.vectorize(tag_to_idx.__getitem__)(elements_gmsh)
+            # Create volume from all surfaces (OCC kernel — must match classifySurfaces)
+            surfaces = gmsh.model.getEntities(2)
+            surface_loops = gmsh.model.occ.addSurfaceLoop([s[1] for s in surfaces])
+            gmsh.model.occ.addVolume([surface_loops])
+            gmsh.model.occ.synchronize()
 
-    finally:
-        gmsh.finalize()
+            # Mesh options
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.1)
+            gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay
+
+            gmsh.model.mesh.generate(3)
+            gmsh.model.mesh.optimize("Netgen")
+
+            # Extract nodes
+            node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+            nodes = np.array(node_coords, dtype=np.float64).reshape(-1, 3)
+
+            # Build 0-based tag → index map
+            tag_to_idx: Dict[int, int] = {int(tag): i for i, tag in enumerate(node_tags)}
+
+            # Extract tetrahedral elements (Gmsh element type 4 = 4-node tet)
+            elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements()
+            tet_nodes: list[np.ndarray] = []
+            for etype, _, enodes in zip(elem_types, elem_tags, elem_node_tags):
+                if etype == 4:  # linear tetrahedron
+                    connectivity = np.array(enodes, dtype=np.int64).reshape(-1, 4)
+                    tet_nodes.append(connectivity)
+
+            if not tet_nodes:
+                raise RuntimeError(
+                    "Gmsh produced no tetrahedral elements. "
+                    "Check that the surface mesh is closed and watertight."
+                )
+
+            elements_gmsh = np.vstack(tet_nodes)
+            # Convert Gmsh 1-based tags to 0-based indices
+            elements = np.vectorize(tag_to_idx.__getitem__)(elements_gmsh)
+
+        finally:
+            gmsh.finalize()
 
     # Build surface_node_map: match surface vertices to tet nodes by position
     surface_node_map: Dict[int, int] = {}
@@ -180,7 +187,7 @@ def _run_gmsh(
     for surf_idx, sv in enumerate(surface_mesh.vertices):
         dists = np.linalg.norm(tet_nodes_arr - sv, axis=1)
         closest = int(np.argmin(dists))
-        if dists[closest] < char_length * 0.01:  # within 1% of element size
+        if dists[closest] < char_length * 0.1:  # within 10% of element size
             surface_node_map[surf_idx] = closest
 
     Logger.log(

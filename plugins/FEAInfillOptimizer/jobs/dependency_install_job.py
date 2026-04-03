@@ -88,3 +88,11 @@ class DependencyInstallJob(Job):
         except Exception as e:
             Logger.log("e", "FEA Infill: pip install error: %s", str(e))
             msg.hide()
+            error_msg = Message(
+                i18n_catalog.i18nc("@info:status",
+                                   "Dependency installation failed: {error}").format(
+                    error=str(e)),
+                title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
+                message_type=Message.MessageType.ERROR
+            )
+            error_msg.show()
