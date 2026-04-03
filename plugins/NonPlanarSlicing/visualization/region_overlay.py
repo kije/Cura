@@ -160,7 +160,15 @@ class NonPlanarRegionOverlay:
             return None
 
         vertices = numpy.asarray(vertices, dtype=numpy.float64)
-        indices = numpy.asarray(indices, dtype=numpy.intp)
+        if indices is not None:
+            indices = numpy.asarray(indices, dtype=numpy.intp)
+        else:
+            # Non-indexed mesh: synthesize sequential triangle indices
+            num_verts = vertices.shape[0]
+            if num_verts % 3 != 0:
+                logger.error("Non-indexed mesh vertex count %d not divisible by 3", num_verts)
+                return None
+            indices = numpy.arange(num_verts, dtype=numpy.intp).reshape(-1, 3)
 
         if vertices.ndim != 2 or vertices.shape[1] != 3:
             logger.error("Invalid vertices shape %s", vertices.shape)

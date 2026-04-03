@@ -87,48 +87,57 @@ def make_dome(cx: float, cy: float, radius: float, height: float,
 
 def make_ramp(x0: float, y0: float, width: float, depth: float,
               angle_deg: float) -> list[tuple]:
-    """Create a ramp surface rising at the given angle from horizontal.
+    """Create a closed ramp (wedge prism) rising at the given angle.
 
-    Starts at (x0, y0, 0) and rises in the +Y direction.
+    The ramp sits on Z=0, front edge at y0, rising in +Y direction.
+    It's a closed solid with 8 triangles (no gaps).
+
+    Vertices layout (looking from +X side):
+        tl---tr   (at y0+depth, z=height)
+       / |   / |
+      bl--br   |  (at y0, z=0)
+       \  |  \ |
+        bbl-bbr   (at y0+depth, z=0)
     """
     height = depth * math.tan(math.radians(angle_deg))
 
-    # Ramp surface (2 triangles)
-    bl = (x0, y0, 0.0)
-    br = (x0 + width, y0, 0.0)
-    tl = (x0, y0 + depth, height)
-    tr = (x0 + width, y0 + depth, height)
+    # 6 vertices of the wedge prism
+    bl = (x0, y0, 0.0)                         # bottom-left front
+    br = (x0 + width, y0, 0.0)                 # bottom-right front
+    tl = (x0, y0 + depth, height)              # top-left back (ramp surface)
+    tr = (x0 + width, y0 + depth, height)      # top-right back (ramp surface)
+    bbl = (x0, y0 + depth, 0.0)                # bottom-left back
+    bbr = (x0 + width, y0 + depth, 0.0)        # bottom-right back
 
     triangles = []
 
-    # Top surface (the ramp)
-    n1 = _compute_normal(bl, br, tr)
-    triangles.append((n1, bl, br, tr))
-    n2 = _compute_normal(bl, tr, tl)
-    triangles.append((n2, bl, tr, tl))
+    # Ramp surface (top, the angled face)
+    n = _compute_normal(bl, br, tr)
+    triangles.append((n, bl, br, tr))
+    triangles.append((n, bl, tr, tl))
 
-    # Bottom face
+    # Bottom face (Z=0)
     n = (0, 0, -1)
-    triangles.append((n, bl, tl, tr))
-    triangles.append((n, bl, tr, br))
+    triangles.append((n, bl, bbl, bbr))
+    triangles.append((n, bl, bbr, br))
 
-    # Side walls
-    # Left wall
-    n = _compute_normal(bl, tl, (x0, y0 + depth, 0.0))
-    triangles.append((n, bl, tl, (x0, y0 + depth, 0.0)))
+    # Front face (Y=y0, vertical)
+    n = (0, -1, 0)
+    triangles.append((n, bl, br, br))  # degenerate — front is just an edge
+    # Actually front face is just the edge bl-br at z=0, no face needed
 
-    # Right wall
-    n = _compute_normal(br, (x0 + width, y0 + depth, 0.0), tr)
-    triangles.append((n, br, (x0 + width, y0 + depth, 0.0), tr))
+    # Back face (Y=y0+depth, vertical rectangle)
+    n = _compute_normal(bbl, bbr, tr)
+    triangles.append((n, bbl, bbr, tr))
+    triangles.append((n, bbl, tr, tl))
 
-    # Back wall (high end)
-    n = _compute_normal(tl, tr, (x0 + width, y0 + depth, 0.0))
-    triangles.append((n, tl, tr, (x0 + width, y0 + depth, 0.0)))
-    triangles.append((n, tl, (x0 + width, y0 + depth, 0.0), (x0, y0 + depth, 0.0)))
+    # Left side (X=x0, triangle)
+    n = _compute_normal(bl, tl, bbl)
+    triangles.append((n, bl, tl, bbl))
 
-    # Front wall (low end)
-    n = _compute_normal(bl, (x0 + width, y0, 0.0), bl)
-    triangles.append(((0, -1, 0), bl, br, br))  # degenerate, skip
+    # Right side (X=x0+width, triangle)
+    n = _compute_normal(br, bbr, tr)
+    triangles.append((n, br, bbr, tr))
 
     return triangles
 
