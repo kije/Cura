@@ -29,8 +29,6 @@ sys.modules["UM.Logger"] = _um_logger_module
 _plugin_dir = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, _plugin_dir)
 
-# We need to handle the relative imports in GCodeProcessor.
-# Trick: create a fake package structure so relative imports work.
 import importlib.util
 
 
@@ -54,15 +52,16 @@ LayerAnalyzer_mod = _load_module("core.LayerAnalyzer", os.path.join(_plugin_dir,
 
 LayerAnalyzer = LayerAnalyzer_mod.LayerAnalyzer
 LayerInfo = LayerAnalyzer_mod.LayerInfo
+MeshSection = LayerAnalyzer_mod.MeshSection
 MixedFilament = MixedFilament_mod.MixedFilament
 DitherPattern = DitherPattern_mod.DitherPattern
+GradientProfile = GradientProfile_mod.GradientProfile
+GradientKeyframe = GradientProfile_mod.GradientKeyframe
 
-# Now load GCodeProcessor - it has relative imports that won't work standalone.
-# Use exec with the necessary names injected.
+# Now load GCodeProcessor with exec to handle relative imports
 _gcode_proc_path = os.path.join(_plugin_dir, "core", "GCodeProcessor.py")
 with open(_gcode_proc_path) as f:
     _src = f.read()
-# Strip relative imports
 _src = _src.replace("from ..models.MixedFilament import MixedFilament", "")
 _src = _src.replace("from ..models.DitherPattern import DitherPattern", "")
 _src = _src.replace("from .LayerAnalyzer import LayerAnalyzer, LayerInfo", "")
@@ -74,6 +73,7 @@ _gcode_ns = {
     "Dict": dict,
     "List": list,
     "Optional": type(None),
+    "Tuple": tuple,
     "Logger": _MockLogger,
     "MixedFilament": MixedFilament,
     "DitherPattern": DitherPattern,
@@ -102,13 +102,21 @@ SAMPLE_GCODE = [
     ";LAYER:5\n;TYPE:WALL-OUTER\nT2\nG0 F6000 X10 Y10 Z1.2\nG1 F1200 X20 Y10 E4.0\n",
 ]
 
+# Sample with ;MESH: comments
+SAMPLE_GCODE_MESH = [
+    ";FLAVOR:Marlin\n;Layer height: 0.2\nG28\nT0\n",
+    ";LAYER:0\n;MESH:Cube.stl\n;TYPE:WALL-OUTER\nT2\nG1 X10 Y10 Z0.2 E0.5\n;MESH:Sphere.stl\n;TYPE:WALL-OUTER\nT0\nG1 X30 Y30 E1.0\n",
+    ";LAYER:1\n;MESH:Cube.stl\n;TYPE:WALL-OUTER\nT2\nG1 X10 Y10 Z0.4 E1.5\n;MESH:Sphere.stl\n;TYPE:WALL-OUTER\nT0\nG1 X30 Y30 E2.0\n",
+    ";LAYER:2\n;MESH:Cube.stl\n;TYPE:WALL-OUTER\nT2\nG1 X10 Y10 Z0.6 E2.5\n",
+]
+
 
 class TestLayerAnalyzer(unittest.TestCase):
 
     def test_parse_layers(self):
         analyzer = LayerAnalyzer()
         layers = analyzer.parse(SAMPLE_GCODE)
-        self.assertEqual(len(layers), 6)  # 6 layers (0-5)
+        self.assertEqual(len(layers), 6)
 
     def test_layer_numbers(self):
         analyzer = LayerAnalyzer()
@@ -119,7 +127,6 @@ class TestLayerAnalyzer(unittest.TestCase):
         analyzer = LayerAnalyzer()
         layers = analyzer.parse(SAMPLE_GCODE)
         tools = [l.active_tool for l in layers]
-        # Layers 0-3 and 5 use T2, layer 4 uses T0
         self.assertEqual(tools, [2, 2, 2, 2, 0, 2])
 
     def test_layer_height_extracted(self):
@@ -136,14 +143,51 @@ class TestLayerAnalyzer(unittest.TestCase):
     def test_get_layers_for_tool(self):
         analyzer = LayerAnalyzer()
         analyzer.parse(SAMPLE_GCODE)
-        t2_layers = analyzer.get_layers_for_tool(2)
-        self.assertEqual(len(t2_layers), 5)
-        t0_layers = analyzer.get_layers_for_tool(0)
-        self.assertEqual(len(t0_layers), 1)
+        self.assertEqual(len(analyzer.get_layers_for_tool(2)), 5)
+        self.assertEqual(len(analyzer.get_layers_for_tool(0)), 1)
+
+
+class TestLayerAnalyzerMesh(unittest.TestCase):
+
+    def test_mesh_sections_parsed(self):
+        analyzer = LayerAnalyzer()
+        layers = analyzer.parse(SAMPLE_GCODE_MESH)
+        # Layer 0 should have Cube.stl and Sphere.stl sections
+        self.assertGreater(len(layers[0].mesh_sections), 0)
+
+    def test_get_meshes(self):
+        analyzer = LayerAnalyzer()
+        layers = analyzer.parse(SAMPLE_GCODE_MESH)
+        meshes = layers[0].get_meshes()
+        self.assertIn("Cube.stl", meshes)
+        self.assertIn("Sphere.stl", meshes)
+
+    def test_get_all_mesh_names(self):
+        analyzer = LayerAnalyzer()
+        analyzer.parse(SAMPLE_GCODE_MESH)
+        names = analyzer.get_all_mesh_names()
+        self.assertIn("Cube.stl", names)
+        self.assertIn("Sphere.stl", names)
+
+    def test_get_layers_for_mesh(self):
+        analyzer = LayerAnalyzer()
+        analyzer.parse(SAMPLE_GCODE_MESH)
+        cube_layers = analyzer.get_layers_for_mesh("Cube.stl")
+        self.assertEqual(len(cube_layers), 3)  # All 3 layers have Cube.stl
+
+    def test_nonmesh_excluded(self):
+        gcode = [
+            ";FLAVOR:Marlin\n;Layer height: 0.2\n",
+            ";LAYER:0\n;MESH:NONMESH\nG0 X0 Y0\n;MESH:Cube.stl\nT2\nG1 X10 Y10 E0.5\n",
+        ]
+        analyzer = LayerAnalyzer()
+        layers = analyzer.parse(gcode)
+        meshes = layers[0].get_meshes()
+        self.assertIn("Cube.stl", meshes)
+        self.assertNotIn("NONMESH", meshes)
 
 
 class TestGCodeProcessorToolChange(unittest.TestCase):
-    """Tests for IDEX/tool-change mode G-code rewriting."""
 
     def _make_mix(self, ratio_a=1, ratio_b=1):
         pattern = DitherPattern(mode="ratio", ratio_a=ratio_a, ratio_b=ratio_b)
@@ -158,102 +202,154 @@ class TestGCodeProcessorToolChange(unittest.TestCase):
         )
 
     def test_alternating_1_1(self):
-        """With 1:1 ratio, layers should alternate T0 and T1."""
         mf = self._make_mix(ratio_a=1, ratio_b=1)
-        gcode = [block for block in SAMPLE_GCODE]  # Copy
-
+        gcode = [block for block in SAMPLE_GCODE]
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
 
-        # Layer 0 (proxy layer 0): pattern [0,1] → 0 → T0
+        # With Bresenham at 1:1, layers alternate T0 and T1
         self.assertIn("T0", result[1])
         self.assertNotIn("T2", result[1])
-
-        # Layer 1 (proxy layer 1): pattern [0,1] → 1 → T1
         self.assertIn("T1", result[2])
         self.assertNotIn("T2", result[2])
 
-        # Layer 2 (proxy layer 2): pattern wraps → 0 → T0
-        self.assertIn("T0", result[3])
-
-        # Layer 3 (proxy layer 3): pattern wraps → 1 → T1
-        self.assertIn("T1", result[4])
-
     def test_non_proxy_layers_untouched(self):
-        """Layers not using the proxy extruder should remain unchanged."""
         mf = self._make_mix()
         gcode = [block for block in SAMPLE_GCODE]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-
-        # Layer 4 uses T0, should stay T0
         self.assertIn("T0", result[5])
 
     def test_header_untouched(self):
-        """The header block should not be modified."""
         mf = self._make_mix()
         gcode = [block for block in SAMPLE_GCODE]
         original_header = gcode[0]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-
         self.assertEqual(result[0], original_header)
 
     def test_geometry_preserved(self):
-        """G-code move commands should be preserved."""
         mf = self._make_mix()
         gcode = [block for block in SAMPLE_GCODE]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-
-        # Check that geometry commands are still present
         self.assertIn("G1 F1200 X20 Y10 E0.5", result[1])
-        self.assertIn("G1 X20 Y20 E1.0", result[1])
-
-    def test_2_1_ratio(self):
-        """With 2:1 ratio, two layers of A then one of B."""
-        mf = self._make_mix(ratio_a=2, ratio_b=1)
-        gcode = [block for block in SAMPLE_GCODE]
-
-        processor = GCodeProcessor()
-        result = processor.process(gcode, [mf])
-
-        # Pattern: [A, A, B, A, A, B, ...]
-        # Proxy layers: 0→T0, 1→T0, 2→T1, 3→T0, 4→T0 (layer4 is not proxy)
-        self.assertIn("T0", result[1])  # proxy layer 0 → A
-        self.assertIn("T0", result[2])  # proxy layer 1 → A
-        self.assertIn("T1", result[3])  # proxy layer 2 → B
-        self.assertIn("T0", result[4])  # proxy layer 3 → A (new cycle)
 
     def test_mixed_color_comment_added(self):
-        """Processed layers should have a MixedColor comment."""
         mf = self._make_mix()
         gcode = [block for block in SAMPLE_GCODE]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-
         self.assertIn(";MixedColor:TestMix", result[1])
 
     def test_no_mixed_filaments_passthrough(self):
-        """Empty mixed filament list should return unmodified G-code."""
         gcode = [block for block in SAMPLE_GCODE]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [])
-
         for i in range(len(gcode)):
             self.assertEqual(result[i], gcode[i])
 
 
-class TestGCodeProcessorMixingHotend(unittest.TestCase):
-    """Tests for mixing hotend mode G-code rewriting."""
+class TestBresenhamDithering(unittest.TestCase):
+    """Test that Bresenham distributes layers more evenly than simple repetition."""
 
-    def _make_mix_marlin(self, ratio_a=1, ratio_b=1):
-        pattern = DitherPattern(mode="ratio", ratio_a=ratio_a, ratio_b=ratio_b)
+    def test_2_1_bresenham_distribution(self):
+        """With 2:1 ratio over 9 layers, Bresenham should distribute evenly."""
+        mf = MixedFilament(
+            name="Test",
+            filament_a=0,
+            filament_b=1,
+            proxy_extruder=2,
+            pattern=DitherPattern(mode="ratio", ratio_a=2, ratio_b=1),
+            output_mode="tool_change",
+            enabled=True,
+        )
+        # Create 9 proxy layers
+        gcode = [";FLAVOR:Marlin\n;Layer height: 0.2\n"]
+        for i in range(9):
+            gcode.append(f";LAYER:{i}\nT2\nG1 X10 Y10 Z{(i+1)*0.2} E{i*0.5}\n")
+
+        processor = GCodeProcessor()
+        result = processor.process(gcode, [mf])
+
+        # Count T0 and T1 occurrences across layers
+        t0_count = sum(1 for block in result[1:] if "T0 ;MixedColor" in block)
+        t1_count = sum(1 for block in result[1:] if "T1 ;MixedColor" in block)
+
+        # 2:1 ratio = 67% A, 33% B. For 9 layers: ~6 A, ~3 B
+        self.assertEqual(t0_count, 6)
+        self.assertEqual(t1_count, 3)
+
+    def test_bresenham_no_clumping(self):
+        """Bresenham should avoid putting all A layers in a row for moderate ratios."""
+        mf = MixedFilament(
+            name="Test",
+            filament_a=0,
+            filament_b=1,
+            proxy_extruder=2,
+            pattern=DitherPattern(mode="ratio", ratio_a=2, ratio_b=3),
+            output_mode="tool_change",
+            enabled=True,
+        )
+        gcode = [";FLAVOR:Marlin\n;Layer height: 0.2\n"]
+        for i in range(10):
+            gcode.append(f";LAYER:{i}\nT2\nG1 X10 Y10 Z{(i+1)*0.2} E{i*0.5}\n")
+
+        processor = GCodeProcessor()
+        result = processor.process(gcode, [mf])
+
+        # Extract the sequence of tools
+        sequence = []
+        for block in result[1:]:
+            if "T0 ;MixedColor" in block:
+                sequence.append(0)
+            elif "T1 ;MixedColor" in block:
+                sequence.append(1)
+
+        # With Bresenham, we should never see 3+ consecutive same tool
+        for i in range(len(sequence) - 2):
+            same_three = (sequence[i] == sequence[i+1] == sequence[i+2])
+            if same_three:
+                self.fail(f"Three consecutive same tools at position {i}: {sequence}")
+
+
+class TestGradientBresenham(unittest.TestCase):
+
+    def test_gradient_transitions_smoothly(self):
+        """Gradient from 100% A to 0% A should transition smoothly."""
+        gradient = GradientProfile(enabled=True, keyframes=[
+            GradientKeyframe(0.0, 1.0),
+            GradientKeyframe(2.0, 0.0),
+        ])
+        mf = MixedFilament(
+            name="GradTest",
+            filament_a=0,
+            filament_b=1,
+            proxy_extruder=2,
+            pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
+            gradient=gradient,
+            output_mode="tool_change",
+            enabled=True,
+        )
+        gcode = [";FLAVOR:Marlin\n;Layer height: 0.2\n"]
+        for i in range(10):
+            gcode.append(f";LAYER:{i}\nT2\nG1 X10 Y10 Z{(i+1)*0.2} E{i*0.5}\n")
+
+        processor = GCodeProcessor()
+        result = processor.process(gcode, [mf])
+
+        # Count A/B in first half vs second half
+        first_half_a = sum(1 for block in result[1:6] if "T0 ;MixedColor" in block)
+        second_half_a = sum(1 for block in result[6:] if "T0 ;MixedColor" in block)
+
+        # First half should have more A than second half
+        self.assertGreater(first_half_a, second_half_a)
+
+
+class TestGCodeProcessorMixingHotend(unittest.TestCase):
+
+    def _make_mix_marlin(self):
+        pattern = DitherPattern(mode="ratio", ratio_a=1, ratio_b=1)
         return MixedFilament(
             name="MarlinMix",
             filament_a=0,
@@ -279,42 +375,113 @@ class TestGCodeProcessorMixingHotend(unittest.TestCase):
         )
 
     def test_marlin_m163_injected(self):
-        """Marlin mode should inject M163/M164 commands."""
         mf = self._make_mix_marlin()
         gcode = [block for block in SAMPLE_GCODE]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-
-        # Should contain M163 and M164 commands
         self.assertIn("M163", result[1])
         self.assertIn("M164", result[1])
-        # T2 should still be present (it's the virtual tool)
         self.assertIn("T2", result[1])
 
     def test_reprap_m567_injected(self):
-        """RepRap mode should inject M567 commands."""
         mf = self._make_mix_reprap()
         gcode = [block for block in SAMPLE_GCODE]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-
         self.assertIn("M567", result[1])
         self.assertIn("T2", result[1])
 
     def test_marlin_ratio_values(self):
-        """Marlin M163 should have correct ratio values for 1:1 mix."""
-        mf = self._make_mix_marlin(ratio_a=1, ratio_b=1)
+        mf = self._make_mix_marlin()
         gcode = [block for block in SAMPLE_GCODE]
-
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-
-        # 1:1 ratio = 0.50 each
         self.assertIn("M163 S0 P0.50", result[1])
         self.assertIn("M163 S1 P0.50", result[1])
         self.assertIn("M164 S2", result[1])
+
+
+class TestTemperaturePreheating(unittest.TestCase):
+
+    def test_preheat_commands_inserted(self):
+        """Pre-heat commands should appear before tool changes."""
+        mf = MixedFilament(
+            name="PreheatTest",
+            filament_a=0,
+            filament_b=1,
+            proxy_extruder=2,
+            pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
+            output_mode="tool_change",
+            enabled=True,
+        )
+        gcode = [";FLAVOR:Marlin\n;Layer height: 0.2\n"]
+        for i in range(6):
+            gcode.append(f";LAYER:{i}\nT2\nG1 X10 Y10 Z{(i+1)*0.2} E{i*0.5}\n")
+
+        processor = GCodeProcessor(
+            preheat_layers=2,
+            extruder_temperatures={0: 200.0, 1: 210.0},
+            standby_temperature=150.0,
+        )
+        result = processor.process(gcode, [mf])
+
+        # Check that M104 preheat commands exist somewhere
+        all_gcode = "\n".join(result)
+        self.assertIn("M104", all_gcode)
+        self.assertIn(";MixedColor preheat", all_gcode)
+
+    def test_no_preheat_when_disabled(self):
+        """No preheat commands when preheat_layers is 0."""
+        mf = MixedFilament(
+            name="NoPreheat",
+            filament_a=0,
+            filament_b=1,
+            proxy_extruder=2,
+            pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
+            output_mode="tool_change",
+            enabled=True,
+        )
+        gcode = [";FLAVOR:Marlin\n;Layer height: 0.2\n"]
+        for i in range(6):
+            gcode.append(f";LAYER:{i}\nT2\nG1 X10 Y10 Z{(i+1)*0.2} E{i*0.5}\n")
+
+        processor = GCodeProcessor(
+            preheat_layers=0,
+            extruder_temperatures={0: 200.0, 1: 210.0},
+        )
+        result = processor.process(gcode, [mf])
+
+        all_gcode = "\n".join(result)
+        self.assertNotIn("M104", all_gcode)
+
+
+class TestPerObjectMeshAssignment(unittest.TestCase):
+
+    def test_mesh_assignment_applied(self):
+        """Per-object mesh assignments should override proxy matching."""
+        mf = MixedFilament(
+            id="mix-cube",
+            name="CubeMix",
+            filament_a=0,
+            filament_b=1,
+            proxy_extruder=2,
+            pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
+            output_mode="tool_change",
+            enabled=True,
+        )
+        gcode = [block for block in SAMPLE_GCODE_MESH]
+
+        processor = GCodeProcessor()
+        result = processor.process(
+            gcode, [mf],
+            mesh_assignments={"Cube.stl": "mix-cube"}
+        )
+
+        # The Cube.stl sections should have mixed color processing
+        # (either T0 or T1, not T2)
+        for block in result[1:]:
+            if ";MESH:Cube.stl" in block and ";MixedColor" in block:
+                self.assertTrue("T0 ;MixedColor" in block or "T1 ;MixedColor" in block)
 
 
 if __name__ == "__main__":

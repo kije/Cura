@@ -299,6 +299,75 @@ UM.Dialog
                 }
             }
 
+            // Pre-heat settings
+            Rectangle
+            {
+                Layout.fillWidth: true
+                height: preheatCol.implicitHeight + 2 * UM.Theme.getSize("default_margin").height
+                color: UM.Theme.getColor("action_button")
+                border.color: UM.Theme.getColor("lining")
+                radius: UM.Theme.getSize("default_radius").width
+
+                ColumnLayout
+                {
+                    id: preheatCol
+                    anchors.fill: parent
+                    anchors.margins: UM.Theme.getSize("default_margin").width
+                    spacing: 4
+
+                    UM.Label
+                    {
+                        text: catalog.i18nc("@label", "Temperature Pre-heating")
+                        font: UM.Theme.getFont("default_bold")
+                    }
+
+                    RowLayout
+                    {
+                        spacing: UM.Theme.getSize("default_margin").width
+
+                        CheckBox
+                        {
+                            id: preheatCheck
+                            text: catalog.i18nc("@option:check", "Pre-heat next extruder")
+                            checked: manager ? manager.enablePreheat : true
+                            onCheckedChanged: if (manager) manager.setEnablePreheat(checked)
+
+                            ToolTip.text: catalog.i18nc("@info:tooltip",
+                                "Start heating the next extruder before the tool change " +
+                                "to reduce waiting time.")
+                            ToolTip.visible: hovered
+                            ToolTip.delay: 500
+                        }
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@label", "Lookahead:")
+                            visible: preheatCheck.checked
+                        }
+
+                        SpinBox
+                        {
+                            from: 1; to: 20
+                            value: manager ? manager.preheatLayers : 3
+                            visible: preheatCheck.checked
+                            editable: true
+                            onValueChanged: if (manager) manager.setPreheatLayers(value)
+
+                            ToolTip.text: catalog.i18nc("@info:tooltip",
+                                "Number of layers ahead to start pre-heating.")
+                            ToolTip.visible: hovered
+                            ToolTip.delay: 500
+                        }
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@label", "layers")
+                            visible: preheatCheck.checked
+                        }
+                    }
+                }
+            }
+
             // Info text
             Rectangle
             {
@@ -318,7 +387,10 @@ UM.Dialog
                         "Mixed filaments create blended colors by alternating layers of different physical filaments. " +
                         "Assign objects to proxy extruder slots, then define which physical filaments alternate.\n\n" +
                         "IDEX/Tool Changer: Alternates tool changes between layers.\n" +
-                        "Mixing Hotend: Sets mix ratios via M163/M164 (Marlin) or M567 (RepRap).")
+                        "Mixing Hotend: Sets mix ratios via M163/M164 (Marlin) or M567 (RepRap).\n\n" +
+                        "Per-object assignment: Objects are matched by ;MESH: comments in G-code. " +
+                        "Use the Mesh Assignments section to map specific objects to mixed filaments.\n\n" +
+                        "Bresenham dithering distributes layer alternation evenly for smoother color transitions.")
                     font: UM.Theme.getFont("small")
                     color: UM.Theme.getColor("text_inactive")
                 }
@@ -338,6 +410,57 @@ UM.Dialog
                     onClicked: dialog.close()
                 }
             }
+        }
+    }
+
+    // Save button indicator - shown next to the save/export button when
+    // mixed filaments are active. Same pattern as PostProcessingPlugin.
+    Item
+    {
+        objectName: "mixedColorSaveAreaButton"
+        visible: manager ? manager.enabledMixedFilamentCount > 0 : false
+        height: UM.Theme.getSize("action_button").height
+        width: height
+
+        Cura.SecondaryButton
+        {
+            height: UM.Theme.getSize("action_button").height
+            tooltip:
+            {
+                var tipText = catalog.i18nc("@info:tooltip", "Mixed Colors active.");
+                if (manager && manager.enabledMixedFilamentCount > 0)
+                {
+                    tipText += "<br><br>" + catalog.i18nc("@info:tooltip",
+                        "%1 mixed filament(s) will be applied:").arg(manager.enabledMixedFilamentCount);
+                    tipText += "<ul>";
+                    var filaments = manager.mixedFilaments;
+                    for (var i = 0; i < filaments.length; i++)
+                    {
+                        if (filaments[i].enabled)
+                        {
+                            tipText += "<li>" + filaments[i].name + "</li>";
+                        }
+                    }
+                    tipText += "</ul>";
+                }
+                return tipText
+            }
+            toolTipContentAlignment: UM.Enums.ContentAlignment.AlignLeft
+            onClicked: dialog.show()
+            iconSource: Qt.resolvedUrl("../resources/icons/mixed_color.svg")
+            fixedWidthMode: false
+        }
+
+        Cura.NotificationIcon
+        {
+            id: activeMixCountIcon
+            visible: manager ? manager.enabledMixedFilamentCount > 0 : false
+            anchors
+            {
+                horizontalCenter: parent.right
+                verticalCenter: parent.top
+            }
+            labelText: manager ? manager.enabledMixedFilamentCount : "0"
         }
     }
 }

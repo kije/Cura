@@ -3,7 +3,7 @@
 
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 from PyQt6.QtCore import QObject, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
 
@@ -23,6 +23,7 @@ from .core.ColorBlender import ColorBlender
 i18n_catalog = i18nCatalog("cura")
 
 METADATA_KEY = "mixed_color_filaments"
+MESH_ASSIGNMENTS_KEY = "mixed_color_mesh_assignments"
 
 
 class MixedColorPlugin(QObject, Extension):
@@ -30,6 +31,13 @@ class MixedColorPlugin(QObject, Extension):
 
     Supports both IDEX/tool-changer printers (tool change commands) and
     mixing hotend printers (M163/M164 or M567 commands).
+
+    Features:
+    - Proxy extruder slot based assignment
+    - Per-object assignment via ;MESH: G-code comments
+    - Bresenham error diffusion for smooth gradient transitions
+    - Temperature pre-heating with configurable lookahead
+    - Save button indicator showing active mixed filaments
     """
 
     def __init__(self, parent=None) -> None:
@@ -40,8 +48,11 @@ class MixedColorPlugin(QObject, Extension):
         self.addMenuItem(i18n_catalog.i18nc("@item:inmenu", "Configure Mixed Filaments..."), self.showPanel)
 
         self._mixed_filaments: List[MixedFilament] = []
+        self._mesh_assignments: Dict[str, str] = {}  # mesh_name -> mixed_filament_id
         self._selected_index: int = -1
         self._view = None
+        self._preheat_layers: int = 3
+        self._enable_preheat: bool = True
 
         self._global_container_stack = Application.getInstance().getGlobalContainerStack()
         if self._global_container_stack:
@@ -55,20 +66,22 @@ class MixedColorPlugin(QObject, Extension):
 
     mixedFilamentsChanged = pyqtSignal()
     selectedIndexChanged = pyqtSignal()
+    meshAssignmentsChanged = pyqtSignal()
 
     # -- Properties exposed to QML --
 
     @pyqtProperty("QVariantList", notify=mixedFilamentsChanged)
     def mixedFilaments(self) -> list:
         """Return mixed filaments as a list of dicts for QML consumption."""
-        result = []
-        for mf in self._mixed_filaments:
-            result.append(mf.to_dict())
-        return result
+        return [mf.to_dict() for mf in self._mixed_filaments]
 
     @pyqtProperty(int, notify=mixedFilamentsChanged)
     def mixedFilamentCount(self) -> int:
         return len(self._mixed_filaments)
+
+    @pyqtProperty(int, notify=mixedFilamentsChanged)
+    def enabledMixedFilamentCount(self) -> int:
+        return sum(1 for mf in self._mixed_filaments if mf.enabled)
 
     @pyqtProperty(int, notify=selectedIndexChanged)
     def selectedIndex(self) -> int:
@@ -89,6 +102,18 @@ class MixedColorPlugin(QObject, Extension):
                     "color": color
                 })
         return extruders
+
+    @pyqtProperty("QVariantMap", notify=meshAssignmentsChanged)
+    def meshAssignments(self) -> dict:
+        return self._mesh_assignments
+
+    @pyqtProperty(int, notify=mixedFilamentsChanged)
+    def preheatLayers(self) -> int:
+        return self._preheat_layers
+
+    @pyqtProperty(bool, notify=mixedFilamentsChanged)
+    def enablePreheat(self) -> bool:
+        return self._enable_preheat
 
     # -- QML Slots --
 
@@ -118,7 +143,6 @@ class MixedColorPlugin(QObject, Extension):
             ratio_b=ratio_b,
             custom_pattern=custom_pattern
         )
-
         color_a = self._get_extruder_color(filament_a)
         color_b = self._get_extruder_color(filament_b)
         preview = ColorBlender.blend_rgb(color_a, color_b, pattern.get_ratio_fraction())
@@ -155,28 +179,29 @@ class MixedColorPlugin(QObject, Extension):
                 ratio_b=ratio_b,
                 custom_pattern=custom_pattern,
             )
-
             color_a = self._get_extruder_color(filament_a)
             color_b = self._get_extruder_color(filament_b)
             mf.preview_color = ColorBlender.blend_rgb(color_a, color_b, mf.pattern.get_ratio_fraction())
-
             self._saveToMetadata()
             self.mixedFilamentsChanged.emit()
 
     @pyqtSlot(int)
     def removeMixedFilament(self, index: int) -> None:
-        """Remove a mixed filament by index."""
         if 0 <= index < len(self._mixed_filaments):
+            removed_id = self._mixed_filaments[index].id
             del self._mixed_filaments[index]
+            # Clean up mesh assignments referencing this filament
+            self._mesh_assignments = {k: v for k, v in self._mesh_assignments.items()
+                                       if v != removed_id}
             if self._selected_index >= len(self._mixed_filaments):
                 self._selected_index = len(self._mixed_filaments) - 1
             self._saveToMetadata()
             self.mixedFilamentsChanged.emit()
             self.selectedIndexChanged.emit()
+            self.meshAssignmentsChanged.emit()
 
     @pyqtSlot(int, bool)
     def setMixedFilamentEnabled(self, index: int, enabled: bool) -> None:
-        """Enable/disable a mixed filament."""
         if 0 <= index < len(self._mixed_filaments):
             self._mixed_filaments[index].enabled = enabled
             self._saveToMetadata()
@@ -184,7 +209,6 @@ class MixedColorPlugin(QObject, Extension):
 
     @pyqtSlot(int, str)
     def setGradient(self, index: int, gradient_json: str) -> None:
-        """Set gradient profile for a mixed filament from JSON string."""
         if 0 <= index < len(self._mixed_filaments):
             try:
                 data = json.loads(gradient_json)
@@ -196,15 +220,40 @@ class MixedColorPlugin(QObject, Extension):
 
     @pyqtSlot(int)
     def removeGradient(self, index: int) -> None:
-        """Remove gradient from a mixed filament."""
         if 0 <= index < len(self._mixed_filaments):
             self._mixed_filaments[index].gradient = None
             self._saveToMetadata()
             self.mixedFilamentsChanged.emit()
 
+    @pyqtSlot(str, str)
+    def assignMeshToMixedFilament(self, mesh_name: str, mixed_filament_id: str) -> None:
+        """Assign a mesh/object to a specific mixed filament by ID."""
+        self._mesh_assignments[mesh_name] = mixed_filament_id
+        self._saveToMetadata()
+        self.meshAssignmentsChanged.emit()
+
+    @pyqtSlot(str)
+    def unassignMesh(self, mesh_name: str) -> None:
+        """Remove a mesh assignment."""
+        if mesh_name in self._mesh_assignments:
+            del self._mesh_assignments[mesh_name]
+            self._saveToMetadata()
+            self.meshAssignmentsChanged.emit()
+
+    @pyqtSlot(int)
+    def setPreheatLayers(self, layers: int) -> None:
+        self._preheat_layers = max(0, min(20, layers))
+        self._saveToMetadata()
+        self.mixedFilamentsChanged.emit()
+
+    @pyqtSlot(bool)
+    def setEnablePreheat(self, enabled: bool) -> None:
+        self._enable_preheat = enabled
+        self._saveToMetadata()
+        self.mixedFilamentsChanged.emit()
+
     @pyqtSlot(str, str, float, result=str)
     def previewBlendColor(self, color_a_hex: str, color_b_hex: str, ratio_a: float) -> str:
-        """Compute and return a preview blend color as hex string."""
         ca = ColorBlender.hex_to_rgb(color_a_hex)
         cb = ColorBlender.hex_to_rgb(color_b_hex)
         blended = ColorBlender.blend_rgb(ca, cb, ratio_a)
@@ -226,19 +275,29 @@ class MixedColorPlugin(QObject, Extension):
         if not gcode_list:
             return
 
-        # Only process enabled mixed filaments
         active_mixes = [mf for mf in self._mixed_filaments if mf.enabled]
         if not active_mixes:
             return
 
-        # Check if already processed
         if ";MIXED_COLOR_PROCESSED" in gcode_list[0]:
             Logger.log("w", "G-code already processed by Mixed Colors plugin.")
             return
 
         try:
-            processor = GCodeProcessor()
-            gcode_list = processor.process(gcode_list, active_mixes)
+            # Gather extruder temperatures for pre-heating
+            extruder_temps = self._get_extruder_temperatures()
+            standby_temp = self._get_standby_temperature()
+
+            processor = GCodeProcessor(
+                preheat_layers=self._preheat_layers if self._enable_preheat else 0,
+                extruder_temperatures=extruder_temps,
+                standby_temperature=standby_temp,
+            )
+            gcode_list = processor.process(
+                gcode_list,
+                active_mixes,
+                mesh_assignments=self._mesh_assignments if self._mesh_assignments else None,
+            )
             gcode_list[0] += ";MIXED_COLOR_PROCESSED\n"
             gcode_dict[active_build_plate_id] = gcode_list
             setattr(scene, "gcode_dict", gcode_dict)
@@ -249,7 +308,7 @@ class MixedColorPlugin(QObject, Extension):
     # -- Internal Methods --
 
     def _createView(self) -> None:
-        """Create the QML dialog view."""
+        """Create the QML dialog view and save button indicator."""
         if self._view is not None:
             return
 
@@ -260,37 +319,59 @@ class MixedColorPlugin(QObject, Extension):
 
         qml_path = os.path.join(plugin_path, "ui", "MixedColorPanel.qml")
         self._view = CuraApplication.getInstance().createQmlComponent(qml_path, {"manager": self})
+        if self._view is None:
+            Logger.log("e", "Failed to create Mixed Colors QML view.")
+            return
+
+        # Register save button indicator (same pattern as PostProcessingPlugin)
+        save_button = self._view.findChild(QObject, "mixedColorSaveAreaButton")
+        if save_button:
+            CuraApplication.getInstance().addAdditionalComponent("saveButton", save_button)
+            Logger.log("d", "Mixed Colors save button indicator registered.")
 
     def _onGlobalContainerStackChanged(self) -> None:
         self._global_container_stack = Application.getInstance().getGlobalContainerStack()
         if self._global_container_stack:
             self._restoreFromMetadata()
         self.mixedFilamentsChanged.emit()
+        self.meshAssignmentsChanged.emit()
 
     def _saveToMetadata(self) -> None:
-        """Persist mixed filament configs to global container stack metadata."""
         if not self._global_container_stack:
             return
-        data = [mf.to_dict() for mf in self._mixed_filaments]
+        data = {
+            "filaments": [mf.to_dict() for mf in self._mixed_filaments],
+            "mesh_assignments": self._mesh_assignments,
+            "preheat_layers": self._preheat_layers,
+            "enable_preheat": self._enable_preheat,
+        }
         self._global_container_stack.setMetaDataEntry(METADATA_KEY, json.dumps(data))
 
     def _restoreFromMetadata(self) -> None:
-        """Restore mixed filament configs from global container stack metadata."""
         if not self._global_container_stack:
             return
         raw = self._global_container_stack.getMetaDataEntry(METADATA_KEY)
         if not raw:
             self._mixed_filaments = []
+            self._mesh_assignments = {}
             return
         try:
             data = json.loads(raw)
-            self._mixed_filaments = [MixedFilament.from_dict(d) for d in data]
-        except (json.JSONDecodeError, KeyError) as e:
+            # Support both old format (list) and new format (dict with sections)
+            if isinstance(data, list):
+                self._mixed_filaments = [MixedFilament.from_dict(d) for d in data]
+                self._mesh_assignments = {}
+            else:
+                self._mixed_filaments = [MixedFilament.from_dict(d) for d in data.get("filaments", [])]
+                self._mesh_assignments = data.get("mesh_assignments", {})
+                self._preheat_layers = data.get("preheat_layers", 3)
+                self._enable_preheat = data.get("enable_preheat", True)
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
             Logger.log("e", f"Failed to restore mixed filament data: {e}")
             self._mixed_filaments = []
+            self._mesh_assignments = {}
 
     def _get_extruder_color(self, extruder_index: int) -> tuple:
-        """Get RGB color tuple for an extruder's material."""
         global_stack = Application.getInstance().getGlobalContainerStack()
         if global_stack and extruder_index < len(global_stack.extruderList):
             extruder = global_stack.extruderList[extruder_index]
@@ -298,3 +379,23 @@ class MixedColorPlugin(QObject, Extension):
                 hex_color = extruder.material.getMetaDataEntry("color_code", "#808080")
                 return ColorBlender.hex_to_rgb(hex_color)
         return (128, 128, 128)
+
+    def _get_extruder_temperatures(self) -> Dict[int, float]:
+        """Get print temperatures for each extruder from settings."""
+        temps = {}
+        global_stack = Application.getInstance().getGlobalContainerStack()
+        if global_stack:
+            for idx, extruder in enumerate(global_stack.extruderList):
+                temp = extruder.getProperty("material_print_temperature", "value")
+                if temp:
+                    temps[idx] = float(temp)
+        return temps
+
+    def _get_standby_temperature(self) -> float:
+        """Get standby temperature from settings."""
+        global_stack = Application.getInstance().getGlobalContainerStack()
+        if global_stack and global_stack.extruderList:
+            temp = global_stack.extruderList[0].getProperty("material_standby_temperature", "value")
+            if temp:
+                return float(temp)
+        return 150.0
