@@ -23,12 +23,6 @@ UM.Dialog
 
     signal applied()
 
-    // Internal keyframe model
-    ListModel
-    {
-        id: keyframeModel
-    }
-
     function reset()
     {
         enableCheck.checked = true
@@ -75,6 +69,12 @@ UM.Dialog
     {
         UM.I18nCatalog { id: catalog; name: "cura" }
         anchors.fill: parent
+
+        // Internal keyframe model (must be inside Item, not direct child of UM.Dialog)
+        ListModel
+        {
+            id: keyframeModel
+        }
 
         ColumnLayout
         {
