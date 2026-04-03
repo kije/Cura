@@ -275,6 +275,24 @@ class NonPlanarSlicingExtension(QObject, Extension):
         except Exception:
             Logger.logException("w", "Could not update setting visibility")
 
+    def _emitEnabledChangedForChildren(self) -> None:
+        """Force the UI to refresh the 'enabled' state of all child settings.
+
+        Dynamically injected settings don't participate in Uranium's
+        automatic relation tracking, so when ``nonplanar_enabled`` changes,
+        the QML SettingPropertyProviders for child settings don't know to
+        re-evaluate their ``enabled`` expressions.  We fix this by
+        explicitly emitting ``propertyChanged(key, "enabled")`` for each
+        child setting on the global container stack.
+        """
+        stack = self._getGlobalStack()
+        if stack is None:
+            return
+
+        child_keys = [k for k in self._settings_dict if k != SETTING_ENABLED]
+        for key in child_keys:
+            stack.propertyChanged.emit(key, "enabled")
+
     # -------------------------------------------------------------------------
     # Settings Access
     # -------------------------------------------------------------------------
@@ -362,10 +380,21 @@ class NonPlanarSlicingExtension(QObject, Extension):
         if key == SETTING_ENABLED:
             if self._isEnabled():
                 Logger.log("d", "Non-planar slicing enabled — scheduling analysis")
+                # Ensure our settings are visible in the current preset.
+                self._makeSettingsVisible()
                 QTimer.singleShot(300, self._runAnalysis)
             else:
                 Logger.log("d", "Non-planar slicing disabled — clearing overlays")
                 self._clearOverlays()
+            # Force the UI to refresh "enabled" state for all dependent
+            # settings. Dynamically injected settings don't get automatic
+            # relation tracking, so the QML SettingPropertyProviders won't
+            # re-evaluate their "enabled" expressions unless we explicitly
+            # emit propertyChanged for each child key.
+            self._emitEnabledChangedForChildren()
+        elif key == SETTING_FLOW_COMPENSATION:
+            # Flow multiplier sub-settings depend on this too.
+            self._emitEnabledChangedForChildren()
         elif key in SETTINGS_INVALIDATE_ANALYSIS:
             if self._isEnabled() and self._analysis_entries:
                 Logger.log("d", "Setting '%s' changed — scheduling re-analysis (debounced)", key)
