@@ -52,6 +52,12 @@ SETTING_MIN_REGION_AREA = "nonplanar_min_region_area"
 SETTING_BLEND_DISTANCE = "nonplanar_blend_distance"
 SETTING_FLOW_COMPENSATION = "nonplanar_flow_compensation"
 SETTING_FEEDRATE_COMPENSATION = "nonplanar_feedrate_compensation"
+SETTING_HEIGHTMAP_RESOLUTION = "nonplanar_heightmap_resolution"
+SETTING_SEGMENT_LENGTH = "nonplanar_segment_length"
+SETTING_SAFETY_MARGIN = "nonplanar_safety_margin"
+SETTING_MIN_BENEFIT_ANGLE = "nonplanar_min_benefit_angle"
+SETTING_MAX_FLOW_MULTIPLIER = "nonplanar_max_flow_multiplier"
+SETTING_MIN_FLOW_MULTIPLIER = "nonplanar_min_flow_multiplier"
 
 # Existing Cura settings we read from the printer profile
 MACHINE_HEAD_POLYGON = "machine_head_with_fans_polygon"
@@ -64,11 +70,6 @@ SKIP_LINE_TYPES = frozenset([
     "SUPPORT", "SUPPORT-INTERFACE", "PRIME-TOWER", "SKIRT",
 ])
 
-# Internal constants
-HEIGHTMAP_RESOLUTION = 0.5  # mm
-SEGMENT_LENGTH = 1.0  # mm, max G-code segment length for subdivision
-SAFETY_MARGIN = 0.5  # mm, subtracted from nozzle clearance
-
 # Settings whose changes should invalidate the analysis cache and trigger
 # re-analysis.  These affect candidate detection, height maps, or collision
 # checking — NOT settings that only affect G-code output.
@@ -78,6 +79,9 @@ SETTINGS_INVALIDATE_ANALYSIS = frozenset([
     SETTING_NOZZLE_CLEARANCE,
     SETTING_MIN_REGION_AREA,
     SETTING_BLEND_DISTANCE,
+    SETTING_HEIGHTMAP_RESOLUTION,
+    SETTING_SAFETY_MARGIN,
+    SETTING_MIN_BENEFIT_ANGLE,
     MACHINE_HEAD_POLYGON,
     MACHINE_GANTRY_HEIGHT,
     MACHINE_NOZZLE_EXPANSION_ANGLE,
@@ -288,15 +292,18 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "blend_distance_mm": float(self._getSetting(SETTING_BLEND_DISTANCE, 3.0)),
             "flow_compensation": bool(self._getSetting(SETTING_FLOW_COMPENSATION, True)),
             "feedrate_compensation": bool(self._getSetting(SETTING_FEEDRATE_COMPENSATION, True)),
+            # Tunable analysis/bending parameters
+            "heightmap_resolution": float(self._getSetting(SETTING_HEIGHTMAP_RESOLUTION, 0.5)),
+            "segment_length": float(self._getSetting(SETTING_SEGMENT_LENGTH, 1.0)),
+            "safety_margin_mm": float(self._getSetting(SETTING_SAFETY_MARGIN, 0.5)),
+            "min_benefit_angle_deg": float(self._getSetting(SETTING_MIN_BENEFIT_ANGLE, 5.0)),
+            "max_flow_multiplier": float(self._getSetting(SETTING_MAX_FLOW_MULTIPLIER, 2.0)),
+            "min_flow_multiplier": float(self._getSetting(SETTING_MIN_FLOW_MULTIPLIER, 0.5)),
             # Machine settings (read-only from printer profile)
             "printhead_polygon": self._getSetting(MACHINE_HEAD_POLYGON, [[-20, 10], [10, 10], [10, -10], [-20, -10]]),
             "gantry_height": float(self._getSetting(MACHINE_GANTRY_HEIGHT, 99999)),
             "nozzle_expansion_angle_deg": float(self._getSetting(MACHINE_NOZZLE_EXPANSION_ANGLE, 45)),
             "nozzle_size_mm": float(self._getSetting(MACHINE_NOZZLE_SIZE, 0.4)),
-            # Internal constants
-            "heightmap_resolution": HEIGHTMAP_RESOLUTION,
-            "segment_length": SEGMENT_LENGTH,
-            "safety_margin_mm": SAFETY_MARGIN,
         }
 
     # -------------------------------------------------------------------------
@@ -1231,7 +1238,7 @@ class _AnalysisJob(Job):
         candidates = detect_candidates(
             analysis, indices,
             max_angle_deg=settings["max_angle_deg"],
-            min_benefit_angle_deg=5.0,
+            min_benefit_angle_deg=settings["min_benefit_angle_deg"],
             min_region_area_mm2=settings["min_region_area_mm2"],
         )
         Logger.log("d", "  Candidate detection: %d regions in %.2fs",

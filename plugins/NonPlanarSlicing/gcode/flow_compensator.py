@@ -30,6 +30,8 @@ def compensate_flow(
     is_relative: bool,
     previous_abs_e: float = 0.0,
     path_length_ratio: float = 1.0,
+    min_multiplier: float = _MIN_MULTIPLIER,
+    max_multiplier: float = _MAX_MULTIPLIER,
 ) -> float:
     """Scale an E (extrusion) value to compensate for changed layer height
     and changed path length after non-planar bending.
@@ -79,7 +81,7 @@ def compensate_flow(
     # path_length_ratio accounts for longer 3D path after bending
     height_ratio = actual_layer_height / nominal_layer_height
     raw_multiplier = height_ratio * max(1.0, path_length_ratio)
-    multiplier = max(_MIN_MULTIPLIER, min(_MAX_MULTIPLIER, raw_multiplier))
+    multiplier = max(min_multiplier, min(max_multiplier, raw_multiplier))
 
     if is_relative:
         # In relative mode, e_value is already a delta -- scale directly.

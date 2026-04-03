@@ -242,6 +242,8 @@ def bend_gcode(
     is_relative = bool(settings.get("is_relative_extrusion", False))
     segment_length = float(settings.get("segment_length", _DEFAULT_SEGMENT_LENGTH))
     surface_mode = str(settings.get("surface_mode", "all_surfaces"))
+    max_flow_multiplier = float(settings.get("max_flow_multiplier", 2.0))
+    min_flow_multiplier = float(settings.get("min_flow_multiplier", 0.5))
 
     # G-code coordinates use machine origin (corner for most printers).
     # Analysis height maps use model-centered coordinates.  These offsets
@@ -549,6 +551,8 @@ def bend_gcode(
                     e_delta, actual_lh, layer_height,
                     is_relative=True,  # Operate on delta.
                     path_length_ratio=path_ratio,
+                    min_multiplier=min_flow_multiplier,
+                    max_multiplier=max_flow_multiplier,
                 )
 
             # Compute final absolute E and the output E value.
