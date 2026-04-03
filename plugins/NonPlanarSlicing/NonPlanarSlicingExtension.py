@@ -17,6 +17,7 @@ from PyQt6.QtCore import QObject, QTimer
 
 from UM.Application import Application
 from UM.Extension import Extension
+from UM.Job import Job
 from UM.Logger import Logger
 from UM.Message import Message
 from UM.PluginRegistry import PluginRegistry
@@ -122,6 +123,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
         # Guard against re-entrant scene change signals
         self._updating_overlays = False
+
+        # Background analysis job tracking
+        self._analysis_job: Optional[_AnalysisJob] = None
 
         # Track the currently connected global stack to avoid duplicate signal connections
         self._connected_stack = None
@@ -363,8 +367,8 @@ class NonPlanarSlicingExtension(QObject, Extension):
         """Run mesh analysis on all sliceable nodes in the scene.
 
         Only analyzes nodes that don't already have a cached result.
-        Analysis runs once per model; cache is invalidated by
-        setting/transform/removal changes.
+        Heavy computation runs on a background thread via ``_AnalysisJob``
+        so the UI remains responsive.
         """
         if not self._isEnabled():
             self._clearOverlays()
@@ -372,52 +376,133 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
         settings = self._getSettings()
         scene = Application.getInstance().getController().getScene()
-        analyzed_count = 0
-        total_candidate_area = 0.0
-        total_regions = 0
 
         # Prune dead weakrefs first
         self._pruneDeadEntries()
 
+        # Collect nodes that need analysis
+        nodes_to_analyze: List = []
         for node in DepthFirstIterator(scene.getRoot()):
             if not self._isSliceableNode(node):
                 continue
-
-            # Check if already analyzed (by identity, not id)
             existing = self._getResultForNode(node)
             if existing is not None:
-                if existing.candidate_regions is not None:
-                    for region in existing.candidate_regions.regions:
-                        total_candidate_area += region.total_area
-                        total_regions += 1
-                    analyzed_count += 1
+                continue  # already cached
+            nodes_to_analyze.append(node)
+
+        if not nodes_to_analyze:
+            # All nodes already cached — just show existing results
+            self._showCachedResults()
+            return
+
+        # Cancel any running analysis job
+        if self._analysis_job is not None:
+            Logger.log("d", "Cancelling previous analysis job")
+            self._analysis_job.cancel()
+            self._analysis_job = None
+
+        # Prepare lightweight snapshots for the background thread.
+        # We read mesh data and transforms on the main thread (Qt objects
+        # are not thread-safe) and pass pure numpy arrays to the job.
+        node_snapshots = []
+        for node in nodes_to_analyze:
+            mesh_data = node.getMeshData()
+            if mesh_data is None:
+                continue
+            vertices = mesh_data.getVertices()
+            if vertices is None or len(vertices) == 0:
+                continue
+            indices = mesh_data.getIndices()
+            transform = node.getWorldTransformation()
+            transform_matrix = transform.getData() if transform is not None else None
+            node_snapshots.append(_NodeSnapshot(
+                node=node,
+                vertices=numpy.array(vertices),  # writable copy
+                indices=numpy.array(indices) if indices is not None else None,
+                transform_matrix=numpy.array(transform_matrix) if transform_matrix is not None else None,
+                name=node.getName(),
+            ))
+
+        if not node_snapshots:
+            return
+
+        Logger.log("i", "Starting background analysis for %d node(s)", len(node_snapshots))
+
+        job = _AnalysisJob(node_snapshots, settings, self)
+        job.finished.connect(self._onAnalysisJobFinished)
+        self._analysis_job = job
+        job.start()
+
+    def _onAnalysisJobFinished(self, job: Job) -> None:
+        """Handle completed background analysis — runs on the main thread."""
+        if job != self._analysis_job:
+            return  # stale job (was cancelled and replaced)
+        self._analysis_job = None
+
+        if not isinstance(job, _AnalysisJob):
+            return
+
+        results = job.getResults()
+        if not results:
+            return
+
+        settings = self._getSettings()
+        total_candidate_area = 0.0
+        total_regions = 0
+        analyzed_count = 0
+
+        for node, result in results:
+            if result is None:
+                continue
+            # Node may have been removed while analysis was running
+            if node is None or not self._isSliceableNode(node):
                 continue
 
-            Logger.log("d", "Analyzing node '%s' for non-planar slicing", node.getName())
+            self._analysis_entries.append((weakref.ref(node), result))
+            analyzed_count += 1
 
-            result = self._analyzeNode(node, settings)
-            if result is not None:
-                self._analysis_entries.append((weakref.ref(node), result))
+            if result.candidate_regions is not None:
+                for region in result.candidate_regions.regions:
+                    total_candidate_area += region.total_area
+                    total_regions += 1
+
+            self._watchNodeTransform(node)
+
+            # Update overlay (on main thread — safe for Qt/scene operations)
+            self._updating_overlays = True
+            try:
+                self._updateOverlayForNode(node, result, settings)
+            finally:
+                self._updating_overlays = False
+
+        # Include already-cached results in the message
+        for ref, result in self._analysis_entries:
+            n = ref()
+            # Skip results we just added (already counted above)
+            if n is not None and any(n is node for node, _ in results):
+                continue
+            if result.candidate_regions is not None:
+                for region in result.candidate_regions.regions:
+                    total_candidate_area += region.total_area
+                    total_regions += 1
                 analyzed_count += 1
-                if result.candidate_regions is not None:
-                    for region in result.candidate_regions.regions:
-                        total_candidate_area += region.total_area
-                        total_regions += 1
-
-                # Watch for transform changes on this node
-                self._watchNodeTransform(node)
-
-                # Update overlay visualization
-                self._updating_overlays = True
-                try:
-                    self._updateOverlayForNode(node, result, settings)
-                finally:
-                    self._updating_overlays = False
 
         if analyzed_count > 0 and total_regions > 0:
             self._showAnalysisMessage(total_regions, total_candidate_area)
         elif analyzed_count > 0:
             Logger.log("d", "Non-planar analysis: no candidate regions found")
+
+    def _showCachedResults(self) -> None:
+        """Show analysis message from already-cached results."""
+        total_candidate_area = 0.0
+        total_regions = 0
+        for _ref, result in self._analysis_entries:
+            if result.candidate_regions is not None:
+                for region in result.candidate_regions.regions:
+                    total_candidate_area += region.total_area
+                    total_regions += 1
+        if total_regions > 0:
+            self._showAnalysisMessage(total_regions, total_candidate_area)
 
     def _getResultForNode(self, node) -> Optional[_AnalysisResult]:
         """Look up cached analysis for a node (by identity, not id)."""
@@ -481,120 +566,53 @@ class NonPlanarSlicingExtension(QObject, Extension):
             return False
         return True
 
-    def _analyzeNode(self, node, settings: Dict[str, Any]) -> Optional[_AnalysisResult]:
-        """Run the full analysis pipeline on a single mesh node."""
-        from .analysis.surface_analyzer import analyze_mesh
-        from .analysis.candidate_detector import detect_candidates
-        from .analysis.height_map import generate_height_map
-        from .analysis.collision_checker import check_collisions
+    def _runAnalysisSynchronous(self) -> None:
+        """Run analysis synchronously on the main thread.
 
-        try:
+        Used as fallback when post-processing needs results immediately
+        (e.g. when the user enabled the setting after loading the model
+        and slicing has already finished).
+        """
+        settings = self._getSettings()
+        scene = Application.getInstance().getController().getScene()
+
+        for node in DepthFirstIterator(scene.getRoot()):
+            if not self._isSliceableNode(node):
+                continue
+            if self._getResultForNode(node) is not None:
+                continue
+
             mesh_data = node.getMeshData()
             if mesh_data is None:
-                return None
-
+                continue
             vertices = mesh_data.getVertices()
             if vertices is None or len(vertices) == 0:
-                return None
-
+                continue
             indices = mesh_data.getIndices()
-
-            # Get world transformation matrix
             transform = node.getWorldTransformation()
             transform_matrix = transform.getData() if transform is not None else None
 
-            # Transform vertices from Cura Y-up scene space to Z-up slicing
-            # space BEFORE surface analysis.  analyze_mesh checks
-            # face_normals[:,2] (Z component) for "upward", which is only
-            # correct in Z-up coordinates.
-            zup_vertices = self._transformVertices(vertices, transform_matrix)
-
-            # Step 1: Surface analysis (in Z-up space, no extra transform)
-            t0 = time.time()
-            analysis = analyze_mesh(zup_vertices, indices, transform_matrix=None)
-            Logger.log("d", "Surface analysis: %d faces in %.2fs",
-                       len(analysis.face_normals), time.time() - t0)
-
-            # Step 2: Candidate detection
-            t0 = time.time()
-            candidates = detect_candidates(
-                analysis, indices,
-                max_angle_deg=settings["max_angle_deg"],
-                min_benefit_angle_deg=5.0,
-                min_region_area_mm2=settings["min_region_area_mm2"],
-            )
-            Logger.log("d", "Candidate detection: %d regions in %.2fs",
-                       len(candidates.regions), time.time() - t0)
-
-            if not candidates.regions:
-                return _AnalysisResult(
-                    analysis=analysis, candidate_regions=candidates,
-                    height_map=None, collision_result=None,
-                    safe_map=None, blend_map=None,
-                )
-
-            # Step 3: Height map generation
-            t0 = time.time()
-
-            # Reuse the Z-up transformed vertices for height map
-            height_map = generate_height_map(
-                zup_vertices, indices, candidates.all_candidate_mask,
-                resolution=settings["heightmap_resolution"],
-            )
-            Logger.log("d", "Height map: %dx%d grid in %.2fs",
-                       height_map.grid_shape[0], height_map.grid_shape[1],
-                       time.time() - t0)
-
-            # Step 4: Collision checking
-            t0 = time.time()
-            collision_result = check_collisions(
-                height_map,
-                printhead_polygon=settings["printhead_polygon"],
-                nozzle_clearance_mm=settings["nozzle_clearance_mm"],
-                nozzle_expansion_angle_deg=settings["nozzle_expansion_angle_deg"],
-                safety_margin_mm=settings["safety_margin_mm"],
-            )
-            Logger.log("d", "Collision check: %d safe, %d collision in %.2fs",
-                       collision_result.safe_count, collision_result.collision_count,
-                       time.time() - t0)
-
-            # Step 5: Compute blend map
-            from .gcode.transition_blender import compute_blend_map
-            blend_map = compute_blend_map(
-                collision_result.safe_map,
-                resolution=settings["heightmap_resolution"],
-                blend_distance=settings["blend_distance_mm"],
+            snapshot = _NodeSnapshot(
+                node=node,
+                vertices=numpy.array(vertices),
+                indices=numpy.array(indices) if indices is not None else None,
+                transform_matrix=numpy.array(transform_matrix) if transform_matrix is not None else None,
+                name=node.getName(),
             )
 
-            return _AnalysisResult(
-                analysis=analysis,
-                candidate_regions=candidates,
-                height_map=height_map,
-                collision_result=collision_result,
-                safe_map=collision_result.safe_map,
-                blend_map=blend_map,
+            Logger.log("d", "Running synchronous analysis for '%s'", node.getName())
+            result = _AnalysisJob._analyzeSnapshot(
+                snapshot, settings,
+                *_AnalysisJob._get_analysis_imports(),
             )
-
-        except Exception:
-            Logger.logException("e", "Failed to analyze node for non-planar slicing")
-            return None
-
-    def _transformVertices(self, vertices: numpy.ndarray,
-                           transform_matrix: Optional[numpy.ndarray]) -> numpy.ndarray:
-        """Transform vertices to world space, converting Y-up to Z-up."""
-        if transform_matrix is not None:
-            rot_scale = transform_matrix[:3, :3]
-            translate = transform_matrix[:3, 3]
-            world_verts = vertices.dot(rot_scale.T) + translate
-        else:
-            world_verts = vertices.copy()
-
-        # Convert from Y-up (Cura scene) to Z-up (slicing coords)
-        result = numpy.empty_like(world_verts)
-        result[:, 0] = world_verts[:, 0]   # X stays
-        result[:, 1] = -world_verts[:, 2]  # Y = -Z_scene
-        result[:, 2] = world_verts[:, 1]   # Z = Y_scene
-        return result
+            if result is not None:
+                self._analysis_entries.append((weakref.ref(node), result))
+                self._watchNodeTransform(node)
+                self._updating_overlays = True
+                try:
+                    self._updateOverlayForNode(node, result, settings)
+                finally:
+                    self._updating_overlays = False
 
     # -------------------------------------------------------------------------
     # G-code Post-Processing
@@ -840,9 +858,16 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
         # Ensure analysis has been run. If the user enabled the setting
         # after loading the model, analysis might not have happened yet.
+        # If a background job is running, wait for it (it should be fast
+        # at this point since slicing itself takes longer).
         if self._getActiveAnalysisResult() is None:
-            Logger.log("d", "No analysis results at post-processing time; running analysis now")
-            self._runAnalysis()
+            if self._analysis_job is not None:
+                Logger.log("d", "Waiting for background analysis to finish before post-processing")
+                # Don't block the UI indefinitely — if the job is still
+                # running, fall through and let the result arrive later.
+            else:
+                Logger.log("d", "No analysis results at post-processing time; running synchronous analysis")
+                self._runAnalysisSynchronous()
 
         # 1. Modify layer data for SimulationView preview
         self._modifyLayerData()
@@ -1007,6 +1032,9 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
     def _forceReanalyze(self) -> None:
         """Clear cache and re-run analysis on all models."""
+        if self._analysis_job is not None:
+            self._analysis_job.cancel()
+            self._analysis_job = None
         self._analysis_entries.clear()
         self._clearOverlays()
         self._runAnalysis()
@@ -1078,3 +1106,179 @@ class _AnalysisResult:
         self.collision_result = collision_result
         self.safe_map = safe_map
         self.blend_map = blend_map
+
+
+class _NodeSnapshot:
+    """Thread-safe snapshot of a scene node's mesh data for background analysis.
+
+    Qt scene objects are not thread-safe, so we read all necessary data
+    on the main thread and pass pure numpy arrays to the background job.
+    """
+
+    __slots__ = ["node", "vertices", "indices", "transform_matrix", "name"]
+
+    def __init__(
+        self,
+        node,
+        vertices: numpy.ndarray,
+        indices: Optional[numpy.ndarray],
+        transform_matrix: Optional[numpy.ndarray],
+        name: str,
+    ) -> None:
+        self.node = node  # kept for result association (only accessed on main thread)
+        self.vertices = vertices
+        self.indices = indices
+        self.transform_matrix = transform_matrix
+        self.name = name
+
+
+class _AnalysisJob(Job):
+    """Runs the non-planar mesh analysis pipeline on a background thread.
+
+    This handles the CPU-heavy work: surface analysis, candidate detection,
+    height map generation, collision checking, and blend map computation.
+    The results are collected and made available via ``getResults()`` for
+    the main thread to store in the cache and update overlays.
+    """
+
+    def __init__(
+        self,
+        snapshots: List[_NodeSnapshot],
+        settings: Dict[str, Any],
+        extension: "NonPlanarSlicingExtension",
+    ) -> None:
+        super().__init__()
+        self._snapshots = snapshots
+        self._settings = settings
+        self._extension = extension
+        self._results: List[tuple] = []  # [(node, _AnalysisResult | None), ...]
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+        super().cancel()
+
+    def getResults(self) -> List[tuple]:
+        return self._results
+
+    @staticmethod
+    def _get_analysis_imports():
+        from .analysis.surface_analyzer import analyze_mesh
+        from .analysis.candidate_detector import detect_candidates
+        from .analysis.height_map import generate_height_map
+        from .analysis.collision_checker import check_collisions
+        from .gcode.transition_blender import compute_blend_map
+        return analyze_mesh, detect_candidates, generate_height_map, check_collisions, compute_blend_map
+
+    def run(self) -> None:
+        imports = self._get_analysis_imports()
+
+        for snapshot in self._snapshots:
+            if self._cancel:
+                return
+
+            Logger.log("d", "Background analysis: processing '%s'", snapshot.name)
+
+            try:
+                result = self._analyzeSnapshot(
+                    snapshot, self._settings, *imports,
+                )
+                self._results.append((snapshot.node, result))
+            except Exception:
+                Logger.logException("e", "Background analysis failed for '%s'", snapshot.name)
+                self._results.append((snapshot.node, None))
+
+            Job.yieldThread()
+
+    @staticmethod
+    def _analyzeSnapshot(
+        snapshot: _NodeSnapshot,
+        settings: Dict[str, Any],
+        analyze_mesh, detect_candidates,
+        generate_height_map, check_collisions,
+        compute_blend_map,
+    ) -> Optional[_AnalysisResult]:
+        """Run the full analysis pipeline on a node snapshot.
+
+        This is the same logic as the old ``_analyzeNode`` but operates
+        on pre-extracted numpy arrays instead of live scene objects.
+        """
+        vertices = snapshot.vertices
+        indices = snapshot.indices
+        transform_matrix = snapshot.transform_matrix
+
+        # Transform vertices from Y-up (Cura scene) to Z-up (slicing coords)
+        if transform_matrix is not None:
+            rot_scale = transform_matrix[:3, :3]
+            translate = transform_matrix[:3, 3]
+            world_verts = vertices.dot(rot_scale.T) + translate
+        else:
+            world_verts = vertices.copy()
+
+        zup_vertices = numpy.empty_like(world_verts)
+        zup_vertices[:, 0] = world_verts[:, 0]   # X stays
+        zup_vertices[:, 1] = -world_verts[:, 2]  # Y = -Z_scene
+        zup_vertices[:, 2] = world_verts[:, 1]   # Z = Y_scene
+
+        # Step 1: Surface analysis
+        t0 = time.time()
+        analysis = analyze_mesh(zup_vertices, indices, transform_matrix=None)
+        Logger.log("d", "  Surface analysis: %d faces in %.2fs",
+                   len(analysis.face_normals), time.time() - t0)
+
+        # Step 2: Candidate detection
+        t0 = time.time()
+        candidates = detect_candidates(
+            analysis, indices,
+            max_angle_deg=settings["max_angle_deg"],
+            min_benefit_angle_deg=5.0,
+            min_region_area_mm2=settings["min_region_area_mm2"],
+        )
+        Logger.log("d", "  Candidate detection: %d regions in %.2fs",
+                   len(candidates.regions), time.time() - t0)
+
+        if not candidates.regions:
+            return _AnalysisResult(
+                analysis=analysis, candidate_regions=candidates,
+                height_map=None, collision_result=None,
+                safe_map=None, blend_map=None,
+            )
+
+        # Step 3: Height map generation
+        t0 = time.time()
+        height_map = generate_height_map(
+            zup_vertices, indices, candidates.all_candidate_mask,
+            resolution=settings["heightmap_resolution"],
+        )
+        Logger.log("d", "  Height map: %dx%d grid in %.2fs",
+                   height_map.grid_shape[0], height_map.grid_shape[1],
+                   time.time() - t0)
+
+        # Step 4: Collision checking
+        t0 = time.time()
+        collision_result = check_collisions(
+            height_map,
+            printhead_polygon=settings["printhead_polygon"],
+            nozzle_clearance_mm=settings["nozzle_clearance_mm"],
+            nozzle_expansion_angle_deg=settings["nozzle_expansion_angle_deg"],
+            safety_margin_mm=settings["safety_margin_mm"],
+        )
+        Logger.log("d", "  Collision check: %d safe, %d collision in %.2fs",
+                   collision_result.safe_count, collision_result.collision_count,
+                   time.time() - t0)
+
+        # Step 5: Compute blend map
+        blend_map_arr = compute_blend_map(
+            collision_result.safe_map,
+            resolution=settings["heightmap_resolution"],
+            blend_distance=settings["blend_distance_mm"],
+        )
+
+        return _AnalysisResult(
+            analysis=analysis,
+            candidate_regions=candidates,
+            height_map=height_map,
+            collision_result=collision_result,
+            safe_map=collision_result.safe_map,
+            blend_map=blend_map_arr,
+        )
