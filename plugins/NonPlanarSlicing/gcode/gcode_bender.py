@@ -422,6 +422,13 @@ def bend_gcode(
             # Compute E delta for this sub-segment.
             e_delta = se_abs - sub_prev_abs_e
 
+            # Compute 2D and 3D distances for compensation.
+            dx = sx - sub_prev_x
+            dy = sy - sub_prev_y
+            dz = bent_z - sub_prev_bent_z
+            dist_2d = (dx * dx + dy * dy) ** 0.5
+            dist_3d = (dx * dx + dy * dy + dz * dz) ** 0.5
+
             # Flow compensation.
             final_e_delta = e_delta
             if flow_compensation and layer_height > 0.0:
@@ -430,11 +437,16 @@ def bend_gcode(
                     sub_prev_bent_z,  # Use actual previous bent Z.
                     layer_height,
                 )
+                # Path length ratio: the bent 3D path is longer than
+                # the original planar path.  More material must be
+                # deposited over the longer distance.
+                path_ratio = (dist_3d / dist_2d) if dist_2d > 1e-9 else 1.0
                 # Always compensate in relative terms (delta), then
                 # reconstruct absolute or relative as needed.
                 final_e_delta = compensate_flow(
                     e_delta, actual_lh, layer_height,
                     is_relative=True,  # Operate on delta.
+                    path_length_ratio=path_ratio,
                 )
 
             # Compute final absolute E and the output E value.
@@ -444,9 +456,6 @@ def bend_gcode(
             # Feedrate compensation.
             final_f = sf
             if feedrate_compensation and sf is not None and sf > 0.0:
-                dx = sx - sub_prev_x
-                dy = sy - sub_prev_y
-                dz = bent_z - sub_prev_bent_z
                 final_f = adjust_feedrate(sf, dx, dy, dz)
 
             # Build the new move.

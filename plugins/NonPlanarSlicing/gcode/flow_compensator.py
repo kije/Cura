@@ -29,16 +29,24 @@ def compensate_flow(
     nominal_layer_height: float,
     is_relative: bool,
     previous_abs_e: float = 0.0,
+    path_length_ratio: float = 1.0,
 ) -> float:
-    """Scale an E (extrusion) value to compensate for changed layer height.
+    """Scale an E (extrusion) value to compensate for changed layer height
+    and changed path length after non-planar bending.
 
-    When non-planar bending changes the Z of a layer, the effective
-    layer thickness differs from the slicer's nominal layer height.
-    This function scales the extrusion proportionally so that the
-    volumetric flow matches the actual gap being filled.
+    Two factors contribute to the flow adjustment:
 
-    The multiplier is clamped to [0.5, 2.0] to guard against extreme
-    values from degenerate geometry.
+    1. **Layer height ratio** -- When non-planar bending changes the Z of
+       a layer, the effective layer thickness differs from nominal.
+       Thicker layers need more material; thinner layers need less.
+
+    2. **Path length ratio** -- The bent 3D path is longer than the
+       original planar path.  More material must be deposited over the
+       longer distance.  Without this correction, surfaces tilted at
+       30 degrees underextrude by ~15%.
+
+    The combined multiplier is ``(actual_height / nominal_height) *
+    path_length_ratio``, clamped to [0.5, 2.0].
 
     Args:
         e_value: The E parameter value from the G-code line.
@@ -51,6 +59,9 @@ def compensate_flow(
         previous_abs_e: Only used in absolute extrusion mode.  The
             absolute E position before this move, needed to compute
             and scale the delta.
+        path_length_ratio: Ratio of bent 3D segment length to original
+            planar segment length (L_3D / L_2D).  Always >= 1.0.
+            Default 1.0 (no path length correction).
 
     Returns:
         The adjusted E value (relative delta or absolute position,
@@ -63,8 +74,11 @@ def compensate_flow(
         )
         return e_value
 
-    # Compute and clamp the multiplier.
-    raw_multiplier = actual_layer_height / nominal_layer_height
+    # Compute and clamp the combined multiplier.
+    # height_ratio accounts for layer thickness change
+    # path_length_ratio accounts for longer 3D path after bending
+    height_ratio = actual_layer_height / nominal_layer_height
+    raw_multiplier = height_ratio * max(1.0, path_length_ratio)
     multiplier = max(_MIN_MULTIPLIER, min(_MAX_MULTIPLIER, raw_multiplier))
 
     if is_relative:
