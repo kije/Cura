@@ -340,6 +340,17 @@ def bend_gcode(
     # Track current feedrate.
     current_feedrate = 0.0
 
+    # Diagnostic counters.
+    _diag_not_target = 0
+    _diag_not_extrusion = 0
+    _diag_skip_type = 0
+    _diag_travel = 0
+    _diag_not_safe = 0
+    _diag_no_surface = 0
+    _diag_above = 0
+    _diag_below = 0
+    _diag_bent = 0
+
     for move_idx, move in enumerate(parsed.moves):
         # Update tracking state from previous moves.
         if move_idx > 0:
@@ -352,12 +363,20 @@ def bend_gcode(
             current_feedrate = move.f
 
         # Check if this move is a candidate for bending.
-        should_bend = (
-            move.layer_number in target_layers
-            and move.is_extrusion
-            and move.line_type not in _SKIP_LINE_TYPES
-            and not move.is_travel
-        )
+        if move.layer_number not in target_layers:
+            _diag_not_target += 1
+            should_bend = False
+        elif not move.is_extrusion:
+            _diag_not_extrusion += 1
+            should_bend = False
+        elif move.line_type in _SKIP_LINE_TYPES:
+            _diag_skip_type += 1
+            should_bend = False
+        elif move.is_travel:
+            _diag_travel += 1
+            should_bend = False
+        else:
+            should_bend = True
 
         if should_bend:
             # Convert G-code XY to analysis/height-map XY.
@@ -366,6 +385,7 @@ def bend_gcode(
             # Check if XY is in a non-planar region.
             is_safe = _lookup_safe(safe_map, height_map, ax, ay)
             if not is_safe:
+                _diag_not_safe += 1
                 should_bend = False
 
         if should_bend and all_surfaces_mode:
@@ -373,12 +393,15 @@ def bend_gcode(
             # max_bend_depth below the surface at this XY.
             surface_z_check = height_map.interpolate(ax, ay)
             if math.isnan(surface_z_check):
+                _diag_no_surface += 1
                 should_bend = False
             elif move.abs_z > surface_z_check + layer_height:
                 # Move is above the surface — don't bend.
+                _diag_above += 1
                 should_bend = False
             elif move.abs_z < surface_z_check - max_bend_depth:
                 # Move is too far below the surface — don't bend.
+                _diag_below += 1
                 should_bend = False
 
         if not should_bend:
@@ -399,6 +422,7 @@ def bend_gcode(
             in_region = True
 
         region_original_moves[current_region_id].append(move)
+        _diag_bent += 1
 
         # Always subdivide using absolute E values for correct
         # interpolation across sub-segments.
@@ -532,6 +556,38 @@ def bend_gcode(
     # Close any open region.
     if in_region:
         region_end_indices[current_region_id] = len(modified_moves)
+
+    # Log diagnostic summary.
+    logger.info(
+        "Bending diagnostics: total_moves=%d, bent=%d, not_target=%d, "
+        "not_extrusion=%d, skip_type=%d, travel=%d, not_safe=%d, "
+        "no_surface=%d, above_surface=%d, below_depth=%d",
+        len(parsed.moves), _diag_bent, _diag_not_target,
+        _diag_not_extrusion, _diag_skip_type, _diag_travel,
+        _diag_not_safe, _diag_no_surface, _diag_above, _diag_below,
+    )
+
+    # Log height map bounds for debugging coordinate mismatches.
+    if hasattr(height_map, "x_min"):
+        logger.info(
+            "Height map bounds: x=[%.1f, %.1f], y=[%.1f, %.1f]",
+            height_map.x_min, height_map.x_max,
+            height_map.y_min, height_map.y_max,
+        )
+
+    # Log sample G-code coordinate ranges.
+    if parsed.moves:
+        sample_x = [m.abs_x for m in parsed.moves[:100] if m.is_extrusion]
+        sample_y = [m.abs_y for m in parsed.moves[:100] if m.is_extrusion]
+        if sample_x:
+            logger.info(
+                "Sample G-code XY (first 100 extrusion): "
+                "X=[%.1f, %.1f], Y=[%.1f, %.1f] → "
+                "analysis X=[%.1f, %.1f], Y=[%.1f, %.1f]",
+                min(sample_x), max(sample_x), min(sample_y), max(sample_y),
+                min(sample_x) - gcode_offset_x, max(sample_x) - gcode_offset_x,
+                min(sample_y) - gcode_offset_y, max(sample_y) - gcode_offset_y,
+            )
 
     # Validate all regions and revert those that fail.
     reverted_regions: set[int] = set()
