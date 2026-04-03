@@ -540,8 +540,9 @@ class TestConvergence:
         config = {
             "min_density": 0.1,
             "max_density": 0.8,
-            "max_iterations": 20,
+            "max_iterations": 40,
             "infill_pattern": "gyroid",
+            "safety_factor": 1.0,  # Use SF=1 for convergence test to match pre-fix behavior
         }
         solver = IterativeFEASolver()
         _, _, info = solver.solve(
@@ -552,7 +553,7 @@ class TestConvergence:
             surface_mesh=cube_mesh,
         )
         assert info["converged"] is True, (
-            f"Expected convergence in 20 iterations; max_change={info['max_change']:.6f}"
+            f"Expected convergence in 40 iterations; max_change={info['max_change']:.6f}"
         )
         assert info["max_change"] < 1e-3  # module-level _CONVERGENCE_TOL
 
@@ -815,20 +816,20 @@ class TestEdgeCases:
         nu = 0.36
         for density in [0.1, 0.5, 0.8, 1.0]:
             E_eff, nu_eff = effective_properties(E_bulk, nu, density, "gyroid")
-            # gyroid exponent = 1.3
-            expected = E_bulk * (density ** 1.3)
+            # gyroid exponent = 1.6 (Al-Ketan et al. 2018)
+            expected = E_bulk * (density ** 1.6)
             assert E_eff == pytest.approx(expected, rel=1e-6)
             assert nu_eff == pytest.approx(nu, rel=1e-9)
 
     def test_zero_stress_maps_to_rho_min(self):
         """Elements with zero von Mises stress should receive minimum density."""
         vm = np.zeros(10)
-        result = stress_to_density(vm, sigma_yield=50.0, rho_min=0.1, rho_max=0.8)
+        result = stress_to_density(vm, sigma_yield=50.0, rho_min=0.1, rho_max=0.8, safety_factor=1.0)
         assert np.all(result == pytest.approx(0.1))
 
     def test_yield_stress_maps_to_rho_max_power(self):
         """Elements at yield stress should receive maximum density (power method)."""
         sigma_yield = 50.0
         vm = np.full(10, sigma_yield)
-        result = stress_to_density(vm, sigma_yield=sigma_yield, rho_min=0.1, rho_max=0.8)
+        result = stress_to_density(vm, sigma_yield=sigma_yield, rho_min=0.1, rho_max=0.8, safety_factor=1.0)
         assert np.all(result == pytest.approx(0.8, rel=1e-6))

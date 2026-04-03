@@ -96,11 +96,26 @@ class IterativeFEASolver:
             - ``info_dict``: dict with keys ``iterations`` (int),
               ``converged`` (bool), ``max_change`` (float).
         """
+        import warnings
+
+        # Warn early if the material is hyperelastic / near-incompressible —
+        # linear elastic FEA is not valid in that regime.
+        if material.E_xy < 100.0 or material.nu > 0.45:
+            warnings.warn(
+                "Material properties suggest an elastomer "
+                f"(E_xy={material.E_xy} MPa, nu={material.nu}). "
+                "Linear elastic FEA is not valid for hyperelastic materials like TPU. "
+                "Results should not be used for structural assessment.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         n_elems = tet_mesh.elements.shape[0]
         min_rho = float(config.get("min_density", 0.10))
         max_rho = float(config.get("max_density", 0.80))
         max_iter = int(config.get("max_iterations", 5))
         pattern = str(config.get("infill_pattern", "gyroid"))
+        safety_factor = float(config.get("safety_factor", 2.0))
 
         # --- Build boundary condition arrays from surface face → tet node map ---
         fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh, surface_mesh)
@@ -146,6 +161,7 @@ class IterativeFEASolver:
                 rho_min=min_rho,
                 rho_max=max_rho,
                 method="power",
+                safety_factor=safety_factor,
             )
 
             # --- Damping to prevent oscillation ---

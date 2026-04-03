@@ -651,30 +651,30 @@ class TestStressToDensity:
 
     def test_linear_zero_stress_gives_rho_min(self):
         vm = np.array([0.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
         assert result[0] == pytest.approx(self.RHO_MIN)
 
     def test_linear_yield_stress_gives_rho_max(self):
         vm = np.array([50.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
         assert result[0] == pytest.approx(self.RHO_MAX)
 
     def test_linear_half_yield_stress_gives_midpoint(self):
         vm = np.array([25.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
         expected = self.RHO_MIN + (self.RHO_MAX - self.RHO_MIN) * 0.5
         assert result[0] == pytest.approx(expected)
 
     def test_linear_endpoints_exact(self):
         vm = np.array([0.0, 50.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
         assert result[0] == pytest.approx(self.RHO_MIN)
         assert result[1] == pytest.approx(self.RHO_MAX)
 
     def test_linear_vectorized_array(self):
         """Verify result shape matches input shape for array input."""
         vm = np.linspace(0.0, 50.0, 20)
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
         assert result.shape == (20,)
         assert np.all(result >= self.RHO_MIN)
         assert np.all(result <= self.RHO_MAX)
@@ -683,38 +683,38 @@ class TestStressToDensity:
 
     def test_power_zero_stress_gives_rho_min(self):
         vm = np.array([0.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power", safety_factor=1.0)
         assert result[0] == pytest.approx(self.RHO_MIN)
 
     def test_power_yield_stress_gives_rho_max(self):
         vm = np.array([50.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power", safety_factor=1.0)
         assert result[0] == pytest.approx(self.RHO_MAX)
 
     def test_power_half_yield_uses_sqrt(self):
         """Half yield stress → s=0.5 → density = rho_min + (rho_max-rho_min)*sqrt(0.5)."""
         vm = np.array([25.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power", safety_factor=1.0)
         expected = self.RHO_MIN + (self.RHO_MAX - self.RHO_MIN) * np.sqrt(0.5)
         assert result[0] == pytest.approx(expected)
 
     def test_power_gives_higher_density_than_linear_midpoint(self):
         """sqrt(s) > s for s in (0,1) → power method gives more material."""
         vm = np.array([25.0])
-        rho_linear = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
-        rho_power = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power")
+        rho_linear = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
+        rho_power = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="power", safety_factor=1.0)
         assert rho_power[0] > rho_linear[0]
 
     # --- Clamping ---
 
     def test_stress_above_yield_clamped_to_rho_max(self):
         vm = np.array([200.0])  # >> yield
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
         assert result[0] == pytest.approx(self.RHO_MAX)
 
     def test_negative_stress_clamped_to_rho_min(self):
         vm = np.array([-10.0])
-        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear")
+        result = stress_to_density(vm, 50.0, self.RHO_MIN, self.RHO_MAX, method="linear", safety_factor=1.0)
         assert result[0] == pytest.approx(self.RHO_MIN)
 
     def test_output_always_in_rho_range(self):

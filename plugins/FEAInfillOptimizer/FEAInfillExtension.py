@@ -74,6 +74,7 @@ class FEAInfillExtension(QObject, Extension):
         self._infill_pattern = "gyroid"
         self._max_iterations = 5
         self._mesh_resolution = "medium"
+        self._safety_factor = 2.0
 
         # Deferred initialization
         CuraApplication.getInstance().engineCreatedSignal.connect(self._onEngineCreated)
@@ -198,11 +199,15 @@ class FEAInfillExtension(QObject, Extension):
             return self._results.get("min_stress", 0.0)
         return 0.0
 
-    @pyqtProperty(float, notify=resultsChanged)
+    @pyqtProperty(float, notify=settingsChanged)
     def safetyFactor(self) -> float:
-        if self._results:
-            return self._results.get("safety_factor", 0.0)
-        return 0.0
+        return self._safety_factor
+
+    @safetyFactor.setter
+    def safetyFactor(self, value: float) -> None:
+        if self._safety_factor != value:
+            self._safety_factor = value
+            self.settingsChanged.emit()
 
     @pyqtProperty(int, notify=resultsChanged)
     def convergenceIterations(self) -> int:
@@ -331,6 +336,7 @@ class FEAInfillExtension(QObject, Extension):
             "infill_pattern": self._infill_pattern,
             "max_iterations": self._max_iterations,
             "mesh_resolution": self._mesh_resolution,
+            "safety_factor": self._safety_factor,
         }
 
         job = FEASolveJob(node, bc_decorator, material, config)

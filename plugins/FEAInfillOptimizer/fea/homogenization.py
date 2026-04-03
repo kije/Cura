@@ -10,7 +10,23 @@ Penalization) topology-optimisation penalty, which is a separate concept.
 
     E_eff = E_bulk × density_fraction^n
 
-where *n* (the homogenization exponent) depends on the infill pattern.
+where *n* (the homogenization exponent) depends on the infill pattern and its
+dominant deformation mechanism (stretching- vs. bending-dominated).
+
+Exponent sources
+----------------
+- **lines** (n=1.0): Stretching-dominated; uniaxial rule-of-mixtures limit.
+- **grid** (n=2.0): Bending-dominated open-cell lattice; Gibson & Ashby (1997)
+  *Cellular Solids*, Cambridge University Press; validated experimentally by
+  Fernandez-Vicente et al. (2016) *Rapid Prototyping Journal* 22(5).
+- **triangles** (n=1.3): Triangulated lattice, near-stretching-dominated;
+  intermediate between lines and grid per Gibson-Ashby theory.
+- **gyroid** (n=1.6): Triply periodic minimal surface (TPMS); Al-Ketan et al.
+  (2018) *Advanced Engineering Materials* 20(2), Table 2.
+- **cubic** (n=2.0): BCC-type bending-dominated; Maskery et al. (2018)
+  *Additive Manufacturing* 19, pp. 1–11.
+- **honeycomb** (n=2.3): In-plane bending-dominated hexagonal cell; Gibson &
+  Ashby (1997); Fernandez-Vicente et al. (2016) experimental data.
 """
 
 from typing import Tuple
@@ -20,13 +36,15 @@ import numpy as np
 # Homogenization exponents per infill pattern.
 # Higher n → stronger contrast between dense and sparse regions (more aggressive
 # material redistribution).
+# Values are calibrated to Gibson-Ashby theory and published experimental data;
+# see module docstring for full literature references.
 _PATTERN_EXPONENTS: dict[str, float] = {
-    "lines": 1.0,
-    "grid": 1.2,
-    "triangles": 1.4,
-    "gyroid": 1.3,
-    "cubic": 1.5,
-    "honeycomb": 1.5,
+    "lines": 1.0,      # stretching-dominated (rule-of-mixtures)
+    "grid": 2.0,       # bending-dominated; Gibson-Ashby / Fernandez-Vicente 2016
+    "triangles": 1.3,  # near-stretching-dominated triangulated lattice
+    "gyroid": 1.6,     # TPMS; Al-Ketan et al. 2018
+    "cubic": 2.0,      # BCC bending-dominated; Maskery 2018
+    "honeycomb": 2.3,  # bending-dominated hexagonal; Gibson-Ashby / Fernandez-Vicente 2016
 }
 
 _DEFAULT_EXPONENT = 1.3  # fallback for unknown patterns

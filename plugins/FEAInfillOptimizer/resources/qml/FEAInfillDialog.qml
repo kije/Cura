@@ -211,6 +211,15 @@ UM.Dialog
                     Layout.fillWidth: true
                 }
 
+                UM.Label { text: catalog.i18nc("@label", "Safety Factor") }
+                SpinBox
+                {
+                    // Integer SpinBox scaled by 10: value 20 = SF 2.0, range 1.0–5.0
+                    id: safetyFactorSpinBox
+                    from: 10; to: 50; value: 20; stepSize: 5
+                    Layout.fillWidth: true
+                }
+
                 UM.Label { text: catalog.i18nc("@label", "Mesh Resolution") }
                 Cura.ComboBox
                 {
@@ -245,6 +254,7 @@ UM.Dialog
                     manager.maxDensity = maxDensitySpinBox.value
                     manager.numZones = nZonesSpinBox.value
                     manager.maxIterations = maxIterSpinBox.value
+                    manager.safetyFactor = safetyFactorSpinBox.value / 10.0
                     manager.runAnalysis(nodeSelector.currentValue)
                 }
             }
