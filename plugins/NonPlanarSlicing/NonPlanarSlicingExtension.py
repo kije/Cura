@@ -153,10 +153,17 @@ class NonPlanarSlicingExtension(QObject, Extension):
         # G-code post-processing hook (same pattern as PostProcessingPlugin)
         app.getOutputDeviceManager().writeStarted.connect(self._onWriteStarted)
 
-        # Layer data modification after ProcessSlicedLayersJob finishes.
+        # Layer data modification after slicing/layer processing finishes.
         backend = app.getBackend()
         if backend is not None:
             backend.backendStateChange.connect(self._onBackendStateChanged)
+
+        # Also hook into view changes: ProcessSlicedLayersJob often runs
+        # when the user switches to SimulationView, AFTER slicing is done.
+        app.getController().activeViewChanged.connect(self._onActiveViewChanged)
+
+        # Track whether we've already post-processed the current slice
+        self._postprocessing_done_for_gcode = False
 
         Logger.log("i", "Non-Planar Slicing plugin initialized")
 
@@ -797,9 +804,10 @@ class NonPlanarSlicingExtension(QObject, Extension):
     def _onBackendStateChanged(self, state) -> None:
         """Called when the backend state changes.
 
-        When slicing starts (Processing), we connect to the
-        ProcessSlicedLayersJob's finished signal so we can modify
-        layer data AFTER the mesh is built (not before).
+        We track two state transitions:
+        - Processing: mark that a new slice is in progress (reset flag)
+        - Done: slicing finished; schedule post-processing with a delay
+          to allow ProcessSlicedLayersJob to run first
         """
         try:
             from UM.Backend.Backend import BackendState
@@ -807,56 +815,70 @@ class NonPlanarSlicingExtension(QObject, Extension):
             return
 
         if state == BackendState.Processing:
-            # Slicing just started. Monitor for ProcessSlicedLayersJob.
-            self._connectToProcessLayersJob()
+            # New slice started — reset the post-processing flag
+            self._postprocessing_done_for_gcode = False
+        elif state == BackendState.Done:
+            if not self._isEnabled():
+                return
+            # Slicing finished. ProcessSlicedLayersJob may or may not
+            # have been started yet (depends on whether SimulationView
+            # is active). Schedule a delayed check.
+            Logger.log("d", "NonPlanar: slicing done — scheduling post-processing check")
+            QTimer.singleShot(500, self._tryApplyPostProcessing)
 
-    def _connectToProcessLayersJob(self) -> None:
-        """Connect to the ProcessSlicedLayersJob.finished signal.
+    def _onActiveViewChanged(self) -> None:
+        """Called when the user switches views (e.g. to SimulationView).
 
-        The backend creates this job after receiving layer data from the
-        engine. We poll briefly to catch it when it's created.
+        ProcessSlicedLayersJob often starts when switching to
+        SimulationView AFTER slicing completes. We schedule a delayed
+        post-processing attempt to catch this case.
         """
         if not self._isEnabled():
             return
-
-        backend = Application.getInstance().getBackend()
-        if backend is None:
+        if self._postprocessing_done_for_gcode:
             return
 
-        # The backend stores the job as _process_layers_job.
-        # We use a short polling timer to detect when it starts.
-        self._layer_job_check_timer = QTimer()
-        self._layer_job_check_timer.setInterval(200)
-        self._layer_job_check_count = 0
+        controller = Application.getInstance().getController()
+        view = controller.getActiveView()
+        if view is not None and view.getPluginId() == "SimulationView":
+            Logger.log("d", "NonPlanar: SimulationView activated — scheduling post-processing check")
+            # Delay to allow ProcessSlicedLayersJob to finish building
+            # the layer mesh (it typically runs a few hundred ms).
+            QTimer.singleShot(1000, self._tryApplyPostProcessing)
 
-        def _checkForJob():
-            self._layer_job_check_count += 1
-            job = getattr(backend, "_process_layers_job", None)
-            if job is not None:
-                self._layer_job_check_timer.stop()
-                try:
-                    job.finished.connect(self._onProcessLayersFinished)
-                    Logger.log("d", "Connected to ProcessSlicedLayersJob.finished")
-                except Exception:
-                    Logger.logException("w", "Failed to connect to ProcessSlicedLayersJob")
-            elif self._layer_job_check_count > 50:  # 10 seconds max
-                self._layer_job_check_timer.stop()
+    def _tryApplyPostProcessing(self) -> None:
+        """Attempt post-processing if layer data is available.
 
-        self._layer_job_check_timer.timeout.connect(_checkForJob)
-        self._layer_job_check_timer.start()
-
-    def _onProcessLayersFinished(self, job) -> None:
-        """Called when ProcessSlicedLayersJob finishes building the layer mesh.
-
-        At this point, the LayerData mesh is fully built and we can
-        modify its vertices for non-planar preview.  We also bend the
-        G-code in-place so the preview and any subsequent export both
-        reflect non-planar changes.
+        Called from multiple hooks (backend done, view change). Checks
+        whether there's layer data to modify and G-code to bend.
+        Guards against duplicate processing via _postprocessing_done_for_gcode.
         """
         if not self._isEnabled():
             return
-        # Slight delay to ensure the decorator is set on the scene node.
-        QTimer.singleShot(100, self._applyNonPlanarPostProcessing)
+        if self._postprocessing_done_for_gcode:
+            return
+
+        # Check if layer data is available (ProcessSlicedLayersJob has finished)
+        scene = Application.getInstance().getController().getScene()
+        has_layer_data = False
+        for node in DepthFirstIterator(scene.getRoot()):
+            if node.callDecoration("getLayerData") is not None:
+                has_layer_data = True
+                break
+
+        if not has_layer_data:
+            Logger.log("d", "NonPlanar: no layer data available yet — will retry on view change")
+            return
+
+        # Check if there's G-code to process
+        gcode_dict = getattr(scene, "gcode_dict", None)
+        if not gcode_dict:
+            Logger.log("d", "NonPlanar: no G-code available yet")
+            return
+
+        Logger.log("i", "NonPlanar: layer data and G-code available — applying post-processing")
+        self._postprocessing_done_for_gcode = True
+        self._applyNonPlanarPostProcessing()
 
     def _applyNonPlanarPostProcessing(self) -> None:
         """Apply both layer data modification and G-code bending after slicing."""
