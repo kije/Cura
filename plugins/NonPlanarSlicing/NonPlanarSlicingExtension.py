@@ -90,8 +90,11 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
         self._overlay_visible = True
 
-        # Cached analysis results per scene node
-        self._analysis_cache: Dict[int, _AnalysisResult] = {}
+        # Analysis results: maps CuraSceneNode → _AnalysisResult.
+        # We use a list of (node_weakref, result) to avoid preventing GC.
+        self._analysis_results: Dict[int, _AnalysisResult] = {}
+        # Set of node ids that have been analyzed (prevents re-analysis)
+        self._analyzed_node_ids: set = set()
 
         # Overlay manager
         self._overlay: Optional[NonPlanarRegionOverlay] = None
@@ -100,18 +103,8 @@ class NonPlanarSlicingExtension(QObject, Extension):
         self._settings_injected = False
         self._settings_dict: Dict[str, Any] = {}
 
-        # Debounce timer for scene changes
-        self._analysis_timer = QTimer()
-        self._analysis_timer.setInterval(500)
-        self._analysis_timer.setSingleShot(True)
-        self._analysis_timer.timeout.connect(self._runAnalysis)
-
-        # Guard against re-entrant scene change signals (overlay creation
-        # adds SceneNodes which fires sceneChanged, causing an infinite loop)
+        # Guard against re-entrant scene change signals
         self._updating_overlays = False
-
-        # Cache key: maps node id → (mesh_data_id, _AnalysisResult)
-        # mesh_data_id lets us detect when the mesh actually changed.
 
         # Load settings definitions from JSON
         self._loadSettingsDefinitions()
@@ -122,17 +115,17 @@ class NonPlanarSlicingExtension(QObject, Extension):
         # Settings injection on container load
         ContainerRegistry.getInstance().containerLoadComplete.connect(self._onContainerLoadComplete)
 
-        # Scene monitoring for analysis
-        app.getController().getScene().sceneChanged.connect(self._onSceneChanged)
+        # Trigger analysis when a file finishes loading (model added to scene)
+        app.fileLoaded.connect(self._onFileLoaded)
+
+        # Re-trigger analysis when the user enables non-planar slicing
+        # (the setting might be off when the file is first loaded).
+        app.globalContainerStackChanged.connect(self._onGlobalStackChanged)
 
         # G-code post-processing hook (same pattern as PostProcessingPlugin)
         app.getOutputDeviceManager().writeStarted.connect(self._onWriteStarted)
 
         # Layer data modification after ProcessSlicedLayersJob finishes.
-        # We can't use backendStateChange(Done) because that fires BEFORE
-        # ProcessSlicedLayersJob builds the layer mesh.  Instead we hook
-        # the backend's _onProcessLayersFinished indirectly by monitoring
-        # the process_layers_job.finished signal.
         backend = app.getBackend()
         if backend is not None:
             backend.backendStateChange.connect(self._onBackendStateChanged)
@@ -286,44 +279,47 @@ class NonPlanarSlicingExtension(QObject, Extension):
     # Scene Change Handling & Mesh Analysis
     # -------------------------------------------------------------------------
 
-    def _onSceneChanged(self, node) -> None:
-        """Called when the scene changes. Debounce and re-analyze if enabled.
+    def _onGlobalStackChanged(self) -> None:
+        """Called when the global container stack changes (printer switch, etc.).
 
-        We aggressively filter events to avoid re-running the expensive
-        analysis pipeline on every scene update (convex hull recalc,
-        property changes, selection changes, etc.).  Only mesh-bearing
-        nodes that are sliceable should trigger re-analysis.
+        Connects to propertyChanged on the new stack so we detect when
+        the user toggles ``nonplanar_enabled``.
         """
-        if isinstance(node, Camera):
+        stack = self._getGlobalStack()
+        if stack is not None:
+            # propertyChanged fires for ANY setting change; we filter in the handler.
+            stack.propertyChanged.connect(self._onSettingChanged)
+
+    def _onSettingChanged(self, key: str, property_name: str) -> None:
+        """Called when any setting changes.  We only care about nonplanar_enabled."""
+        if key != SETTING_ENABLED or property_name != "value":
             return
+        if self._isEnabled():
+            Logger.log("d", "Non-planar slicing enabled — scheduling analysis")
+            QTimer.singleShot(300, self._runAnalysis)
+        else:
+            Logger.log("d", "Non-planar slicing disabled — clearing overlays")
+            self._clearOverlays()
+
+    def _onFileLoaded(self, file_name: str) -> None:
+        """Called when a file finishes loading. Triggers analysis on new models.
+
+        This replaces the sceneChanged-based approach which fired too
+        frequently (on every property change, convex hull update, etc.).
+        File loading is the correct time to analyze: the mesh is new and
+        stable.
+        """
         if not self._isEnabled():
             return
-        if self._updating_overlays:
-            return
-        # Skip overlay nodes we created
-        try:
-            from .visualization.region_overlay import NonPlanarOverlayNode
-            if isinstance(node, NonPlanarOverlayNode):
-                return
-        except ImportError:
-            pass
-        # Only trigger for nodes that could be sliceable meshes.
-        # ConvexHullNode updates, ToolHandle moves, BuildPlate changes,
-        # etc. should NOT trigger analysis.
-        if node is not None:
-            if not hasattr(node, "callDecoration"):
-                return
-            if not node.callDecoration("isSliceable"):
-                return
-        self._analysis_timer.start()
+        Logger.log("d", "File loaded: %s — scheduling non-planar analysis", file_name)
+        # Small delay so the scene node is fully set up (transforms, etc.)
+        QTimer.singleShot(500, self._runAnalysis)
 
     def _runAnalysis(self) -> None:
         """Run mesh analysis on all sliceable nodes in the scene.
 
-        Uses a cache keyed by (node_id, mesh_data_id) so that analysis
-        is only re-run when the mesh actually changes.  Overlay updates
-        are guarded with ``_updating_overlays`` to prevent re-entrant
-        ``sceneChanged`` signals from triggering another analysis cycle.
+        Only analyzes nodes not already in ``_analyzed_node_ids``.
+        Analysis runs once per model, not on every scene change.
         """
         if not self._isEnabled():
             self._clearOverlays()
@@ -339,36 +335,31 @@ class NonPlanarSlicingExtension(QObject, Extension):
             if not self._isSliceableNode(node):
                 continue
 
-            # Check cache: skip re-analysis if the mesh hasn't changed.
-            # Use vertex count + a sample hash as a stable fingerprint,
-            # since id(mesh_data) changes when Cura recreates MeshData.
-            mesh_data = node.getMeshData()
-            mesh_key = self._meshFingerprint(mesh_data)
             node_id = id(node)
-            cached = self._analysis_cache.get(node_id)
-            if cached is not None:
-                cached_key, cached_result = cached
-                if cached_key == mesh_key:
-                    # Mesh unchanged — reuse cached result.
-                    result = cached_result
+
+            # Skip nodes that have already been analyzed
+            if node_id in self._analyzed_node_ids:
+                result = self._analysis_results.get(node_id)
+                if result is not None and result.candidate_regions is not None:
+                    for region in result.candidate_regions.regions:
+                        total_candidate_area += region.total_area
+                        total_regions += 1
                     analyzed_count += 1
-                    if result.candidate_regions is not None:
-                        for region in result.candidate_regions.regions:
-                            total_candidate_area += region.total_area
-                            total_regions += 1
-                    continue
+                continue
+
+            Logger.log("d", "Analyzing node '%s' for non-planar slicing", node.getName())
 
             result = self._analyzeNode(node, settings)
             if result is not None:
-                self._analysis_cache[node_id] = (mesh_key, result)
+                self._analysis_results[node_id] = result
+                self._analyzed_node_ids.add(node_id)
                 analyzed_count += 1
                 if result.candidate_regions is not None:
                     for region in result.candidate_regions.regions:
                         total_candidate_area += region.total_area
                         total_regions += 1
 
-                # Update overlay visualization (guarded to prevent
-                # the overlay's scene additions from re-triggering us).
+                # Update overlay visualization
                 self._updating_overlays = True
                 try:
                     self._updateOverlayForNode(node, result, settings)
@@ -729,6 +720,15 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
     def _applyNonPlanarPostProcessing(self) -> None:
         """Apply both layer data modification and G-code bending after slicing."""
+        if not self._isEnabled():
+            return
+
+        # Ensure analysis has been run. If the user enabled the setting
+        # after loading the model, analysis might not have happened yet.
+        if self._getActiveAnalysisResult() is None:
+            Logger.log("d", "No analysis results at post-processing time; running analysis now")
+            self._runAnalysis()
+
         # 1. Modify layer data for SimulationView preview
         self._modifyLayerData()
 
@@ -863,16 +863,16 @@ class NonPlanarSlicingExtension(QObject, Extension):
             for node in DepthFirstIterator(scene.getRoot()):
                 if not self._isSliceableNode(node):
                     continue
-                cached = self._analysis_cache.get(id(node))
-                if cached is not None:
-                    _key, result = cached
+                result = self._analysis_results.get(id(node))
+                if result is not None:
                     self._updateOverlayForNode(node, result, settings)
         finally:
             self._updating_overlays = False
 
     def _forceReanalyze(self) -> None:
         """Clear cache and re-run analysis on all models."""
-        self._analysis_cache.clear()
+        self._analysis_results.clear()
+        self._analyzed_node_ids.clear()
         self._clearOverlays()
         self._runAnalysis()
 
@@ -886,33 +886,10 @@ class NonPlanarSlicingExtension(QObject, Extension):
         for node in DepthFirstIterator(scene.getRoot()):
             if not self._isSliceableNode(node):
                 continue
-            cached = self._analysis_cache.get(id(node))
-            if cached is not None:
-                _key, result = cached
-                if result.height_map is not None:
-                    return result
+            result = self._analysis_results.get(id(node))
+            if result is not None and result.height_map is not None:
+                return result
         return None
-
-    @staticmethod
-    def _meshFingerprint(mesh_data) -> Optional[tuple]:
-        """Compute a stable fingerprint for a MeshData object.
-
-        Returns a tuple of (vertex_count, hash_sample) that stays the
-        same as long as the actual geometry is unchanged, even if Cura
-        recreates the MeshData wrapper.
-        """
-        if mesh_data is None:
-            return None
-        verts = mesh_data.getVertices()
-        if verts is None:
-            return None
-        n = len(verts)
-        # Sample a few vertices for a fast hash (full hash is too slow
-        # for large meshes).  Checking count + a few values catches
-        # any real geometry change.
-        sample_indices = [0, n // 4, n // 2, 3 * n // 4, n - 1] if n >= 5 else list(range(n))
-        sample = tuple(float(verts[i, j]) for i in sample_indices for j in range(3))
-        return (n, hash(sample))
 
     def _showAnalysisMessage(self, region_count: int, total_area: float) -> None:
         """Show a message about the analysis results."""

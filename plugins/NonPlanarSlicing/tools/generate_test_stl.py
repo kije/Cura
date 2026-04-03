@@ -8,7 +8,14 @@ The model contains several features:
 4. A steep wall section (should NOT be non-planar — >30°)
 5. A sinusoidal wave surface (mixed angles)
 
-All dimensions in mm. The model sits on Z=0 (build plate).
+All dimensions in mm. The model sits on the build plate at height=0.
+
+**Coordinate convention**: Cura uses Y-up scene space. STL files loaded by
+Cura's STL reader are interpreted directly (no axis swap). So we output
+vertices in Y-up format: X = left/right, Y = height, Z = depth.
+
+Internally, geometry functions work in "design space" (Z-up) and we convert
+to Y-up at write time via ``to_yup()``.
 """
 
 import struct
@@ -17,10 +24,23 @@ import numpy as np
 from pathlib import Path
 
 
+def to_yup(point):
+    """Convert a point from Z-up design space to Y-up STL/Cura space.
+
+    Z-up: (x, y, z)  where z = height
+    Y-up: (x, z, -y) where y = height
+
+    Cura scene convention: X = left/right, Y = up, Z = -depth.
+    """
+    x, y, z = point
+    return (x, z, -y)
+
+
 def write_binary_stl(filepath: str, triangles: list[tuple]) -> None:
     """Write triangles to a binary STL file.
 
-    Each triangle is (normal, v0, v1, v2) where each is (x, y, z).
+    Each triangle is (normal, v0, v1, v2) where each is (x, y, z) in
+    Z-up design space.  We convert to Y-up at write time.
     """
     with open(filepath, "wb") as f:
         # 80-byte header
@@ -28,12 +48,17 @@ def write_binary_stl(filepath: str, triangles: list[tuple]) -> None:
         # Number of triangles
         f.write(struct.pack("<I", len(triangles)))
         for normal, v0, v1, v2 in triangles:
+            # Convert from Z-up design space to Y-up STL space
+            n_yup = to_yup(normal)
+            v0_yup = to_yup(v0)
+            v1_yup = to_yup(v1)
+            v2_yup = to_yup(v2)
             # Normal vector
-            f.write(struct.pack("<3f", *normal))
+            f.write(struct.pack("<3f", *n_yup))
             # Vertices
-            f.write(struct.pack("<3f", *v0))
-            f.write(struct.pack("<3f", *v1))
-            f.write(struct.pack("<3f", *v2))
+            f.write(struct.pack("<3f", *v0_yup))
+            f.write(struct.pack("<3f", *v1_yup))
+            f.write(struct.pack("<3f", *v2_yup))
             # Attribute byte count
             f.write(struct.pack("<H", 0))
 
@@ -262,6 +287,50 @@ def make_box(x0, y0, z0, width, depth, height) -> list[tuple]:
     return triangles
 
 
+def make_sphere(cx: float, cy: float, cz: float, radius: float,
+                n_radial: int = 48, n_rings: int = 24) -> list[tuple]:
+    """Create a full sphere centered at (cx, cy, cz).
+
+    All coordinates in Z-up design space. The sphere sits with its
+    center at cz, so to place on build plate use cz=radius.
+    """
+    triangles = []
+
+    for i in range(n_rings):
+        theta0 = math.pi * i / n_rings
+        theta1 = math.pi * (i + 1) / n_rings
+
+        r0 = radius * math.sin(theta0)
+        z0 = cz + radius * math.cos(theta0)
+        r1 = radius * math.sin(theta1)
+        z1 = cz + radius * math.cos(theta1)
+
+        for j in range(n_radial):
+            phi0 = 2 * math.pi * j / n_radial
+            phi1 = 2 * math.pi * (j + 1) / n_radial
+
+            p00 = (cx + r0 * math.cos(phi0), cy + r0 * math.sin(phi0), z0)
+            p01 = (cx + r0 * math.cos(phi1), cy + r0 * math.sin(phi1), z0)
+            p10 = (cx + r1 * math.cos(phi0), cy + r1 * math.sin(phi0), z1)
+            p11 = (cx + r1 * math.cos(phi1), cy + r1 * math.sin(phi1), z1)
+
+            if i == 0:
+                # Top cap — single triangle
+                n1 = _compute_normal(p00, p10, p11)
+                triangles.append((n1, p00, p10, p11))
+            elif i == n_rings - 1:
+                # Bottom cap — single triangle
+                n1 = _compute_normal(p00, p10, p01)
+                triangles.append((n1, p00, p10, p01))
+            else:
+                n1 = _compute_normal(p00, p10, p11)
+                triangles.append((n1, p00, p10, p11))
+                n2 = _compute_normal(p00, p11, p01)
+                triangles.append((n2, p00, p11, p01))
+
+    return triangles
+
+
 def _compute_normal(p0, p1, p2):
     """Compute the unit normal for triangle (p0, p1, p2)."""
     v0 = np.array(p0, dtype=np.float64)
@@ -331,8 +400,10 @@ def main():
     print(f"\nTotal: {len(valid)} triangles (filtered {len(all_triangles) - len(valid)} degenerate)")
 
     # Write STL
-    output_path = Path(__file__).parent.parent / "test_models" / "non_planar_test.stl"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(__file__).parent.parent / "test_models"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / "non_planar_test.stl"
     write_binary_stl(str(output_path), valid)
     print(f"Written to: {output_path}")
     print(f"File size: {output_path.stat().st_size / 1024:.1f} KB")
@@ -344,6 +415,26 @@ def main():
     print("Feature 3 (Flat Box):   ✗ Should NOT be candidate (0° = too flat)")
     print("Feature 4 (Wave):       ~ Partial — peaks/troughs GREEN, transitions YELLOW/RED")
     print("Feature 5 (50° Ramp):   ✗ Should NOT be candidate (too steep)")
+
+    # --- Also generate a standalone sphere ---
+    print("\n=== Generating standalone sphere ===")
+    sphere = make_sphere(cx=0, cy=0, cz=12.5, radius=12.5, n_radial=64, n_rings=32)
+    # Filter degenerate
+    sphere_valid = []
+    for tri in sphere:
+        n, v0, v1, v2 = tri
+        e1 = np.array(v1) - np.array(v0)
+        e2 = np.array(v2) - np.array(v0)
+        if np.linalg.norm(np.cross(e1, e2)) > 1e-9:
+            sphere_valid.append(tri)
+    print(f"  {len(sphere_valid)} triangles")
+
+    sphere_path = output_dir / "sphere_25mm.stl"
+    write_binary_stl(str(sphere_path), sphere_valid)
+    print(f"Written to: {sphere_path}")
+    print(f"File size: {sphere_path.stat().st_size / 1024:.1f} KB")
+    print("Expected: Top half is non-planar candidate (gentle slope)")
+    print("          Bottom half is overhang (normal points downward)")
 
 
 if __name__ == "__main__":

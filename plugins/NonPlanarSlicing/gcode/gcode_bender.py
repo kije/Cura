@@ -548,18 +548,25 @@ def bend_gcode(
     # We do this by directly manipulating the chunks after reconstruction.
     result = reconstruct_gcode(parsed, modified_moves)
 
-    # Add warning header.
-    if result and region_id > 0 and len(reverted_regions) < region_id:
+    bent_count = region_id - len(reverted_regions)
+
+    # Add warning header and processed marker.
+    if result and bent_count > 0:
         header = result[0]
-        if ";WARNING: NON-PLANAR G-CODE" not in header:
-            result[0] = ";WARNING: NON-PLANAR G-CODE\n" + header
+        if ";NON-PLANAR PROCESSED" not in header:
+            stats = (
+                f";NON-PLANAR PROCESSED\n"
+                f";WARNING: NON-PLANAR G-CODE - VERIFY PRINTHEAD CLEARANCE\n"
+                f";NON-PLANAR STATS: regions={bent_count}, "
+                f"reverted={len(reverted_regions)}, "
+                f"layers={len(target_layers)}\n"
+            )
+            result[0] = stats + header
 
     # Insert region boundary comments into the reconstructed chunks.
     # We track region boundaries by layer chunk and insert comments.
     if region_id > 0:
         _insert_region_markers(result, parsed, modified_moves, reverted_regions)
-
-    bent_count = region_id - len(reverted_regions)
     logger.info(
         "Non-planar bending complete: %d regions bent, %d reverted, "
         "%d total moves processed.",
