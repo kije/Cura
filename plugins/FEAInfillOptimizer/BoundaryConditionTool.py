@@ -20,6 +20,7 @@ from cura.PickingPass import PickingPass
 from cura.Scene.CuraSceneNode import CuraSceneNode
 
 from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
+from .visualization.bc_highlight import BCHighlightHandle
 
 # Modes for the boundary condition tool
 MODE_FIXED = "fixed"
@@ -49,6 +50,14 @@ class BoundaryConditionTool(Tool):
         # Faces currently being selected (before confirming a force group)
         self._current_face_selection: list = []
 
+        # BC overlay: parented to the scene root so it lives in world space.
+        # Transformation is updated per-frame to match the selected node.
+        scene_root = self._controller.getScene().getRoot()
+        self._bc_highlight = BCHighlightHandle(parent=scene_root)
+
+        # Refresh highlights when the user selects a different model.
+        Selection.selectionChanged.connect(self._update_highlights)
+
         self.setExposedProperties("Mode", "ForceX", "ForceY", "ForceZ",
                                   "CurrentSelectionCount", "SelectionSummary",
                                   "ConfirmForceGroup", "ClearAllBCs")
@@ -63,6 +72,7 @@ class BoundaryConditionTool(Tool):
             self._mode = mode
             self._current_face_selection.clear()
             self.propertyChanged.emit()
+            self._update_highlights()
 
     def getForceX(self) -> float:
         return self._force_x
@@ -125,6 +135,14 @@ class BoundaryConditionTool(Tool):
     def event(self, event: Event) -> bool:
         super().event(event)
 
+        if event.type == Event.ToolActivateEvent:
+            self._update_highlights()
+            return False
+
+        if event.type == Event.ToolDeactivateEvent:
+            self._bc_highlight.clear()
+            return False
+
         if event.type == Event.MousePressEvent and MouseEvent.LeftButton in event.buttons:
             if not self._controller.getToolsEnabled():
                 return False
@@ -170,6 +188,7 @@ class BoundaryConditionTool(Tool):
                 else:
                     bc.addFixedFaces([face_index])
                 self.propertyChanged.emit()
+                self._update_highlights()
 
             elif self._mode == MODE_FORCE:
                 if ctrl:
@@ -181,6 +200,7 @@ class BoundaryConditionTool(Tool):
                 else:
                     self._current_face_selection = [face_index]
                 self.propertyChanged.emit()
+                self._update_highlights()
 
             return True
 
@@ -246,6 +266,7 @@ class BoundaryConditionTool(Tool):
 
         self._current_face_selection.clear()
         self.propertyChanged.emit()
+        self._update_highlights()
 
     def _clearAllBCs(self) -> None:
         """Clear all boundary conditions on the selected model."""
@@ -257,6 +278,7 @@ class BoundaryConditionTool(Tool):
             bc.clearAll()
         self._current_face_selection.clear()
         self.propertyChanged.emit()
+        self._update_highlights()
 
     def deleteForceGroup(self, index: int) -> None:
         selected = Selection.getSelectedObject(0)
@@ -266,6 +288,7 @@ class BoundaryConditionTool(Tool):
         if bc is not None:
             bc.removeForceGroup(index)
             self.propertyChanged.emit()
+            self._update_highlights()
 
     def clearFixedFaces(self) -> None:
         selected = Selection.getSelectedObject(0)
@@ -275,6 +298,29 @@ class BoundaryConditionTool(Tool):
         if bc is not None:
             bc.clearFixedFaces()
             self.propertyChanged.emit()
+            self._update_highlights()
+
+    def _update_highlights(self) -> None:
+        """Rebuild the BC overlay for the currently selected node.
+
+        Clears the overlay when no model is selected or when the selected
+        node has no boundary condition decorator.
+        """
+        node = Selection.getSelectedObject(0)
+        if node is None or not isinstance(node, CuraSceneNode):
+            self._bc_highlight.clear()
+            return
+
+        bc = node.callDecoration("getBoundaryConditions")
+        if bc is None or not bc.hasAnyBC():
+            self._bc_highlight.clear()
+            return
+
+        try:
+            self._bc_highlight.update_visualization(node, bc)
+        except Exception:
+            Logger.logException("w", "FEA Infill: Failed to update BC highlight overlay")
+            self._bc_highlight.clear()
 
     def getRequiredExtraRenderingPasses(self) -> list:
         return ["picking_selected"]

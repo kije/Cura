@@ -140,6 +140,11 @@ class FEAInfillExtension(QObject, Extension):
     # -- Scene node listing --
 
     @pyqtSlot(result="QVariantList")
+    def refreshSceneNodes(self) -> List[Dict[str, Any]]:
+        """Refresh and return scene nodes; callable from QML on demand (e.g. on dialog open)."""
+        return self.getSceneNodes()
+
+    @pyqtSlot(result="QVariantList")
     def getSceneNodes(self) -> List[Dict[str, Any]]:
         """Return list of printable scene nodes for the target model dropdown.
 

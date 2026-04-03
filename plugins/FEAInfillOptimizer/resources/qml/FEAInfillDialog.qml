@@ -21,9 +21,9 @@ UM.Dialog
     property var sceneNodeModel: []
     backgroundColor: UM.Theme.getColor("main_background")
 
-    Component.onCompleted:
+    onVisibleChanged:
     {
-        if (manager) sceneNodeModel = manager.getSceneNodes()
+        if (visible && manager) sceneNodeModel = manager.getSceneNodes()
     }
 
     Item
