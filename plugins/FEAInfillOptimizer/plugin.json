@@ -1,0 +1,8 @@
+{
+    "name": "FEA Infill Optimizer",
+    "author": "FEA Infill Contributors",
+    "version": "0.1.0",
+    "api": 8,
+    "description": "FEA-driven adaptive infill optimization. Analyzes stress distribution and creates modifier meshes with spatially-varying infill density.",
+    "i18n-catalog": "cura"
+}
