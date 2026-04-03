@@ -5,16 +5,16 @@ import subprocess
 
 from UM.Job import Job
 from UM.Logger import Logger
-from UM.Message import Message
-from UM.i18n import i18nCatalog
 
 from ..deps.dependency_manager import DependencyManager
 
-i18n_catalog = i18nCatalog("cura")
-
 
 class DependencyInstallJob(Job):
-    """Background job that pip-installs missing FEA dependencies."""
+    """Background job that pip-installs missing FEA dependencies.
+
+    All UI feedback (Message objects) is handled by the caller on the main
+    thread via the ``finished`` signal — never from ``run()`` itself.
+    """
 
     def __init__(self, dep_manager: DependencyManager) -> None:
         super().__init__()
@@ -24,24 +24,11 @@ class DependencyInstallJob(Job):
         cmd = self._dep_manager.get_install_command()
         if not cmd:
             Logger.log("i", "FEA Infill: No missing dependencies.")
+            self.setResult("no_missing")
             return
 
-        missing = self._dep_manager.missing_packages()
-        msg = Message(
-            i18n_catalog.i18nc("@info:status",
-                               "Installing FEA dependencies: {packages}...").format(
-                packages=", ".join(missing)),
-            lifetime=0,
-            dismissable=False,
-            progress=0,
-            title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer")
-        )
-        msg.show()
-
         try:
-            msg.setProgress(10)
             Logger.log("i", "FEA Infill: Running pip install: %s", " ".join(cmd))
-
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -51,48 +38,15 @@ class DependencyInstallJob(Job):
 
             if result.returncode != 0:
                 Logger.log("e", "FEA Infill: pip install failed:\n%s", result.stderr)
-                msg.hide()
-                error_msg = Message(
-                    i18n_catalog.i18nc("@info:status",
-                                       "Failed to install FEA dependencies. "
-                                       "Check the log for details."),
-                    title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
-                    message_type=Message.MessageType.ERROR
-                )
-                error_msg.show()
+                self.setResult(Exception("pip install failed: " + result.stderr[:500]))
                 return
 
-            msg.setProgress(90)
             self._dep_manager.post_install()
-            msg.setProgress(100)
-            msg.hide()
-
-            success_msg = Message(
-                i18n_catalog.i18nc("@info:status",
-                                   "FEA dependencies installed successfully."),
-                title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
-                lifetime=5
-            )
-            success_msg.show()
+            self.setResult("ok")
 
         except subprocess.TimeoutExpired:
             Logger.log("e", "FEA Infill: pip install timed out after 600 seconds")
-            msg.hide()
-            error_msg = Message(
-                i18n_catalog.i18nc("@info:status",
-                                   "Dependency installation timed out."),
-                title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
-                message_type=Message.MessageType.ERROR
-            )
-            error_msg.show()
+            self.setResult(Exception("Dependency installation timed out."))
         except Exception as e:
             Logger.log("e", "FEA Infill: pip install error: %s", str(e))
-            msg.hide()
-            error_msg = Message(
-                i18n_catalog.i18nc("@info:status",
-                                   "Dependency installation failed: {error}").format(
-                    error=str(e)),
-                title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
-                message_type=Message.MessageType.ERROR
-            )
-            error_msg.show()
+            self.setResult(Exception(str(e)))

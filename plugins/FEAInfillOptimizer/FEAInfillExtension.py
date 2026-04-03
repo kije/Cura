@@ -116,9 +116,25 @@ class FEAInfillExtension(QObject, Extension):
         JobQueue.getInstance().add(job)
 
     def _onDepsInstalled(self, job) -> None:
-        if self._dep_manager:
-            self._deps_available = self._dep_manager.all_available()
-            self.depsAvailableChanged.emit()
+        def _apply() -> None:
+            result = job.getResult()
+            if isinstance(result, Exception):
+                Message(
+                    str(result),
+                    title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
+                    message_type=Message.MessageType.ERROR
+                ).show()
+            elif result == "ok":
+                Message(
+                    i18n_catalog.i18nc("@info:status",
+                                       "FEA dependencies installed successfully."),
+                    title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
+                    lifetime=5
+                ).show()
+            if self._dep_manager:
+                self._deps_available = self._dep_manager.all_available()
+                self.depsAvailableChanged.emit()
+        CuraApplication.getInstance().callLater(_apply)
 
     # -- Scene node listing --
 
@@ -154,19 +170,9 @@ class FEAInfillExtension(QObject, Extension):
     def _getNodeById(self, node_id) -> Optional[CuraSceneNode]:
         """Resolve a node from the cache populated by ``getSceneNodes``.
 
-        Falls back to a full scene walk if the cache entry is missing (e.g.
-        the cache was not yet populated for this call site).
+        Returns None if the node has been garbage-collected or was never cached.
         """
-        node_key = str(node_id)
-        cached = self._node_cache.get(node_key)
-        if cached is not None:
-            return cached
-        # Fallback: walk the scene comparing by identity via str(id)
-        scene = CuraApplication.getInstance().getController().getScene()
-        for node in DepthFirstIterator(scene.getRoot()):
-            if str(id(node)) == node_key:
-                return node
-        return None
+        return self._node_cache.get(str(node_id))
 
     # -- Analysis status --
 
@@ -210,8 +216,8 @@ class FEAInfillExtension(QObject, Extension):
 
     # -- Boundary condition summary --
 
-    @pyqtSlot(int, result=str)
-    def getBCSummary(self, node_id: int) -> str:
+    @pyqtSlot(str, result=str)
+    def getBCSummary(self, node_id: str) -> str:
         node = self._getNodeById(node_id)
         if node is None:
             return ""
@@ -282,8 +288,8 @@ class FEAInfillExtension(QObject, Extension):
 
     # -- FEA Actions --
 
-    @pyqtSlot(int)
-    def runAnalysis(self, node_id: int) -> None:
+    @pyqtSlot(str)
+    def runAnalysis(self, node_id: str) -> None:
         """Triggered from QML 'Run FEA Analysis' button."""
         if not self._deps_available:
             Message(
@@ -342,18 +348,20 @@ class FEAInfillExtension(QObject, Extension):
 
     def _onFEAFinished(self, job) -> None:
         result = job.getResult()
-        if result is None or isinstance(result, Exception):
-            self._analysis_status = "error"
-            self._results = None
-            Logger.log("e", "FEA Infill: Analysis failed: %s", str(result))
-        else:
-            self._analysis_status = "complete"
-            self._results = result
-        self.analysisStatusChanged.emit()
-        self.resultsChanged.emit()
+        def _apply() -> None:
+            if result is None or isinstance(result, Exception):
+                self._analysis_status = "error"
+                self._results = None
+                Logger.log("e", "FEA Infill: Analysis failed: %s", str(result))
+            else:
+                self._analysis_status = "complete"
+                self._results = result
+            self.analysisStatusChanged.emit()
+            self.resultsChanged.emit()
+        CuraApplication.getInstance().callLater(_apply)
 
-    @pyqtSlot(int)
-    def applyModifierMeshes(self, node_id: int) -> None:
+    @pyqtSlot(str)
+    def applyModifierMeshes(self, node_id: str) -> None:
         """Create infill modifier meshes from the FEA results."""
         if self._results is None:
             return
@@ -384,8 +392,8 @@ class FEAInfillExtension(QObject, Extension):
                 message_type=Message.MessageType.ERROR
             ).show()
 
-    @pyqtSlot(int)
-    def showStressOverlay(self, node_id: int) -> None:
+    @pyqtSlot(str)
+    def showStressOverlay(self, node_id: str) -> None:
         """Toggle stress visualization overlay on the model."""
         if self._results is None:
             return
@@ -396,8 +404,8 @@ class FEAInfillExtension(QObject, Extension):
         from .visualization.stress_overlay import StressOverlayManager
         StressOverlayManager.toggle_overlay(node, self._results)
 
-    @pyqtSlot(int)
-    def clearResults(self, node_id: int) -> None:
+    @pyqtSlot(str)
+    def clearResults(self, node_id: str) -> None:
         """Remove FEA results and any modifier meshes/overlays."""
         self._results = None
         self._analysis_status = "idle"
@@ -422,3 +430,4 @@ class FEAInfillExtension(QObject, Extension):
                 op.addOperation(RemoveSceneNodeOperation(child))
         if op.getNumChildrenOperations() > 0:
             op.push()
+            CuraApplication.getInstance().getController().getScene().sceneChanged.emit(node)

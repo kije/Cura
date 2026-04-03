@@ -130,20 +130,19 @@ def _run_gmsh(
 
             gmsh.merge(stl_path)
 
-            # Classify surfaces and create a volume.
-            # classifySurfaces + createGeometry switch the model to the OCC kernel,
-            # so all subsequent geometry calls must use gmsh.model.occ.
+            # Classify surfaces and create geometry entities in the built-in
+            # (geo) kernel from the imported mesh.
             angle = 40.0  # angle threshold for feature detection (degrees)
             gmsh.model.mesh.classifySurfaces(
                 np.deg2rad(angle), True, True, np.deg2rad(180.0)
             )
             gmsh.model.mesh.createGeometry()
 
-            # Create volume from all surfaces (OCC kernel — must match classifySurfaces)
+            # Create volume from all surfaces (built-in geo kernel)
             surfaces = gmsh.model.getEntities(2)
-            surface_loops = gmsh.model.occ.addSurfaceLoop([s[1] for s in surfaces])
-            gmsh.model.occ.addVolume([surface_loops])
-            gmsh.model.occ.synchronize()
+            surface_loop = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
+            gmsh.model.geo.addVolume([surface_loop])
+            gmsh.model.geo.synchronize()
 
             # Mesh options
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
@@ -182,13 +181,15 @@ def _run_gmsh(
             gmsh.finalize()
 
     # Build surface_node_map: match surface vertices to tet nodes by position
+    # using KDTree for O(S log N) instead of O(S × N) brute-force.
+    import scipy.spatial
     surface_node_map: Dict[int, int] = {}
-    tet_nodes_arr = nodes  # shape (N, 3)
-    for surf_idx, sv in enumerate(surface_mesh.vertices):
-        dists = np.linalg.norm(tet_nodes_arr - sv, axis=1)
-        closest = int(np.argmin(dists))
-        if dists[closest] < char_length * 0.1:  # within 10% of element size
-            surface_node_map[surf_idx] = closest
+    tolerance = char_length * 0.1  # within 10% of element size
+    kd_tree = scipy.spatial.KDTree(nodes)
+    dists, indices = kd_tree.query(surface_mesh.vertices)
+    for surf_idx in range(len(surface_mesh.vertices)):
+        if dists[surf_idx] < tolerance:
+            surface_node_map[surf_idx] = int(indices[surf_idx])
 
     Logger.log(
         "d",

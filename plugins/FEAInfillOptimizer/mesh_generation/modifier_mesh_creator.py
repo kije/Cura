@@ -80,6 +80,10 @@ def create_all_modifier_meshes(
                 instance.setProperty("value", True)
                 instance.resetState()
                 settings.addInstance(instance)
+            else:
+                from UM.Logger import Logger
+                Logger.log("e", "FEA Infill: 'infill_mesh' setting definition not found. "
+                           "Zone '%s' will not function as an infill modifier.", node.getName())
 
             # Second pass: companion settings required by Cura on infill meshes.
             for key, value in [

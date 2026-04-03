@@ -195,28 +195,16 @@ class StressOverlayManager:
         application = CuraApplication.getInstance()
         global_stack = application.getGlobalContainerStack()
 
-        overlay_node = CuraSceneNode()
+        # Use a plain SceneNode (NOT CuraSceneNode) so no SettingOverrideDecorator
+        # or SliceableObjectDecorator is attached.  This makes the overlay purely
+        # visual — the slicer ignores it completely and it does not affect
+        # support generation, infill, or any other print parameter.
+        from UM.Scene.SceneNode import SceneNode
+        overlay_node = SceneNode()
         overlay_node.setName(_OVERLAY_NAME)
         overlay_node.setSelectable(False)
         overlay_node.setMeshData(overlay_mesh)
         overlay_node.setCalculateBoundingBox(False)
-
-        # Mark as non-printing via anti_overhang_mesh so slicer ignores it
-        if global_stack is not None:
-            from cura.Scene.SliceableObjectDecorator import SliceableObjectDecorator
-            overlay_node.addDecorator(SliceableObjectDecorator())
-            stack = overlay_node.callDecoration("getStack")
-            if stack is not None:
-                # Use the top container of the stack for SettingInstance target,
-                # and retrieve the definition from the stack itself (not global_stack)
-                # to stay within the node's own container hierarchy.
-                top_container = stack.getTop()
-                definition = stack.getSettingDefinition("anti_overhang_mesh")
-                if definition is not None:
-                    instance = SettingInstance(definition, top_container)
-                    instance.setProperty("value", True)
-                    instance.resetState()
-                    top_container.addInstance(instance)
 
         controller = application.getController()
         scene = controller.getScene()
