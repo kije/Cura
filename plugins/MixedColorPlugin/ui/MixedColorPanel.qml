@@ -54,15 +54,15 @@ UM.Dialog
                     {
                         manager.updateMixedFilament(
                             ed.editIndex, ed.filamentName, ed.filamentA, ed.filamentB,
-                            ed.proxyExtruder, ed.outputMode, ed.ratioA, ed.ratioB,
-                            ed.patternMode, ed.customPattern)
+                            ed.outputMode, ed.ratioA, ed.ratioB,
+                            ed.patternMode, ed.customPattern, ed.applyGlobally)
                     }
                     else
                     {
                         manager.addMixedFilament(
                             ed.filamentName, ed.filamentA, ed.filamentB,
-                            ed.proxyExtruder, ed.outputMode, ed.ratioA, ed.ratioB,
-                            ed.patternMode, ed.customPattern)
+                            ed.outputMode, ed.ratioA, ed.ratioB,
+                            ed.patternMode, ed.customPattern, ed.applyGlobally)
                     }
                 })
             }

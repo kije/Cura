@@ -40,14 +40,6 @@ class MixedColorDithering(Script):
                     "default_value": 1,
                     "minimum_value": 0
                 },
-                "proxy_extruder":
-                {
-                    "label": "Proxy Extruder",
-                    "description": "The extruder slot assigned to objects that should use the mixed color. Only layers using this extruder will be affected.",
-                    "type": "int",
-                    "default_value": 2,
-                    "minimum_value": 0
-                },
                 "output_mode":
                 {
                     "label": "Output Mode",
@@ -160,7 +152,6 @@ class MixedColorDithering(Script):
     def execute(self, data: List[str]) -> List[str]:
         extruder_a = int(self.getSettingValueByKey("extruder_a"))
         extruder_b = int(self.getSettingValueByKey("extruder_b"))
-        proxy_extruder = int(self.getSettingValueByKey("proxy_extruder"))
         output_mode = self.getSettingValueByKey("output_mode")
         pattern_mode = self.getSettingValueByKey("pattern_mode")
         ratio_a = int(self.getSettingValueByKey("ratio_a"))
@@ -188,8 +179,8 @@ class MixedColorDithering(Script):
                 layer_height = float(match.group(1))
                 break
 
-        # Parse layers
-        layers = []  # (data_index, layer_number, z_height, has_proxy_tool)
+        # Parse layers (global mode: process ALL layers)
+        layers = []  # (data_index, layer_number, z_height)
         current_z = 0.0
         for idx, block in enumerate(data):
             layer_match = re.search(r";LAYER:(-?\d+)", block)
@@ -199,9 +190,7 @@ class MixedColorDithering(Script):
             z_matches = re.findall(r"G[01]\s.*?Z([\d.]+)", block)
             if z_matches:
                 current_z = float(z_matches[0])
-            has_proxy = bool(re.search(rf"^T{proxy_extruder}\s*$", block, re.MULTILINE))
-            if has_proxy:
-                layers.append((idx, layer_num, current_z))
+            layers.append((idx, layer_num, current_z))
 
         if not layers:
             return data
@@ -218,13 +207,16 @@ class MixedColorDithering(Script):
         else:
             schedule = [cycle[i % len(cycle)] for i in range(num_proxy_layers)]
 
-        # Insert preheat commands
+        # Insert preheat commands (tool change mode only)
         if output_mode == "tool_change" and preheat_layers > 0:
             data = self._insert_preheat(data, layers, schedule, extruder_a,
                                          extruder_b, preheat_layers)
 
-        # Apply changes
-        tool_pattern = re.compile(rf"^(T){proxy_extruder}\s*$", re.MULTILINE)
+        # Add processing marker
+        data[0] += ";MIXED_COLOR_DITHERING_PROCESSED\n"
+
+        # Apply changes - replace ALL Tn commands in each layer
+        tool_pattern = re.compile(r"^(T)(\d+)\s*$", re.MULTILINE)
 
         for i, (data_idx, layer_num, z_height) in enumerate(layers):
             choice = schedule[i]
@@ -247,14 +239,14 @@ class MixedColorDithering(Script):
                 if output_mode == "mixing_marlin":
                     mix_cmd = (f"M163 S{extruder_a} P{ratio:.2f}\n"
                               f"M163 S{extruder_b} P{ratio_b_val:.2f}\n"
-                              f"M164 S{proxy_extruder}\n")
+                              f"M164 S2\n")
                 else:  # mixing_reprap
-                    mix_cmd = f"M567 P{proxy_extruder} E{ratio:.2f}:{ratio_b_val:.2f}\n"
+                    mix_cmd = f"M567 P0 E{ratio:.2f}:{ratio_b_val:.2f}\n"
 
-                data[data_idx] = tool_pattern.sub(
-                    mix_cmd + f"T{proxy_extruder} ;MixedColorDithering",
-                    data[data_idx]
-                )
+                def add_mix(match):
+                    return mix_cmd + match.group(0).rstrip() + " ;MixedColorDithering"
+
+                data[data_idx] = tool_pattern.sub(add_mix, data[data_idx])
 
         return data
 

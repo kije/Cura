@@ -195,7 +195,7 @@ class TestGCodeProcessorToolChange(unittest.TestCase):
             name="TestMix",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=pattern,
             output_mode="tool_change",
             enabled=True,
@@ -207,18 +207,20 @@ class TestGCodeProcessorToolChange(unittest.TestCase):
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
 
-        # With Bresenham at 1:1, layers alternate T0 and T1
+        # With Bresenham at 1:1 and global mode, ALL layers alternate T0 and T1
         self.assertIn("T0", result[1])
         self.assertNotIn("T2", result[1])
         self.assertIn("T1", result[2])
         self.assertNotIn("T2", result[2])
 
-    def test_non_proxy_layers_untouched(self):
+    def test_all_layers_processed_in_global_mode(self):
+        """In global mode, even layers originally using T0 get rewritten."""
         mf = self._make_mix()
         gcode = [block for block in SAMPLE_GCODE]
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-        self.assertIn("T0", result[5])
+        # Layer 4 (index 5) originally had T0, but global mode rewrites it too
+        self.assertIn(";MixedColor:TestMix", result[5])
 
     def test_header_untouched(self):
         mf = self._make_mix()
@@ -259,7 +261,7 @@ class TestBresenhamDithering(unittest.TestCase):
             name="Test",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=DitherPattern(mode="ratio", ratio_a=2, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
@@ -286,7 +288,7 @@ class TestBresenhamDithering(unittest.TestCase):
             name="Test",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=DitherPattern(mode="ratio", ratio_a=2, ratio_b=3),
             output_mode="tool_change",
             enabled=True,
@@ -325,7 +327,7 @@ class TestGradientBresenham(unittest.TestCase):
             name="GradTest",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             gradient=gradient,
             output_mode="tool_change",
@@ -354,7 +356,7 @@ class TestGCodeProcessorMixingHotend(unittest.TestCase):
             name="MarlinMix",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=pattern,
             output_mode="mixing",
             mix_gcode="marlin_m163",
@@ -367,7 +369,7 @@ class TestGCodeProcessorMixingHotend(unittest.TestCase):
             name="RepRapMix",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=pattern,
             output_mode="mixing",
             mix_gcode="reprap_m567",
@@ -409,7 +411,7 @@ class TestTemperaturePreheating(unittest.TestCase):
             name="PreheatTest",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
@@ -436,7 +438,7 @@ class TestTemperaturePreheating(unittest.TestCase):
             name="NoPreheat",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=True,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
@@ -458,13 +460,14 @@ class TestTemperaturePreheating(unittest.TestCase):
 class TestPerObjectMeshAssignment(unittest.TestCase):
 
     def test_mesh_assignment_applied(self):
-        """Per-object mesh assignments should override proxy matching."""
+        """Per-object mesh assignments should only affect assigned meshes."""
         mf = MixedFilament(
             id="mix-cube",
             name="CubeMix",
             filament_a=0,
             filament_b=1,
-            proxy_extruder=2,
+            apply_globally=False,
+            assigned_meshes=["Cube.stl"],
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
@@ -472,16 +475,33 @@ class TestPerObjectMeshAssignment(unittest.TestCase):
         gcode = [block for block in SAMPLE_GCODE_MESH]
 
         processor = GCodeProcessor()
-        result = processor.process(
-            gcode, [mf],
-            mesh_assignments={"Cube.stl": "mix-cube"}
-        )
+        result = processor.process(gcode, [mf])
 
-        # The Cube.stl sections should have mixed color processing
-        # (either T0 or T1, not T2)
+        # Layers containing Cube.stl should have mixed color processing
         for block in result[1:]:
-            if ";MESH:Cube.stl" in block and ";MixedColor" in block:
-                self.assertTrue("T0 ;MixedColor" in block or "T1 ;MixedColor" in block)
+            if ";MESH:Cube.stl" in block:
+                self.assertIn(";MixedColor:CubeMix", block)
+
+    def test_per_mesh_only_affects_matching_layers(self):
+        """Per-mesh assignment should not affect layers without the assigned mesh."""
+        mf = MixedFilament(
+            name="OnlySphere",
+            filament_a=0,
+            filament_b=1,
+            apply_globally=False,
+            assigned_meshes=["Sphere.stl"],
+            pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
+            output_mode="tool_change",
+            enabled=True,
+        )
+        # Layer 2 of SAMPLE_GCODE_MESH only has Cube.stl, no Sphere.stl
+        gcode = [block for block in SAMPLE_GCODE_MESH]
+
+        processor = GCodeProcessor()
+        result = processor.process(gcode, [mf])
+
+        # Layer 2 (index 3) only has Cube.stl - should NOT be processed
+        self.assertNotIn(";MixedColor:OnlySphere", result[3])
 
 
 if __name__ == "__main__":
