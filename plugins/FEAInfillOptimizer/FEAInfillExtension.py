@@ -145,26 +145,37 @@ class FEAInfillExtension(QObject, Extension):
         button so the user transitions seamlessly from BC definition
         to analysis.
         """
-        # Ensure the node is in our cache before opening
-        self.getSceneNodes()
+        # Set the pre-selected node key BEFORE creating/showing the dialog,
+        # so that when onVisibleChanged fires and calls refreshNodeList(),
+        # the preselectedNodeKey property is already set.
+        self._preselected_node_key = node_key
+        self.preselectedNodeChanged.emit()
+
+        # Populate cache so getSceneNodes() returns fresh data
+        nodes = self.getSceneNodes()
+        Logger.log("d", "FEA Infill: showDialogForNode key=%s, found %d nodes: %s",
+                   node_key, len(nodes),
+                   ", ".join(f"{n['name']}={n['id']}" for n in nodes))
 
         self._ensureDialog()
         if self._dialog:
-            # Set the pre-selected node key so the dialog can select it
-            self._preselected_node_key = node_key
-            self.preselectedNodeChanged.emit()
             self._dialog.show()
+        else:
+            Logger.log("e", "FEA Infill: Dialog is None, cannot show")
 
     def _ensureDialog(self) -> None:
+        # Always recreate — createQmlComponent can return None on error
+        # and we want to retry with fixed QML on next attempt.
+        plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
+        if not plugin_path:
+            Logger.log("e", "FEA Infill: Could not find plugin path")
+            return
+        qml_path = os.path.join(plugin_path, "resources", "qml", "FEAInfillDialog.qml")
+        self._dialog = CuraApplication.getInstance().createQmlComponent(
+            qml_path, {"manager": self}
+        )
         if self._dialog is None:
-            plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
-            if not plugin_path:
-                Logger.log("e", "FEA Infill: Could not find plugin path")
-                return
-            qml_path = os.path.join(plugin_path, "resources", "qml", "FEAInfillDialog.qml")
-            self._dialog = CuraApplication.getInstance().createQmlComponent(
-                qml_path, {"manager": self}
-            )
+            Logger.log("e", "FEA Infill: Failed to create dialog QML component from %s", qml_path)
 
     # -- Dependency management --
 

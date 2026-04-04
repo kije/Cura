@@ -20,52 +20,63 @@ UM.Dialog
     property var manager  // bound to FEAInfillExtension Python object from caller
     backgroundColor: UM.Theme.getColor("main_background")
 
-    function refreshNodeList()
-    {
-        sceneNodeListModel.clear()
-        if (!manager) return
-
-        var nodes = manager.getSceneNodes()
-        if (!nodes) return
-
-        for (var i = 0; i < nodes.length; i++)
-        {
-            sceneNodeListModel.append({"name": nodes[i].name, "nodeId": nodes[i].id})
-        }
-
-        // If a node was pre-selected (from BC tool's "Confirm and Optimize"),
-        // find and select it in the ComboBox.
-        var preKey = manager.preselectedNodeKey
-        if (preKey && preKey !== "")
-        {
-            for (var j = 0; j < sceneNodeListModel.count; j++)
-            {
-                if (sceneNodeListModel.get(j).nodeId === preKey)
-                {
-                    nodeSelector.currentIndex = j
-                    return
-                }
-            }
-        }
-
-        // Default: select first item if any
-        if (sceneNodeListModel.count > 0)
-        {
-            nodeSelector.currentIndex = 0
-        }
-    }
-
     onVisibleChanged:
     {
-        if (visible) refreshNodeList()
+        if (visible) contentItem.refreshNodeList()
     }
 
     Item
     {
+        id: contentItem
         anchors.fill: parent
 
         UM.I18nCatalog { id: catalog; name: "cura" }
         ListModel { id: sceneNodeListModel }
+
+        function refreshNodeList()
+        {
+            sceneNodeListModel.clear()
+            if (!manager) return
+
+            var nodes = manager.getSceneNodes()
+            if (!nodes || nodes.length === undefined) return
+
+            console.log("FEA: refreshNodeList got " + nodes.length + " nodes")
+
+            for (var i = 0; i < nodes.length; i++)
+            {
+                var name = nodes[i].name || "Unknown"
+                var nid = nodes[i].id || ""
+                console.log("FEA: node " + i + ": name=" + name + " id=" + nid)
+                sceneNodeListModel.append({"name": name, "nodeId": nid})
+            }
+
+            console.log("FEA: ListModel count=" + sceneNodeListModel.count)
+
+            // If a node was pre-selected (from BC tool's "Confirm and Optimize"),
+            // find and select it in the ComboBox.
+            var preKey = manager.preselectedNodeKey
+            console.log("FEA: preselectedNodeKey=" + preKey)
+            if (preKey && preKey !== "")
+            {
+                for (var j = 0; j < sceneNodeListModel.count; j++)
+                {
+                    if (sceneNodeListModel.get(j).nodeId === preKey)
+                    {
+                        console.log("FEA: matched preKey at index " + j)
+                        nodeSelector.currentIndex = j
+                        return
+                    }
+                }
+                console.log("FEA: preKey not found in model")
+            }
+
+            // Default: select first item if any
+            if (sceneNodeListModel.count > 0)
+            {
+                nodeSelector.currentIndex = 0
+            }
+        }
 
         ScrollView
         {
