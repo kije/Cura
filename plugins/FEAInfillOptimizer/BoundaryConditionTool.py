@@ -113,7 +113,7 @@ class BoundaryConditionTool(Tool):
             "CurrentSelectionCount", "SelectionSummary",
             "ConfirmForceGroup", "ClearAllBCs",
             "ClearFixedFaces", "ClearForceGroups",
-            "OpenOptimizeDialog",
+            "OpenOptimizeDialog", "QuickGravity",
             "ActiveSupportIndex", "ActiveForceIndex",
             "SupportListModel", "ForceListModel",
             "SelectionMode",
@@ -242,6 +242,67 @@ class BoundaryConditionTool(Tool):
             self._rotating_group_index = -1
             self.propertyChanged.emit()
             self._update_highlights()
+
+    def getQuickGravity(self) -> bool:
+        return False
+
+    def setQuickGravity(self, value) -> None:
+        """Auto-setup: fix bottom faces, apply gravity as downward force on top."""
+        if not value:
+            return
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return
+        mesh_data = selected.getMeshData()
+        if mesh_data is None:
+            return
+        verts = mesh_data.getVertices()
+        indices = mesh_data.getIndices()
+        if verts is None:
+            return
+
+        # Find bottom faces (Z ≈ min Z) and top faces (Z ≈ max Z)
+        z_min = float(verts[:, 1].min())  # Y is up in Cura
+        z_max = float(verts[:, 1].max())
+        z_range = z_max - z_min
+        if z_range < 1e-6:
+            return
+        threshold = z_range * 0.05  # bottom/top 5%
+
+        bottom_faces = []
+        top_faces = []
+        n_faces = len(indices) if indices is not None else len(verts) // 3
+        for fi in range(n_faces):
+            if indices is not None:
+                tri = indices[fi]
+                face_verts = verts[tri]
+            else:
+                face_verts = verts[fi * 3:(fi + 1) * 3]
+            centroid_y = float(face_verts[:, 1].mean())
+            if centroid_y < z_min + threshold:
+                bottom_faces.append(fi)
+            elif centroid_y > z_max - threshold:
+                top_faces.append(fi)
+
+        if not bottom_faces:
+            return
+
+        bc = self._get_or_create_bc(selected)
+        bc.clearAll()
+        bc.addFixedFaces(bottom_faces)
+
+        # Apply gravity-like downward force on all top faces
+        # Default: 10N (≈ 1kg weight) downward
+        if top_faces:
+            force = Vector(0.0, -10.0, 0.0)
+            bc.addForceGroup(top_faces, force)
+            self._force_x = 0.0
+            self._force_y = -10.0
+            self._force_z = 0.0
+            self._force_magnitude = 10.0
+
+        self.propertyChanged.emit()
+        self._update_highlights()
 
     def getOpenOptimizeDialog(self) -> bool:
         return False

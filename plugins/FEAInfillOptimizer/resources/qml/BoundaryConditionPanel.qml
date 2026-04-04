@@ -37,6 +37,36 @@ Item
         anchors.fill: parent
         spacing: UM.Theme.getSize("default_margin").height
 
+        // ── Step guide (visible when no BCs defined) ────────────────────
+        Rectangle
+        {
+            Layout.fillWidth: true
+            visible: bcPanel.supportListModel.length === 0 && bcPanel.forceListModel.length === 0
+            height: visible ? stepGuide.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
+            color: "#1a2a3a"
+            radius: UM.Theme.getSize("default_radius").width
+
+            UM.Label
+            {
+                id: stepGuide
+                anchors
+                {
+                    left: parent.left; right: parent.right
+                    verticalCenter: parent.verticalCenter
+                    margins: UM.Theme.getSize("default_margin").width
+                }
+                wrapMode: Text.WordWrap
+                color: "#aaccee"
+                font: UM.Theme.getFont("small")
+                text: catalog.i18nc("@info",
+                    "Quick start:\n" +
+                    "1. Select 'Support / Mount' and click faces where the part is held\n" +
+                    "2. Select 'Apply Load' and click faces where forces act\n" +
+                    "3. Set the load amount and click 'Confirm Load'\n" +
+                    "4. Click 'Confirm and Optimize' to run analysis")
+            }
+        }
+
         // ── Mode selector ─────────────────────────────────────────────────
         UM.Label
         {
@@ -489,6 +519,15 @@ Item
             text: catalog.i18nc("@action:button", "Confirm Load on Selected Faces")
             enabled: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
             onClicked: UM.Controller.setProperty("ConfirmForceGroup", true)
+        }
+
+        // ── Quick setup ──────────────────────────────────────────────────
+        Cura.SecondaryButton
+        {
+            Layout.fillWidth: true
+            visible: bcPanel.supportListModel.length === 0 && bcPanel.forceListModel.length === 0
+            text: catalog.i18nc("@action:button", "Quick Setup: Gravity Load")
+            onClicked: UM.Controller.setProperty("QuickGravity", true)
         }
 
         // ── Optimize button ───────────────────────────────────────────────

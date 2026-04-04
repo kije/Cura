@@ -123,6 +123,17 @@ class IterativeFEASolver:
             config.get("bonding_coeff", material.bonding_coefficient)
         )
 
+        # Warn if material failure mode is not suited for von Mises criterion
+        if hasattr(material, "failure_mode") and material.failure_mode == "brittle":
+            warnings.warn(
+                f"Material '{material.name}' has failure_mode='brittle'. "
+                "Von Mises is a ductile failure criterion and may overestimate "
+                "strength by 15-30% for brittle polymers like PLA. "
+                "Consider using a lower safety factor.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         # --- Build boundary condition arrays from surface face → tet node map ---
         fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh, surface_mesh)
         force_vector = _build_force_vector(boundary_conditions, tet_mesh, surface_mesh)
