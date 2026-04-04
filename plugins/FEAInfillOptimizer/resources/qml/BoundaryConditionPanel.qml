@@ -522,12 +522,69 @@ Item
         }
 
         // ── Quick setup ──────────────────────────────────────────────────
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Quick Setup")
+            font: UM.Theme.getFont("medium_bold")
+        }
+
+        // Active quick setup mode indicator
+        Rectangle
+        {
+            Layout.fillWidth: true
+            visible: (toolProperties.getValue("QuickSetupMode") ?? "") !== ""
+            height: visible ? quickModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+            color: "#1a3a2a"
+            radius: UM.Theme.getSize("default_radius").width
+
+            UM.Label
+            {
+                id: quickModeLabel
+                anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width }
+                wrapMode: Text.WordWrap
+                color: "#aaffcc"
+                font: UM.Theme.getFont("small")
+                text: {
+                    var mode = toolProperties.getValue("QuickSetupMode") ?? ""
+                    if (mode === "gravity_pick_bottom") return catalog.i18nc("@info", "Click the bottom face of your part (the face resting on the build plate or surface).")
+                    if (mode === "cantilever_pick_fixed") return catalog.i18nc("@info", "Click the face where the part is fixed/clamped (the end that doesn't move).")
+                    return ""
+                }
+            }
+        }
+
         Cura.SecondaryButton
         {
             Layout.fillWidth: true
-            visible: bcPanel.supportListModel.length === 0 && bcPanel.forceListModel.length === 0
-            text: catalog.i18nc("@action:button", "Quick Setup: Gravity Load")
-            onClicked: UM.Controller.setProperty("QuickGravity", true)
+            text: catalog.i18nc("@action:button", "Gravity: Click Bottom Face")
+            onClicked: UM.Controller.setProperty("QuickGravityStart", true)
+        }
+
+        Cura.SecondaryButton
+        {
+            Layout.fillWidth: true
+            text: catalog.i18nc("@action:button", "Cantilever: Click Fixed End")
+            onClicked: UM.Controller.setProperty("QuickCantileverStart", true)
+        }
+
+        RowLayout
+        {
+            Layout.fillWidth: true
+            spacing: UM.Theme.getSize("default_margin").width / 2
+
+            Cura.SecondaryButton
+            {
+                Layout.fillWidth: true
+                text: catalog.i18nc("@action:button", "Fix Bolt Holes")
+                onClicked: UM.Controller.setProperty("QuickMountHoles", true)
+            }
+            SpinBox
+            {
+                id: holeDiameterSpinBox
+                from: 2; to: 30; value: 8; stepSize: 1
+                onValueModified: UM.Controller.setProperty("QuickHoleDiameter", value)
+            }
+            UM.Label { text: "mm"; font: UM.Theme.getFont("small") }
         }
 
         // ── Optimize button ───────────────────────────────────────────────

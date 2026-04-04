@@ -98,6 +98,10 @@ class BoundaryConditionTool(Tool):
         self._adjacency_cache = None
         self._adjacency_cache_node = None
 
+        # Quick setup state
+        self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed"
+        self._quick_setup_hole_diameter = 8.0  # mm
+
         # BC overlay
         scene_root = self._controller.getScene().getRoot()
         self._bc_highlight = BCHighlightHandle(parent=scene_root)
@@ -113,7 +117,9 @@ class BoundaryConditionTool(Tool):
             "CurrentSelectionCount", "SelectionSummary",
             "ConfirmForceGroup", "ClearAllBCs",
             "ClearFixedFaces", "ClearForceGroups",
-            "OpenOptimizeDialog", "QuickGravity",
+            "OpenOptimizeDialog",
+            "QuickGravityStart", "QuickMountHoles", "QuickCantileverStart",
+            "QuickSetupMode", "QuickHoleDiameter",
             "ActiveSupportIndex", "ActiveForceIndex",
             "SupportListModel", "ForceListModel",
             "SelectionMode",
@@ -243,11 +249,41 @@ class BoundaryConditionTool(Tool):
             self.propertyChanged.emit()
             self._update_highlights()
 
-    def getQuickGravity(self) -> bool:
+    # ── Quick setup properties ────────────────────────────────────────────
+
+    def getQuickSetupMode(self) -> str:
+        return self._quick_setup_mode
+
+    def getQuickHoleDiameter(self) -> float:
+        return self._quick_setup_hole_diameter
+
+    def setQuickHoleDiameter(self, value) -> None:
+        self._quick_setup_hole_diameter = float(value)
+        self.propertyChanged.emit()
+
+    def getQuickGravityStart(self) -> bool:
         return False
 
-    def setQuickGravity(self, value) -> None:
-        """Auto-setup: fix bottom faces, apply gravity as downward force on top."""
+    def setQuickGravityStart(self, value) -> None:
+        """Enter 'pick bottom face' mode for gravity setup."""
+        if value:
+            self._quick_setup_mode = "gravity_pick_bottom"
+            self.propertyChanged.emit()
+
+    def getQuickCantileverStart(self) -> bool:
+        return False
+
+    def setQuickCantileverStart(self, value) -> None:
+        """Enter 'pick fixed end' mode for cantilever setup."""
+        if value:
+            self._quick_setup_mode = "cantilever_pick_fixed"
+            self.propertyChanged.emit()
+
+    def getQuickMountHoles(self) -> bool:
+        return False
+
+    def setQuickMountHoles(self, value) -> None:
+        """Auto-detect and fix all small holes (bolt/screw mounts)."""
         if not value:
             return
         selected = Selection.getSelectedObject(0)
@@ -261,48 +297,88 @@ class BoundaryConditionTool(Tool):
         if verts is None:
             return
 
-        # Find bottom faces (Z ≈ min Z) and top faces (Z ≈ max Z)
-        z_min = float(verts[:, 1].min())  # Y is up in Cura
-        z_max = float(verts[:, 1].max())
-        z_range = z_max - z_min
-        if z_range < 1e-6:
-            return
-        threshold = z_range * 0.05  # bottom/top 5%
-
-        bottom_faces = []
-        top_faces = []
-        n_faces = len(indices) if indices is not None else len(verts) // 3
-        for fi in range(n_faces):
-            if indices is not None:
-                tri = indices[fi]
-                face_verts = verts[tri]
-            else:
-                face_verts = verts[fi * 3:(fi + 1) * 3]
-            centroid_y = float(face_verts[:, 1].mean())
-            if centroid_y < z_min + threshold:
-                bottom_faces.append(fi)
-            elif centroid_y > z_max - threshold:
-                top_faces.append(fi)
-
-        if not bottom_faces:
+        adjacency = self._ensure_adjacency(selected, verts, indices)
+        if adjacency is None:
             return
 
-        bc = self._get_or_create_bc(selected)
-        bc.clearAll()
-        bc.addFixedFaces(bottom_faces)
+        from .fea.quick_setup import mount_holes
+        result = mount_holes(verts, indices, self._quick_setup_hole_diameter, adjacency)
 
-        # Apply gravity-like downward force on all top faces
-        # Default: 10N (≈ 1kg weight) downward
-        if top_faces:
-            force = Vector(0.0, -10.0, 0.0)
-            bc.addForceGroup(top_faces, force)
-            self._force_x = 0.0
-            self._force_y = -10.0
-            self._force_z = 0.0
-            self._force_magnitude = 10.0
+        if result["fixed_faces"]:
+            bc = self._get_or_create_bc(selected)
+            bc.addFixedFaces(result["fixed_faces"])
+            self.propertyChanged.emit()
+            self._update_highlights()
+
+    def _handle_quick_setup_click(self, node, face_index) -> bool:
+        """Handle a face click during a quick setup interaction.
+
+        Returns True if the click was consumed by a quick setup.
+        """
+        if not self._quick_setup_mode:
+            return False
+
+        mesh_data = node.getMeshData()
+        if mesh_data is None:
+            return False
+        verts = mesh_data.getVertices()
+        indices = mesh_data.getIndices()
+        if verts is None:
+            return False
+
+        adjacency = self._ensure_adjacency(node, verts, indices)
+
+        if self._quick_setup_mode == "gravity_pick_bottom":
+            from .fea.quick_setup import gravity_from_face
+            result = gravity_from_face(
+                verts, indices, face_index,
+                force_magnitude=self._force_magnitude,
+                adjacency=adjacency,
+            )
+            self._apply_quick_setup_result(node, result)
+            self._quick_setup_mode = ""
+            return True
+
+        elif self._quick_setup_mode == "cantilever_pick_fixed":
+            from .fea.quick_setup import cantilever
+            result = cantilever(
+                verts, indices, face_index,
+                force_magnitude=self._force_magnitude,
+                adjacency=adjacency,
+            )
+            self._apply_quick_setup_result(node, result)
+            self._quick_setup_mode = ""
+            return True
+
+        return False
+
+    def _apply_quick_setup_result(self, node, result: dict) -> None:
+        """Apply quick setup results to the BC decorator."""
+        bc = self._get_or_create_bc(node)
+
+        if result.get("fixed_faces"):
+            bc.addFixedFaces(result["fixed_faces"])
+
+        for fg in result.get("force_groups", []):
+            fx, fy, fz = fg["force"]
+            bc.addForceGroup(fg["face_indices"], Vector(fx, fy, fz))
+            self._force_x = fx
+            self._force_y = fy
+            self._force_z = fz
+            self._sync_magnitude_from_components()
 
         self.propertyChanged.emit()
         self._update_highlights()
+
+    def _ensure_adjacency(self, node, verts, indices):
+        """Get or build the face adjacency cache for a node."""
+        if not _FACE_GROUP_ANALYZER_AVAILABLE:
+            return None
+        node_id = id(node)
+        if self._adjacency_cache_node != node_id:
+            self._adjacency_cache = build_face_adjacency(verts, indices)
+            self._adjacency_cache_node = node_id
+        return self._adjacency_cache
 
     def getOpenOptimizeDialog(self) -> bool:
         return False
@@ -502,6 +578,10 @@ class BoundaryConditionTool(Tool):
             face_index = self._find_closest_face(picked_node, picked_position)
             if face_index is None:
                 return False
+
+            # Quick setup: if in a pick-face mode, handle it first
+            if self._quick_setup_mode and self._handle_quick_setup_click(picked_node, face_index):
+                return True
 
             # Expand selection if a face group mode is active
             if self._selection_mode != "single" and _FACE_GROUP_ANALYZER_AVAILABLE:
