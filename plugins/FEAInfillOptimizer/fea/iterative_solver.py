@@ -117,6 +117,12 @@ class IterativeFEASolver:
         pattern = str(config.get("infill_pattern", "gyroid"))
         safety_factor = float(config.get("safety_factor", 2.0))
 
+        # Layer bonding coefficient: read from config (UI override) or fall
+        # back to the material's implicit value (E_z / E_xy).
+        bonding_coeff = float(
+            config.get("bonding_coeff", material.bonding_coefficient)
+        )
+
         # --- Build boundary condition arrays from surface face → tet node map ---
         fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh, surface_mesh)
         force_vector = _build_force_vector(boundary_conditions, tet_mesh, surface_mesh)
@@ -143,7 +149,9 @@ class IterativeFEASolver:
             nu_arr = np.full(n_elems, material.nu, dtype=np.float64)
 
             # --- Assemble & apply BCs ---
-            K = fea_solver.assemble_stiffness_matrix(tet_mesh, E_eff_arr, nu_arr)
+            K = fea_solver.assemble_stiffness_matrix(
+                tet_mesh, E_eff_arr, nu_arr, bonding_coeff=bonding_coeff
+            )
             K, f = fea_solver.apply_boundary_conditions(K, force_vector.copy(), fixed_nodes)
 
             # --- Solve ---
@@ -151,7 +159,8 @@ class IterativeFEASolver:
 
             # --- Compute stress ---
             stress = fea_solver.compute_element_stress(
-                tet_mesh, displacements, E_eff_arr, nu_arr
+                tet_mesh, displacements, E_eff_arr, nu_arr,
+                bonding_coeff=bonding_coeff,
             )
 
             # --- Map stress → density candidate ---

@@ -29,6 +29,7 @@ Exponent sources
   Ashby (1997); Fernandez-Vicente et al. (2016) experimental data.
 """
 
+import math
 from typing import Tuple
 
 import numpy as np
@@ -128,3 +129,120 @@ def build_constitutive_matrix(E: float, nu: float) -> np.ndarray:
     D[3, 3] = D[4, 4] = D[5, 5] = mu
 
     return D
+
+
+def build_constitutive_matrix_transverse(
+    E_p: float,
+    E_t: float,
+    nu_p: float,
+    nu_tp: float,
+    G_t: float,
+) -> np.ndarray:
+    """Build the 6x6 transversely isotropic constitutive matrix D.
+
+    Symmetry axis = Z (build direction).
+    Voigt ordering: [sigma_xx, sigma_yy, sigma_zz, tau_xy, tau_yz, tau_xz].
+
+    Five independent constants:
+
+    Args:
+        E_p: In-plane Young's modulus (E_x = E_y) in MPa.
+        E_t: Transverse Young's modulus (E_z) in MPa.
+        nu_p: In-plane Poisson's ratio (nu_xy), dimensionless.
+        nu_tp: Transverse-to-in-plane Poisson's ratio (nu_zx = nu_zy).
+        G_t: Transverse shear modulus (G_xz = G_yz) in MPa.
+
+    Returns:
+        6x6 numpy ndarray of dtype float64.
+
+    Raises:
+        ValueError: If elastic constants are thermodynamically inadmissible
+            (DELTA <= 0, or non-positive moduli).
+    """
+    if E_p <= 0.0 or E_t <= 0.0 or G_t <= 0.0:
+        raise ValueError(
+            f"All moduli must be positive: E_p={E_p}, E_t={E_t}, G_t={G_t}."
+        )
+
+    # Reciprocal relation: nu_pt / E_p = nu_tp / E_t
+    nu_pt = nu_tp * E_p / E_t
+
+    # Thermodynamic admissibility: DELTA must be positive for D to be
+    # positive-definite (see transverse_isotropy_report.md Section 2.7).
+    DELTA = 1.0 - nu_p - 2.0 * nu_pt * nu_tp
+    if DELTA <= 0.0:
+        raise ValueError(
+            f"Inadmissible elastic constants: DELTA = {DELTA:.6f} <= 0. "
+            f"Requires 1 - nu_p - 2*nu_pt*nu_tp > 0 "
+            f"(nu_p={nu_p}, nu_pt={nu_pt:.4f}, nu_tp={nu_tp:.4f})."
+        )
+
+    # In-plane shear modulus (derived, not independent)
+    G_p = E_p / (2.0 * (1.0 + nu_p))
+
+    # Normal block entries (analytical inverse of 3x3 compliance block;
+    # see transverse_isotropy_report.md Section 2.3 for full derivation).
+    denom = (1.0 + nu_p) * DELTA
+
+    D_11 = E_p * (1.0 - nu_pt * nu_tp) / denom
+    D_12 = E_p * (nu_p + nu_pt * nu_tp) / denom
+    D_13 = E_t * nu_pt / DELTA          # = E_p * nu_tp / DELTA
+    D_33 = E_t * (1.0 - nu_p) / DELTA
+
+    # Assemble 6x6
+    D = np.zeros((6, 6), dtype=np.float64)
+
+    # Normal-normal block
+    D[0, 0] = D_11;  D[0, 1] = D_12;  D[0, 2] = D_13
+    D[1, 0] = D_12;  D[1, 1] = D_11;  D[1, 2] = D_13
+    D[2, 0] = D_13;  D[2, 1] = D_13;  D[2, 2] = D_33
+
+    # Shear block
+    D[3, 3] = G_p    # in-plane shear (tau_xy)
+    D[4, 4] = G_t    # transverse shear (tau_yz)
+    D[5, 5] = G_t    # transverse shear (tau_xz)
+
+    return D
+
+
+def build_constitutive_matrix_from_bonding(
+    E_p: float,
+    nu_p: float,
+    k: float,
+) -> np.ndarray:
+    """Build transversely isotropic D from in-plane properties + bonding coeff.
+
+    Uses the sqrt-scaling parameterisation for Poisson's ratios which
+    guarantees thermodynamic admissibility for all nu_p < 0.5 regardless
+    of k (see transverse_isotropy_report.md Section 3.3).
+
+    Parameterisation::
+
+        E_t   = k * E_p
+        G_t   = k * G_p       where G_p = E_p / (2*(1+nu_p))
+        nu_tp = nu_p * sqrt(k)
+
+    When k = 1 this recovers the isotropic constitutive matrix exactly.
+
+    Args:
+        E_p: In-plane Young's modulus in MPa.
+        nu_p: In-plane Poisson's ratio (dimensionless).
+        k: Layer bonding coefficient in (0, 1].
+           k=1: perfect bonding (isotropic).
+           k->0: no interlayer bonding (very weak Z direction).
+
+    Returns:
+        6x6 numpy ndarray of dtype float64.
+
+    Raises:
+        ValueError: If ``k`` is outside (0, 1].
+    """
+    if not (0.0 < k <= 1.0):
+        raise ValueError(f"Bonding coefficient k={k} must be in (0, 1].")
+
+    E_t = k * E_p
+    G_p = E_p / (2.0 * (1.0 + nu_p))
+    G_t = k * G_p
+    nu_tp = nu_p * math.sqrt(k)
+
+    return build_constitutive_matrix_transverse(E_p, E_t, nu_p, nu_tp, G_t)

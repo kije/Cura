@@ -54,6 +54,22 @@ class Material:
     failure_mode: str = "ductile"   # "ductile" | "brittle" | "hyperelastic"
     notes: str = ""
 
+    @property
+    def bonding_coefficient(self) -> float:
+        """Implicit layer bonding coefficient k = E_z / E_xy.
+
+        Represents the ratio of through-layer to in-plane stiffness.
+        k=1 means perfect interlayer bonding (isotropic), k<1 means
+        weakened interlayer adhesion typical of FDM printing.
+
+        Returns:
+            Bonding coefficient in (0, 1].  Returns 1.0 if E_xy is zero
+            or negative (degenerate fallback).
+        """
+        if self.E_xy > 0.0:
+            return min(self.E_z / self.E_xy, 1.0)
+        return 1.0
+
 
 # ---------------------------------------------------------------------------
 # Database entries

@@ -301,6 +301,18 @@ UM.Dialog
                     Layout.fillWidth: true
                 }
 
+                UM.Label { text: catalog.i18nc("@label", "Layer bonding (%)") }
+                SpinBox
+                {
+                    id: bondingSpinBox
+                    from: 10; to: 100; value: 50; stepSize: 5
+                    Layout.fillWidth: true
+                    ToolTip.visible: hovered
+                    ToolTip.text: catalog.i18nc("@tooltip",
+                        "Interlayer bond strength as a percentage of in-plane strength. " +
+                        "Lower values model weaker Z-direction adhesion (typical for FDM).")
+                }
+
                 UM.Label { text: catalog.i18nc("@label", "Mesh Resolution") }
                 Cura.ComboBox
                 {
@@ -336,6 +348,7 @@ UM.Dialog
                     manager.numZones = nZonesSpinBox.value
                     manager.maxIterations = maxIterSpinBox.value
                     manager.safetyFactor = safetyFactorSpinBox.value / 10.0
+                    manager.bondingCoeff = bondingSpinBox.value
                     manager.runAnalysis(nodeSelector.currentValue)
                 }
             }

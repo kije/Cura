@@ -80,6 +80,7 @@ class FEAInfillExtension(QObject, Extension):
         self._max_iterations = 5
         self._mesh_resolution = "medium"
         self._safety_factor = 2.0
+        self._bonding_coeff = 0.5  # 50 % default; overridden by UI or material
 
         # Deferred initialization
         CuraApplication.getInstance().engineCreatedSignal.connect(self._onEngineCreated)
@@ -346,6 +347,16 @@ class FEAInfillExtension(QObject, Extension):
             self._max_iterations = value
             self.settingsChanged.emit()
 
+    @pyqtProperty(float, notify=settingsChanged)
+    def bondingCoeff(self) -> float:
+        return self._bonding_coeff
+
+    @bondingCoeff.setter
+    def bondingCoeff(self, value: float) -> None:
+        if self._bonding_coeff != value:
+            self._bonding_coeff = value
+            self.settingsChanged.emit()
+
     # -- FEA Actions --
 
     @pyqtSlot(str)
@@ -392,6 +403,7 @@ class FEAInfillExtension(QObject, Extension):
             "max_iterations": self._max_iterations,
             "mesh_resolution": self._mesh_resolution,
             "safety_factor": self._safety_factor,
+            "bonding_coeff": self._bonding_coeff / 100.0,
         }
 
         job = FEASolveJob(node, bc_decorator, material, config)

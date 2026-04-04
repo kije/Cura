@@ -18,7 +18,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from .homogenization import build_constitutive_matrix
+from .homogenization import build_constitutive_matrix, build_constitutive_matrix_from_bonding
 from .tetrahedralization import TetMesh
 
 
@@ -43,6 +43,8 @@ class LinearElasticitySolver:
         tet_mesh: TetMesh,
         E_per_element: np.ndarray,
         nu_per_element: np.ndarray,
+        *,
+        bonding_coeff: float = 1.0,
     ) -> sp.csr_matrix:
         """Assemble the global stiffness matrix K (ndof × ndof, CSR).
 
@@ -51,7 +53,8 @@ class LinearElasticitySolver:
             k_e = V_e × B^T × D × B        (12 × 12)
 
         where B is the constant strain-displacement matrix and D is the
-        isotropic constitutive matrix.
+        constitutive matrix (isotropic when ``bonding_coeff=1.0``,
+        transversely isotropic otherwise).
 
         Degrees of freedom are ordered node-by-node: [u_x0, u_y0, u_z0,
         u_x1, u_y1, u_z1, ...].
@@ -61,6 +64,9 @@ class LinearElasticitySolver:
                 ``elements`` (M×4).
             E_per_element: Young's modulus per element, shape (M,), MPa.
             nu_per_element: Poisson's ratio per element, shape (M,).
+            bonding_coeff: Layer bonding coefficient k in (0, 1].
+                k=1.0 (default) uses isotropic D; k<1.0 uses the
+                transversely isotropic D with Z as the weak axis.
 
         Returns:
             Global stiffness matrix as a scipy CSR sparse matrix.
@@ -69,6 +75,8 @@ class LinearElasticitySolver:
         elements = tet_mesh.elements   # (M, 4)
         n_nodes = nodes.shape[0]
         n_dof = n_nodes * 3
+
+        use_aniso = bonding_coeff < 1.0
 
         # COO accumulation lists
         rows: list[np.ndarray] = []
@@ -89,7 +97,12 @@ class LinearElasticitySolver:
             if V <= 0.0:
                 continue  # degenerate element — skip
 
-            D = build_constitutive_matrix(float(E), float(nu))
+            if use_aniso:
+                D = build_constitutive_matrix_from_bonding(
+                    float(E), float(nu), bonding_coeff
+                )
+            else:
+                D = build_constitutive_matrix(float(E), float(nu))
             k_e = V * (B.T @ D @ B)  # (12, 12)
 
             # Global DOF indices for this element (3 DOFs per node)
@@ -189,29 +202,38 @@ class LinearElasticitySolver:
         displacements: np.ndarray,
         E_per_element: np.ndarray,
         nu_per_element: np.ndarray,
+        *,
+        bonding_coeff: float = 1.0,
     ) -> np.ndarray:
-        """Compute von Mises stress for each tetrahedral element.
+        """Compute equivalent stress for each tetrahedral element.
 
         For a linear tetrahedron the strain is constant within the element::
 
-            ε = B u_e
-            σ = D ε
-            σ_vm = sqrt(σ_x² + σ_y² + σ_z² - σ_x σ_y - σ_y σ_z - σ_x σ_z
-                        + 3(τ_xy² + τ_yz² + τ_xz²))
+            eps = B u_e
+            sigma = D eps
+
+        When ``bonding_coeff < 1.0`` the directional von Mises criterion is
+        used, which scales Z-direction stress components by ``1/k`` before
+        computing the equivalent stress.  This amplifies the contribution
+        of interlayer stresses in proportion to the interlayer weakness.
+        When ``bonding_coeff == 1.0`` this reduces to standard von Mises.
 
         Args:
             tet_mesh: Tetrahedral mesh.
             displacements: Nodal displacement vector, shape (ndof,).
             E_per_element: Young's modulus per element, shape (M,).
             nu_per_element: Poisson's ratio per element, shape (M,).
+            bonding_coeff: Layer bonding coefficient k in (0, 1].
 
         Returns:
-            Von Mises stress per element, shape (M,), same pressure unit as E.
+            Equivalent stress per element, shape (M,), same pressure unit as E.
         """
         nodes = tet_mesh.nodes
         elements = tet_mesh.elements
         n_elems = elements.shape[0]
         vm_stress = np.zeros(n_elems, dtype=np.float64)
+
+        use_aniso = bonding_coeff < 1.0
 
         for e_idx, (elem, E, nu) in enumerate(
             zip(elements, E_per_element, nu_per_element)
@@ -233,11 +255,19 @@ class LinearElasticitySolver:
             )
             u_e = displacements[dof_indices]  # (12,)
 
-            D = build_constitutive_matrix(float(E), float(nu))
-            strain = B @ u_e               # (6,)  ε = B u_e
-            stress = D @ strain            # (6,)  σ = D ε
+            if use_aniso:
+                D = build_constitutive_matrix_from_bonding(
+                    float(E), float(nu), bonding_coeff
+                )
+            else:
+                D = build_constitutive_matrix(float(E), float(nu))
+            strain = B @ u_e               # (6,)  eps = B u_e
+            stress = D @ strain            # (6,)  sigma = D eps
 
-            vm_stress[e_idx] = _von_mises(stress)
+            if use_aniso:
+                vm_stress[e_idx] = _von_mises_directional(stress, bonding_coeff)
+            else:
+                vm_stress[e_idx] = _von_mises(stress)
 
         return vm_stress
 
@@ -337,7 +367,8 @@ def _von_mises(stress: np.ndarray) -> float:
     """Compute von Mises stress from a Voigt stress vector.
 
     Args:
-        stress: Stress vector [σ_xx, σ_yy, σ_zz, τ_xy, τ_yz, τ_xz], shape (6,).
+        stress: Stress vector [sigma_xx, sigma_yy, sigma_zz, tau_xy, tau_yz, tau_xz],
+            shape (6,).
 
     Returns:
         Von Mises equivalent stress (scalar, same unit as input).
@@ -347,5 +378,38 @@ def _von_mises(stress: np.ndarray) -> float:
         sx**2 + sy**2 + sz**2
         - sx * sy - sy * sz - sx * sz
         + 3.0 * (txy**2 + tyz**2 + txz**2)
+    )
+    return float(np.sqrt(max(vm2, 0.0)))
+
+
+def _von_mises_directional(stress: np.ndarray, k: float) -> float:
+    """Directionally weighted von Mises for transversely isotropic material.
+
+    Scales Z-direction stress components by ``1/k`` to account for interlayer
+    weakness before computing the equivalent stress.  This amplifies the
+    contribution of interlayer (Z) stresses in proportion to the interlayer
+    weakness, recovering standard von Mises when k=1.
+
+    See transverse_isotropy_report.md Section 7.4-7.6.
+
+    Args:
+        stress: Voigt stress vector [sigma_xx, sigma_yy, sigma_zz,
+            tau_xy, tau_yz, tau_xz], shape (6,).
+        k: Layer bonding coefficient in (0, 1].
+
+    Returns:
+        Directional von Mises equivalent stress (scalar, same unit as input).
+    """
+    sx, sy, sz, txy, tyz, txz = stress
+
+    # Scale Z-direction components by strength ratio 1/k
+    sz_eff = sz / k
+    tyz_eff = tyz / k
+    txz_eff = txz / k
+
+    vm2 = (
+        sx**2 + sy**2 + sz_eff**2
+        - sx * sy - sy * sz_eff - sx * sz_eff
+        + 3.0 * (txy**2 + tyz_eff**2 + txz_eff**2)
     )
     return float(np.sqrt(max(vm2, 0.0)))
