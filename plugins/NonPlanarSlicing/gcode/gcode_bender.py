@@ -861,6 +861,23 @@ def bend_gcode(
 
     modified_moves = z_restored_moves
 
+    # COLLINEAR SEGMENT MERGE PASS
+    #
+    # Subdivision splits each original move into short sub-segments
+    # (~1mm).  After bending, many adjacent sub-segments end up on a
+    # straight line (same direction, same Z) because the bending
+    # produced no curvature at that location.  These can be merged
+    # back into a single longer segment, significantly reducing G-code
+    # size without changing the toolpath geometry.
+    #
+    # Two adjacent G1 moves are merged if:
+    #   - Same command (G1), both extrusions or both travels
+    #   - Same chunk_index and line_index_in_chunk (from same original)
+    #   - Collinear in 3D: the direction vector is parallel (within
+    #     tolerance) to the previous segment's direction
+    #   - Same feedrate (F)
+    modified_moves = _merge_collinear_segments(modified_moves)
+
     # Add region comment markers by inserting comment pseudo-moves.
     # We do this by directly manipulating the chunks after reconstruction.
     result = reconstruct_gcode(parsed, modified_moves)
@@ -899,6 +916,148 @@ def bend_gcode(
     )
 
     return result
+
+
+def _merge_collinear_segments(moves: list[GCodeMove]) -> list[GCodeMove]:
+    """Merge adjacent collinear G1 sub-segments back into single moves.
+
+    During bending, original moves are subdivided into short (~1mm)
+    segments for curvature accuracy.  Many of these sub-segments end
+    up on the same straight line after bending (e.g. flat regions).
+    This pass detects such runs and collapses them into one move,
+    significantly reducing G-code size without altering geometry.
+
+    Two adjacent moves are mergeable when:
+      - Both are G1 (not G0)
+      - Same chunk_index and line_index_in_chunk (from same original)
+      - Both extrusions or both non-extrusions
+      - Same feedrate (F), or second has no F (inherits first's)
+      - 3D direction vectors are parallel (cross product magnitude < tol)
+
+    Returns:
+        A new list with collinear runs collapsed.
+    """
+    import math
+
+    if len(moves) < 2:
+        return moves
+
+    CROSS_TOL = 1e-3  # cross-product magnitude tolerance for collinearity
+    F_TOL = 0.5       # feedrate tolerance (integer F in G-code)
+
+    merged: list[GCodeMove] = [moves[0]]
+    merge_count = 0
+
+    for i in range(1, len(moves)):
+        cur = moves[i]
+        prev = merged[-1]
+
+        # Only merge G1 moves from the same original line.
+        if (
+            cur.command != "G1"
+            or prev.command != "G1"
+            or cur.chunk_index != prev.chunk_index
+            or cur.line_index_in_chunk != prev.line_index_in_chunk
+            or cur.is_extrusion != prev.is_extrusion
+            or cur.is_travel != prev.is_travel
+        ):
+            merged.append(cur)
+            continue
+
+        # Feedrate must match (or cur inherits via None).
+        if cur.f is not None and prev.f is not None:
+            if abs(cur.f - prev.f) > F_TOL:
+                merged.append(cur)
+                continue
+
+        # We need the move before prev to compute prev's direction.
+        # prev's direction = (prev.abs_x - start_x, ...) where start is
+        # the position before prev.  But we don't store prev's start
+        # directly.  Instead, compute from the move before prev in
+        # the merged list — that's merged[-2] if it exists and shares
+        # the same original line.
+        if len(merged) < 2:
+            merged.append(cur)
+            continue
+
+        before_prev = merged[-2]
+        # The start position of prev is the abs position of before_prev
+        # (if they share the same original), OR the original abs position
+        # if before_prev is from a different original line.
+        if (
+            before_prev.chunk_index == prev.chunk_index
+            and before_prev.line_index_in_chunk == prev.line_index_in_chunk
+        ):
+            start_x, start_y, start_z = before_prev.abs_x, before_prev.abs_y, before_prev.abs_z
+        else:
+            # prev is the first sub-segment of its original — no prior
+            # segment to compare direction with.
+            merged.append(cur)
+            continue
+
+        # Direction of prev segment: start → prev.abs
+        dx1 = prev.abs_x - start_x
+        dy1 = prev.abs_y - start_y
+        dz1 = prev.abs_z - start_z
+
+        # Direction of cur segment: prev.abs → cur.abs
+        dx2 = cur.abs_x - prev.abs_x
+        dy2 = cur.abs_y - prev.abs_y
+        dz2 = cur.abs_z - prev.abs_z
+
+        # Cross product magnitude for collinearity check.
+        cx = dy1 * dz2 - dz1 * dy2
+        cy = dz1 * dx2 - dx1 * dz2
+        cz = dx1 * dy2 - dy1 * dx2
+        cross_mag = math.sqrt(cx * cx + cy * cy + cz * cz)
+
+        # Also check that segments point the same way (dot > 0) to
+        # avoid merging segments that reverse direction.
+        dot = dx1 * dx2 + dy1 * dy2 + dz1 * dz2
+
+        if cross_mag > CROSS_TOL or dot < 0:
+            merged.append(cur)
+            continue
+
+        # Collinear — merge cur into prev by extending prev to cur's endpoint.
+        # Accumulate E if extruding.
+        new_e = prev.e
+        new_abs_e = cur.abs_e
+        if cur.e is not None and prev.e is not None:
+            new_e = prev.e + cur.e  # relative E accumulation
+        elif cur.e is not None:
+            new_e = cur.e
+
+        merged_move = GCodeMove(
+            command="G1",
+            x=cur.x if cur.x is not None else prev.x,
+            y=cur.y if cur.y is not None else prev.y,
+            z=cur.z if cur.z is not None else prev.z,
+            e=new_e,
+            f=prev.f if prev.f is not None else cur.f,
+            abs_x=cur.abs_x,
+            abs_y=cur.abs_y,
+            abs_z=cur.abs_z,
+            abs_e=new_abs_e,
+            line_type=cur.line_type,
+            layer_number=cur.layer_number,
+            original_line=cur.original_line,
+            chunk_index=cur.chunk_index,
+            line_index_in_chunk=cur.line_index_in_chunk,
+            is_travel=cur.is_travel,
+            is_extrusion=cur.is_extrusion,
+        )
+        merged[-1] = merged_move
+        merge_count += 1
+
+    if merge_count > 0:
+        logger.info(
+            "Collinear merge: removed %d redundant sub-segments (%.1f%% reduction).",
+            merge_count,
+            100.0 * merge_count / len(moves),
+        )
+
+    return merged
 
 
 def _insert_region_markers(

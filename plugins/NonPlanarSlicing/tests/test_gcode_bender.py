@@ -11,6 +11,7 @@ from gcode.gcode_bender import (
     bend_gcode,
     subdivide_segment,
     validate_moves,
+    _merge_collinear_segments,
 )
 from gcode.gcode_parser import GCodeMove
 
@@ -729,3 +730,113 @@ class TestZSpikeRegression:
                             f"come before {other} (idx={other_idx}) but doesn't. "
                             f"Type order: {type_order}"
                         )
+
+
+class TestCollinearMerge:
+    """Tests for _merge_collinear_segments."""
+
+    def _make_move(self, x, y, z, e=None, f=None, chunk=0, line=0,
+                   is_ext=True, is_travel=False):
+        return GCodeMove(
+            command="G1", x=x, y=y, z=z, e=e, f=f,
+            abs_x=x, abs_y=y, abs_z=z, abs_e=e or 0.0,
+            line_type="WALL-OUTER", layer_number=0,
+            original_line="", chunk_index=chunk,
+            line_index_in_chunk=line,
+            is_travel=is_travel, is_extrusion=is_ext,
+        )
+
+    def test_collinear_segments_merged(self):
+        """Three collinear sub-segments should merge into one."""
+        moves = [
+            self._make_move(0, 0, 1.0, e=0.0, f=1500, chunk=2, line=5),
+            self._make_move(1, 0, 1.0, e=0.1, f=1500, chunk=2, line=5),
+            self._make_move(2, 0, 1.0, e=0.1, f=1500, chunk=2, line=5),
+            self._make_move(3, 0, 1.0, e=0.1, f=1500, chunk=2, line=5),
+        ]
+        # Fix abs_e to be cumulative.
+        moves[0] = GCodeMove(**{**moves[0].__dict__, "abs_e": 0.0})
+        moves[1] = GCodeMove(**{**moves[1].__dict__, "abs_e": 0.1})
+        moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 0.2})
+        moves[3] = GCodeMove(**{**moves[3].__dict__, "abs_e": 0.3})
+
+        result = _merge_collinear_segments(moves)
+        # First move (anchor) + one merged move = 2 total.
+        assert len(result) == 2, f"Expected 2 moves, got {len(result)}"
+        assert abs(result[-1].abs_x - 3.0) < 1e-6
+        assert abs(result[-1].abs_z - 1.0) < 1e-6
+
+    def test_non_collinear_not_merged(self):
+        """Segments that change direction must not be merged."""
+        moves = [
+            self._make_move(0, 0, 1.0, e=0.0, f=1500, chunk=2, line=5),
+            self._make_move(1, 0, 1.0, e=0.1, f=1500, chunk=2, line=5),
+            self._make_move(1, 1, 1.0, e=0.1, f=1500, chunk=2, line=5),  # 90° turn
+        ]
+        moves[0] = GCodeMove(**{**moves[0].__dict__, "abs_e": 0.0})
+        moves[1] = GCodeMove(**{**moves[1].__dict__, "abs_e": 0.1})
+        moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 0.2})
+
+        result = _merge_collinear_segments(moves)
+        assert len(result) == 3, f"Expected 3 moves, got {len(result)}"
+
+    def test_different_originals_not_merged(self):
+        """Segments from different original lines must not be merged."""
+        moves = [
+            self._make_move(0, 0, 1.0, e=0.0, f=1500, chunk=2, line=5),
+            self._make_move(1, 0, 1.0, e=0.1, f=1500, chunk=2, line=5),
+            self._make_move(2, 0, 1.0, e=0.1, f=1500, chunk=2, line=6),  # diff line
+        ]
+        moves[0] = GCodeMove(**{**moves[0].__dict__, "abs_e": 0.0})
+        moves[1] = GCodeMove(**{**moves[1].__dict__, "abs_e": 0.1})
+        moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 0.2})
+
+        result = _merge_collinear_segments(moves)
+        assert len(result) == 3
+
+    def test_different_feedrate_not_merged(self):
+        """Segments with different feedrates must not be merged."""
+        moves = [
+            self._make_move(0, 0, 1.0, e=0.0, f=1500, chunk=2, line=5),
+            self._make_move(1, 0, 1.0, e=0.1, f=1500, chunk=2, line=5),
+            self._make_move(2, 0, 1.0, e=0.1, f=900, chunk=2, line=5),
+        ]
+        moves[0] = GCodeMove(**{**moves[0].__dict__, "abs_e": 0.0})
+        moves[1] = GCodeMove(**{**moves[1].__dict__, "abs_e": 0.1})
+        moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 0.2})
+
+        result = _merge_collinear_segments(moves)
+        assert len(result) == 3
+
+    def test_3d_collinear_merged(self):
+        """Collinear segments with Z slope should merge."""
+        moves = [
+            self._make_move(0, 0, 1.0, e=0.0, f=1500, chunk=2, line=5),
+            self._make_move(1, 0, 1.5, e=0.1, f=1500, chunk=2, line=5),
+            self._make_move(2, 0, 2.0, e=0.1, f=1500, chunk=2, line=5),
+        ]
+        moves[0] = GCodeMove(**{**moves[0].__dict__, "abs_e": 0.0})
+        moves[1] = GCodeMove(**{**moves[1].__dict__, "abs_e": 0.1})
+        moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 0.2})
+
+        result = _merge_collinear_segments(moves)
+        assert len(result) == 2, f"Expected 2 moves, got {len(result)}"
+        assert abs(result[-1].abs_z - 2.0) < 1e-6
+
+    def test_e_accumulated_on_merge(self):
+        """Merged extrusion segments must sum their E values."""
+        moves = [
+            self._make_move(0, 0, 1.0, e=0.0, f=1500, chunk=2, line=5),
+            self._make_move(1, 0, 1.0, e=0.5, f=1500, chunk=2, line=5),
+            self._make_move(2, 0, 1.0, e=0.5, f=1500, chunk=2, line=5),
+            self._make_move(3, 0, 1.0, e=0.5, f=1500, chunk=2, line=5),
+        ]
+        moves[0] = GCodeMove(**{**moves[0].__dict__, "abs_e": 0.0})
+        moves[1] = GCodeMove(**{**moves[1].__dict__, "abs_e": 0.5})
+        moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 1.0})
+        moves[3] = GCodeMove(**{**moves[3].__dict__, "abs_e": 1.5})
+
+        result = _merge_collinear_segments(moves)
+        assert len(result) == 2
+        # E should be 0.5 + 0.5 + 0.5 = 1.5 total.
+        assert abs(result[-1].e - 1.5) < 1e-6
