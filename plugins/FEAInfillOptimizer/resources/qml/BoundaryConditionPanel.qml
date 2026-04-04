@@ -99,7 +99,7 @@ Item
             Layout.fillWidth: true
             font: UM.Theme.getFont("small")
             color: UM.Theme.getColor("text_inactive")
-            text: catalog.i18nc("@info", "Shift+click: add face | Ctrl+click: remove face")
+            text: catalog.i18nc("@info", "Click: select face | Alt+click (Option on Mac): toggle face")
         }
 
         // ── Rotate mode indicator ─────────────────────────────────────────
@@ -450,8 +450,8 @@ Item
             font: UM.Theme.getFont("small")
             color: UM.Theme.getColor("text_medium")
             text: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
-                ? catalog.i18nc("@info", "%1 face(s) selected. Click 'Confirm Load' to save, or Shift+click to add more.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
-                : catalog.i18nc("@info", "Click faces where the load acts. Hold Shift to add more faces.")
+                ? catalog.i18nc("@info", "%1 face(s) selected. Click 'Confirm Load' to save, or click more faces to add. Alt+click to deselect.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
+                : catalog.i18nc("@info", "Click faces where the load acts. Each click adds to selection. Alt+click to deselect.")
         }
 
         Cura.PrimaryButton

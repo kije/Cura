@@ -49,6 +49,7 @@ class ForceDirectionHandle(ToolHandle):
         """Build and display the rotation rings at the given world position."""
         self._center = center
         self._visible = True
+        self.setEnabled(True)
 
         # Scale ring size relative to model
         inner = self._inner_radius * scale
@@ -97,6 +98,7 @@ class ForceDirectionHandle(ToolHandle):
     def hide(self) -> None:
         """Remove the rings from the viewport."""
         self._visible = False
+        self.setEnabled(False)
         mb = MeshBuilder()
         self.setSolidMesh(mb.build())
         self.setSelectionMesh(mb.build())

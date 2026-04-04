@@ -408,8 +408,9 @@ class BoundaryConditionTool(Tool):
                 return False
 
             modifiers = QApplication.keyboardModifiers()
-            ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
-            shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+            # Use Alt (Option on macOS) for add/remove — Shift and Ctrl
+            # are already bound by Cura for camera orbit/pan.
+            alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
 
             if self._selection_pass is None:
                 self._selection_pass = Application.getInstance().getRenderer().getRenderPass("selection")
@@ -459,24 +460,35 @@ class BoundaryConditionTool(Tool):
 
             if self._mode == MODE_FIXED:
                 bc = self._get_or_create_bc(picked_node)
-                if ctrl:
-                    bc.removeFixedFaces(face_indices_to_add)
+                if alt:
+                    # Alt+click toggles: remove if already fixed, add otherwise
+                    existing = set(bc.getFixedFaces())
+                    to_add = [f for f in face_indices_to_add if f not in existing]
+                    to_remove = [f for f in face_indices_to_add if f in existing]
+                    if to_remove:
+                        bc.removeFixedFaces(to_remove)
+                    if to_add:
+                        bc.addFixedFaces(to_add)
                 else:
                     bc.addFixedFaces(face_indices_to_add)
                 self.propertyChanged.emit()
                 self._update_highlights()
 
             elif self._mode == MODE_FORCE:
-                if ctrl:
+                if alt:
+                    # Alt+click toggles face in/out of pending selection
+                    existing = set(self._current_face_selection)
                     for fi in face_indices_to_add:
-                        if fi in self._current_face_selection:
+                        if fi in existing:
                             self._current_face_selection.remove(fi)
-                elif shift:
-                    for fi in face_indices_to_add:
-                        if fi not in self._current_face_selection:
+                        else:
                             self._current_face_selection.append(fi)
                 else:
-                    self._current_face_selection = list(face_indices_to_add)
+                    # Plain click: add to pending selection (accumulate)
+                    existing = set(self._current_face_selection)
+                    for fi in face_indices_to_add:
+                        if fi not in existing:
+                            self._current_face_selection.append(fi)
                 self.propertyChanged.emit()
                 self._update_highlights()
 
@@ -736,12 +748,20 @@ class BoundaryConditionTool(Tool):
             return
 
         bc = node.callDecoration("getBoundaryConditions")
-        if bc is None or not bc.hasAnyBC():
+        has_bc = bc is not None and bc.hasAnyBC()
+        has_pending = len(self._current_face_selection) > 0
+
+        if not has_bc and not has_pending:
             self._bc_highlight.clear()
             return
 
         try:
-            self._bc_highlight.update_visualization(node, bc)
+            # Paint confirmed BCs + pending selection + active force handle
+            self._bc_highlight.update_visualization(
+                node, bc,
+                pending_faces=self._current_face_selection if has_pending else None,
+                active_force_index=self._active_force_index,
+            )
         except Exception:
             Logger.logException("w", "FEA Infill: Failed to update BC highlight overlay")
             self._bc_highlight.clear()

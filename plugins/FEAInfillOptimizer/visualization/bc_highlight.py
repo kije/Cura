@@ -29,7 +29,9 @@ class BCHighlightHandle(ToolHandle):
     # Public API
     # ------------------------------------------------------------------
 
-    def update_visualization(self, node, bc_decorator) -> None:
+    def update_visualization(self, node, bc_decorator,
+                             pending_faces=None,
+                             active_force_index=-1) -> None:
         """Rebuild the highlight mesh from current BC data.
 
         Vertices are taken in local mesh space; the handle's world
@@ -38,7 +40,13 @@ class BCHighlightHandle(ToolHandle):
 
         Args:
             node: CuraSceneNode whose mesh is being decorated.
-            bc_decorator: FEABoundaryConditionDecorator attached to *node*.
+            bc_decorator: FEABoundaryConditionDecorator attached to *node*,
+                or None if only pending faces should be shown.
+            pending_faces: Optional list of face indices currently selected
+                but not yet confirmed (shown in YELLOW).
+            active_force_index: Index of the force group currently selected
+                in the UI list. That group is shown in BRIGHT RED; others
+                in darker red.
         """
         mb = MeshBuilder()
         mesh_data = node.getMeshData()
@@ -54,44 +62,64 @@ class BCHighlightHandle(ToolHandle):
             return
 
         # Position the handle in world space so local-coord painting aligns.
+        self.setEnabled(True)
         self.setTransformation(node.getWorldTransformation())
 
-        # Paint fixed faces GREEN (semi-transparent)
-        green = Color(0, 200, 0, 200)
-        for face_idx in bc_decorator.getFixedFaces():
-            self._paint_face(mb, verts, indices, face_idx, green)
+        if bc_decorator is not None:
+            # Paint fixed faces GREEN
+            green = Color(0, 200, 0, 200)
+            for face_idx in bc_decorator.getFixedFaces():
+                self._paint_face(mb, verts, indices, face_idx, green)
 
-        # Paint force faces RED + collect centroids for arrows
-        red = Color(200, 0, 0, 200)
-        blue = Color(0, 100, 255, 255)
+            # Paint force faces RED + arrows
+            red_inactive = Color(150, 40, 40, 180)      # dim red for inactive forces
+            red_active = Color(255, 60, 60, 220)         # bright red for active force
+            blue = Color(0, 100, 255, 255)
 
-        for fg in bc_decorator.getForceGroups():
-            centroids = []
-            for face_idx in fg.face_indices:
-                self._paint_face(mb, verts, indices, face_idx, red)
-                centroid = self._face_centroid(verts, indices, face_idx)
-                if centroid is not None:
-                    centroids.append(centroid)
+            for i, fg in enumerate(bc_decorator.getForceGroups()):
+                is_active = (i == active_force_index)
+                face_color = red_active if is_active else red_inactive
+                centroids = []
+                for face_idx in fg.face_indices:
+                    self._paint_face(mb, verts, indices, face_idx, face_color)
+                    centroid = self._face_centroid(verts, indices, face_idx)
+                    if centroid is not None:
+                        centroids.append(centroid)
 
-            if not centroids:
-                continue
+                if not centroids:
+                    continue
 
-            center = numpy.mean(centroids, axis=0)
-            center_vec = Vector(float(center[0]), float(center[1]), float(center[2]))
+                center = numpy.mean(centroids, axis=0)
+                center_vec = Vector(float(center[0]), float(center[1]), float(center[2]))
 
-            fx, fy, fz = fg.force.x, fg.force.y, fg.force.z
-            mag = (fx ** 2 + fy ** 2 + fz ** 2) ** 0.5
-            if mag > 0:
-                direction = Vector(fx / mag, fy / mag, fz / mag)
-                tail_length = max(5.0, mag / 10.0)
-                self._paint_arrow(mb, center_vec, direction, blue,
-                                  head_length=3.0, head_width=1.5,
-                                  tail_length=tail_length, tail_width=0.4)
+                fx, fy, fz = fg.force.x, fg.force.y, fg.force.z
+                mag = (fx ** 2 + fy ** 2 + fz ** 2) ** 0.5
+                if mag > 0:
+                    direction = Vector(fx / mag, fy / mag, fz / mag)
+                    # Active force gets a bigger, brighter arrow
+                    if is_active:
+                        self._paint_arrow(mb, center_vec, direction, blue,
+                                          head_length=4.0, head_width=2.0,
+                                          tail_length=max(8.0, mag / 8.0),
+                                          tail_width=0.6)
+                    else:
+                        self._paint_arrow(mb, center_vec, direction,
+                                          Color(0, 80, 200, 200),
+                                          head_length=2.5, head_width=1.2,
+                                          tail_length=max(4.0, mag / 12.0),
+                                          tail_width=0.3)
+
+        # Paint PENDING faces in YELLOW (not yet confirmed)
+        if pending_faces:
+            yellow = Color(255, 220, 0, 200)
+            for face_idx in pending_faces:
+                self._paint_face(mb, verts, indices, face_idx, yellow)
 
         self.setSolidMesh(mb.build())
 
     def clear(self) -> None:
         """Remove all highlight geometry."""
+        self.setEnabled(False)
         self.setSolidMesh(MeshBuilder().build())
 
     # ------------------------------------------------------------------
