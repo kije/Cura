@@ -34,6 +34,7 @@ fragment =
     uniform mediump int u_bitsRangesStart;
     uniform mediump int u_bitsRangesEnd;
     uniform mediump vec3 u_renderColors[16];
+    uniform mediump int u_isolatedMode;
 
     varying highp vec3 v_vertex;
     varying highp vec3 v_normal;
@@ -65,6 +66,12 @@ fragment =
             vec4 diffuse_color = vec4(u_renderColors[color_index] / 255.0, 1.0);
             highp float n_dot_l = mix(0.3, 0.7, dot(normal, light_dir));
             final_color += (n_dot_l * diffuse_color);
+
+            /* Isolated mode: add a subtle border tint to indicate isolation */
+            if (u_isolatedMode > 0)
+            {
+                final_color.rgb = mix(final_color.rgb, vec3(0.2, 0.4, 0.8), 0.08);
+            }
         }
 
         /* Output */
@@ -109,6 +116,7 @@ fragment41core =
     uniform mediump int u_bitsRangesStart;
     uniform mediump int u_bitsRangesEnd;
     uniform mediump vec3 u_renderColors[16];
+    uniform mediump int u_isolatedMode;
 
     in highp vec3 v_vertex;
     in highp vec3 v_normal;
@@ -141,6 +149,12 @@ fragment41core =
             vec4 diffuse_color = vec4(u_renderColors[color_index] / 255.0, 1.0);
             highp float n_dot_l = mix(0.3, 0.7, dot(normal, light_dir));
             final_color += (n_dot_l * diffuse_color);
+
+            /* Isolated mode: add a subtle border tint to indicate isolation */
+            if (u_isolatedMode > 0)
+            {
+                final_color.rgb = mix(final_color.rgb, vec3(0.2, 0.4, 0.8), 0.08);
+            }
         }
 
         /* Output */
