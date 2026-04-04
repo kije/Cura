@@ -15,11 +15,16 @@ Item
     property var toolProperties: UM.Controller.properties
 
     // Convenience aliases from tool property bag
-    readonly property string currentMode:     toolProperties.getValue("Mode")          ?? "fixed"
+    readonly property string currentMode:      toolProperties.getValue("Mode")             ?? "fixed"
     readonly property string selectionSummary: toolProperties.getValue("SelectionSummary") ?? ""
-    readonly property real   forceX:          toolProperties.getValue("ForceX")       ?? 0.0
-    readonly property real   forceY:          toolProperties.getValue("ForceY")       ?? 0.0
-    readonly property real   forceZ:          toolProperties.getValue("ForceZ")       ?? 0.0
+    readonly property real   forceX:           toolProperties.getValue("ForceX")           ?? 0.0
+    readonly property real   forceY:           toolProperties.getValue("ForceY")           ?? 0.0
+    readonly property real   forceZ:           toolProperties.getValue("ForceZ")           ?? 0.0
+    readonly property string selectionMode:    toolProperties.getValue("SelectionMode")    ?? "single"
+    readonly property int    activeSupportIdx: toolProperties.getValue("ActiveSupportIndex") ?? -1
+    readonly property int    activeForceIdx:   toolProperties.getValue("ActiveForceIndex")   ?? -1
+    readonly property var    supportListModel: JSON.parse(toolProperties.getValue("SupportListModel") ?? "[]")
+    readonly property var    forceListModel:   JSON.parse(toolProperties.getValue("ForceListModel")   ?? "[]")
 
     implicitWidth: columnLayout.implicitWidth
     implicitHeight: columnLayout.implicitHeight
@@ -32,7 +37,7 @@ Item
         anchors.fill: parent
         spacing: UM.Theme.getSize("default_margin").height
 
-        // ── Mode selector ────────────────────────────────────────────────────
+        // ── Mode selector ─────────────────────────────────────────────────
         UM.Label
         {
             text: catalog.i18nc("@label", "What are you marking?")
@@ -84,7 +89,9 @@ Item
             color: UM.Theme.getColor("text_medium")
             text: bcPanel.currentMode === "fixed"
                 ? catalog.i18nc("@info", "Click faces where the part is held, screwed down, or resting on a surface.")
-                : catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
+                : bcPanel.currentMode === "rotate"
+                    ? catalog.i18nc("@info", "Drag the rotation rings to adjust force direction.")
+                    : catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
         }
 
         UM.Label
@@ -95,7 +102,7 @@ Item
             text: catalog.i18nc("@info", "Shift+click: add face | Ctrl+click: remove face")
         }
 
-        // ── Rotate mode indicator ──────────────────────────────────────────
+        // ── Rotate mode indicator ─────────────────────────────────────────
         Rectangle
         {
             Layout.fillWidth: true
@@ -107,21 +114,232 @@ Item
             UM.Label
             {
                 id: rotateModeLabel
-                anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width }
+                anchors
+                {
+                    left: parent.left
+                    right: parent.right
+                    verticalCenter: parent.verticalCenter
+                    margins: UM.Theme.getSize("default_margin").width
+                }
                 wrapMode: Text.WordWrap
                 color: "#aaaaff"
-                text: catalog.i18nc("@info", "Drag the rotation rings to adjust force direction. Click 'Support / Mount' or 'Apply Load' to switch back.")
+                text: catalog.i18nc("@info", "Drag the rings to adjust direction. Click 'Support / Mount' or 'Apply Load' to exit.")
             }
         }
 
-        // ── Force settings (force + rotate mode) ────────────────────────────
+        // ── Selection helper (face group expansion) ───────────────────────
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Selection helper")
+            font: UM.Theme.getFont("medium_bold")
+        }
+
+        Row
+        {
+            spacing: UM.Theme.getSize("default_margin").width / 4
+
+            RadioButton
+            {
+                id: singleMode
+                text: catalog.i18nc("@option", "Single")
+                checked: bcPanel.selectionMode === "single"
+                onClicked: UM.Controller.setProperty("SelectionMode", "single")
+            }
+
+            RadioButton
+            {
+                id: flatMode
+                text: catalog.i18nc("@option", "Surface")
+                checked: bcPanel.selectionMode === "flat"
+                onClicked: UM.Controller.setProperty("SelectionMode", "flat")
+            }
+
+            RadioButton
+            {
+                id: holeMode
+                text: catalog.i18nc("@option", "Hole")
+                checked: bcPanel.selectionMode === "hole"
+                onClicked: UM.Controller.setProperty("SelectionMode", "hole")
+            }
+
+            RadioButton
+            {
+                id: cylinderMode
+                text: catalog.i18nc("@option", "Cylinder")
+                checked: bcPanel.selectionMode === "cylinder"
+                onClicked: UM.Controller.setProperty("SelectionMode", "cylinder")
+            }
+        }
+
+        // ── Supports list ─────────────────────────────────────────────────
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Supports")
+            font: UM.Theme.getFont("medium_bold")
+        }
+
+        Column
+        {
+            Layout.fillWidth: true
+            spacing: 2
+
+            Repeater
+            {
+                model: bcPanel.supportListModel
+
+                Rectangle
+                {
+                    width: columnLayout.width
+                    height: supportRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
+                    color: bcPanel.activeSupportIdx === modelData.index
+                        ? UM.Theme.getColor("primary")
+                        : UM.Theme.getColor("main_background")
+                    border.color: UM.Theme.getColor("lining")
+                    border.width: UM.Theme.getSize("default_lining").width
+                    radius: UM.Theme.getSize("default_radius").width
+
+                    RowLayout
+                    {
+                        anchors.fill: parent
+                        anchors.margins: UM.Theme.getSize("default_margin").width / 2
+
+                        UM.Label
+                        {
+                            id: supportRowLabel
+                            Layout.fillWidth: true
+                            text: modelData.label
+                            color: UM.Theme.getColor("text")
+                            elide: Text.ElideRight
+                        }
+
+                        UM.ColorImage
+                        {
+                            source: UM.Theme.getIcon("Cancel")
+                            color: UM.Theme.getColor("text_medium")
+                            width: UM.Theme.getSize("small_button_icon").width
+                            height: width
+
+                            MouseArea
+                            {
+                                anchors.fill: parent
+                                onClicked:
+                                {
+                                    UM.Controller.setProperty("ActiveSupportIndex", modelData.index)
+                                    UM.Controller.setProperty("DeleteActiveSupport", true)
+                                }
+                            }
+                        }
+                    }
+
+                    MouseArea
+                    {
+                        anchors.fill: parent
+                        z: -1
+                        onClicked: UM.Controller.setProperty("ActiveSupportIndex", modelData.index)
+                    }
+                }
+            }
+
+            // Empty state
+            UM.Label
+            {
+                visible: bcPanel.supportListModel.length === 0
+                width: columnLayout.width
+                text: catalog.i18nc("@info", "No supports defined. Switch to Support / Mount mode and click faces.")
+                wrapMode: Text.WordWrap
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_inactive")
+            }
+        }
+
+        // ── Forces list ───────────────────────────────────────────────────
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Forces")
+            font: UM.Theme.getFont("medium_bold")
+        }
+
+        Column
+        {
+            Layout.fillWidth: true
+            spacing: 2
+
+            Repeater
+            {
+                model: bcPanel.forceListModel
+
+                Rectangle
+                {
+                    width: columnLayout.width
+                    height: forceRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
+                    color: bcPanel.activeForceIdx === modelData.index
+                        ? UM.Theme.getColor("primary")
+                        : UM.Theme.getColor("main_background")
+                    border.color: UM.Theme.getColor("lining")
+                    border.width: UM.Theme.getSize("default_lining").width
+                    radius: UM.Theme.getSize("default_radius").width
+
+                    RowLayout
+                    {
+                        anchors.fill: parent
+                        anchors.margins: UM.Theme.getSize("default_margin").width / 2
+
+                        UM.Label
+                        {
+                            id: forceRowLabel
+                            Layout.fillWidth: true
+                            text: modelData.label
+                            color: UM.Theme.getColor("text")
+                            elide: Text.ElideRight
+                        }
+
+                        UM.ColorImage
+                        {
+                            source: UM.Theme.getIcon("Cancel")
+                            color: UM.Theme.getColor("text_medium")
+                            width: UM.Theme.getSize("small_button_icon").width
+                            height: width
+
+                            MouseArea
+                            {
+                                anchors.fill: parent
+                                onClicked:
+                                {
+                                    UM.Controller.setProperty("ActiveForceIndex", modelData.index)
+                                    UM.Controller.setProperty("DeleteActiveForce", true)
+                                }
+                            }
+                        }
+                    }
+
+                    MouseArea
+                    {
+                        anchors.fill: parent
+                        z: -1
+                        onClicked: UM.Controller.setProperty("ActiveForceIndex", modelData.index)
+                    }
+                }
+            }
+
+            // Empty state
+            UM.Label
+            {
+                visible: bcPanel.forceListModel.length === 0
+                width: columnLayout.width
+                text: catalog.i18nc("@info", "No forces defined. Switch to Apply Load mode, select faces, then confirm.")
+                wrapMode: Text.WordWrap
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_inactive")
+            }
+        }
+
+        // ── Force settings (force + rotate mode) ──────────────────────────
         ColumnLayout
         {
             Layout.fillWidth: true
             spacing: UM.Theme.getSize("default_margin").height / 2
             visible: bcPanel.currentMode === "force" || bcPanel.currentMode === "rotate"
 
-            // Magnitude input (always editable)
             UM.Label
             {
                 text: catalog.i18nc("@label", "Load Amount")
@@ -142,19 +360,19 @@ Item
                     onEditingFinished:
                         UM.Controller.setProperty("ForceMagnitude", parseFloat(text) || 100.0)
                 }
+
                 UM.Label { text: "N" }
             }
 
             UM.Label
             {
                 Layout.fillWidth: true
-                text: catalog.i18nc("@info", "Tip: 1 kg weight ≈ 10 N. A finger push ≈ 20-50 N.")
+                text: catalog.i18nc("@info", "Tip: 1 kg weight \u2248 10 N. A finger push \u2248 20\u201350 N.")
                 font: UM.Theme.getFont("small")
                 color: UM.Theme.getColor("text_inactive")
                 wrapMode: Text.WordWrap
             }
 
-            // Direction components (read-only in rotate mode, editable in force mode)
             UM.Label
             {
                 text: catalog.i18nc("@label", "Direction (advanced)")
@@ -223,42 +441,7 @@ Item
             }
         }
 
-        // ── Selection summary ────────────────────────────────────────────────
-        UM.Label
-        {
-            text: catalog.i18nc("@label", "Selection")
-            font: UM.Theme.getFont("medium_bold")
-        }
-
-        Rectangle
-        {
-            Layout.fillWidth: true
-            height: selectionLabel.implicitHeight + UM.Theme.getSize("default_margin").height
-            color: UM.Theme.getColor("main_background")
-            border.color: UM.Theme.getColor("lining")
-            border.width: UM.Theme.getSize("default_lining").width
-            radius: UM.Theme.getSize("default_radius").width
-
-            UM.Label
-            {
-                id: selectionLabel
-                anchors
-                {
-                    left: parent.left
-                    right: parent.right
-                    verticalCenter: parent.verticalCenter
-                    margins: UM.Theme.getSize("default_margin").width
-                }
-                text: bcPanel.selectionSummary !== ""
-                    ? bcPanel.selectionSummary
-                    : catalog.i18nc("@info", "No faces selected. Click a face to select it.")
-                wrapMode: Text.WordWrap
-                color: UM.Theme.getColor("text")
-                font: UM.Theme.getFont("small")
-            }
-        }
-
-        // ── Action buttons ───────────────────────────────────────────────────
+        // ── Confirm load button (force mode) ──────────────────────────────
         UM.Label
         {
             Layout.fillWidth: true
@@ -274,38 +457,20 @@ Item
         Cura.PrimaryButton
         {
             Layout.fillWidth: true
+            visible: bcPanel.currentMode === "force"
             text: catalog.i18nc("@action:button", "Confirm Load on Selected Faces")
             enabled: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
             onClicked: UM.Controller.setProperty("ConfirmForceGroup", true)
         }
 
-        RowLayout
-        {
-            Layout.fillWidth: true
-            spacing: UM.Theme.getSize("default_margin").width / 2
-
-            Cura.SecondaryButton
-            {
-                Layout.fillWidth: true
-                text: catalog.i18nc("@action:button", "Clear Supports")
-                onClicked: UM.Controller.setProperty("ClearFixedFaces", true)
-            }
-            Cura.SecondaryButton
-            {
-                Layout.fillWidth: true
-                text: catalog.i18nc("@action:button", "Clear Loads")
-                onClicked: UM.Controller.setProperty("ClearForceGroups", true)
-            }
-        }
-
-        // ── Optimize button ──────────────────────────────────────────────────
+        // ── Optimize button ───────────────────────────────────────────────
         Item { height: UM.Theme.getSize("default_margin").height }
 
         Cura.PrimaryButton
         {
             Layout.fillWidth: true
             text: catalog.i18nc("@action:button", "Confirm and Optimize")
-            enabled: bcPanel.selectionSummary !== "" && bcPanel.selectionSummary !== "No model selected." && bcPanel.selectionSummary !== "No BCs defined. Click faces to begin."
+            enabled: bcPanel.supportListModel.length > 0 || bcPanel.forceListModel.length > 0
             onClicked: UM.Controller.setProperty("OpenOptimizeDialog", true)
         }
 

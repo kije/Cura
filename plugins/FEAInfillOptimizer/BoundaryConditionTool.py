@@ -16,6 +16,7 @@ State changes are communicated to QML via ``self.propertyChanged``
 """
 
 from typing import Optional
+import json
 import math
 
 import numpy
@@ -46,6 +47,17 @@ from .visualization.force_direction_handle import (
     rotate_vector,
 )
 
+try:
+    from .fea.face_group_analyzer import (
+        build_face_adjacency,
+        find_coplanar_group,
+        find_hole_surface,
+        find_cylinder_surface,
+    )
+    _FACE_GROUP_ANALYZER_AVAILABLE = True
+except ImportError:
+    _FACE_GROUP_ANALYZER_AVAILABLE = False
+
 # Modes for the boundary condition tool
 MODE_FIXED = "fixed"
 MODE_FORCE = "force"
@@ -75,6 +87,17 @@ class BoundaryConditionTool(Tool):
         self._rotate_drag_active = False
         self._rotate_angle = 0.0
 
+        # Active list selection indices (-1 = none selected)
+        self._active_support_index = -1
+        self._active_force_index = -1
+
+        # Selection mode: "single", "flat", "hole", "cylinder"
+        self._selection_mode = "single"
+
+        # Adjacency cache for face group expansion
+        self._adjacency_cache = None
+        self._adjacency_cache_node = None
+
         # BC overlay
         scene_root = self._controller.getScene().getRoot()
         self._bc_highlight = BCHighlightHandle(parent=scene_root)
@@ -91,6 +114,10 @@ class BoundaryConditionTool(Tool):
             "ConfirmForceGroup", "ClearAllBCs",
             "ClearFixedFaces", "ClearForceGroups",
             "OpenOptimizeDialog",
+            "ActiveSupportIndex", "ActiveForceIndex",
+            "SupportListModel", "ForceListModel",
+            "SelectionMode",
+            "DeleteActiveSupport", "DeleteActiveForce",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -229,6 +256,133 @@ class BoundaryConditionTool(Tool):
             else:
                 self._extension.showDialog()
 
+    # ── List model properties ───────────────────────────────────────────────
+
+    def getSupportListModel(self) -> str:
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return "[]"
+        bc = selected.callDecoration("getBoundaryConditions")
+        if bc is None:
+            return "[]"
+        fixed = bc.getFixedFaces()
+        if not fixed:
+            return "[]"
+        return json.dumps([{"index": 0, "label": f"Support ({len(fixed)} faces)", "faces": len(fixed)}])
+
+    def getForceListModel(self) -> str:
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return "[]"
+        bc = selected.callDecoration("getBoundaryConditions")
+        if bc is None:
+            return "[]"
+        groups = bc.getForceGroups()
+        result = []
+        for i, fg in enumerate(groups):
+            mag = math.sqrt(fg.force.x**2 + fg.force.y**2 + fg.force.z**2)
+            result.append({
+                "index": i,
+                "label": f"Force {i + 1}: {mag:.0f}N ({len(fg.face_indices)} faces)",
+                "magnitude": round(mag, 1),
+                "faces": len(fg.face_indices),
+            })
+        return json.dumps(result)
+
+    # ── Active index properties ─────────────────────────────────────────────
+
+    def getActiveSupportIndex(self) -> int:
+        return self._active_support_index
+
+    def setActiveSupportIndex(self, index: int) -> None:
+        self._active_support_index = int(index)
+        self.propertyChanged.emit()
+
+    def getActiveForceIndex(self) -> int:
+        return self._active_force_index
+
+    def setActiveForceIndex(self, index: int) -> None:
+        self._active_force_index = int(index)
+        # Sync Fx/Fy/Fz to show the selected force group's values
+        selected = Selection.getSelectedObject(0)
+        if selected is not None:
+            bc = selected.callDecoration("getBoundaryConditions")
+            if bc is not None:
+                groups = bc.getForceGroups()
+                if 0 <= self._active_force_index < len(groups):
+                    fg = groups[self._active_force_index]
+                    self._force_x = fg.force.x
+                    self._force_y = fg.force.y
+                    self._force_z = fg.force.z
+                    self._sync_magnitude_from_components()
+                    # Show rotation handle at this force group's centroid
+                    self._rotating_group_index = self._active_force_index
+                    mesh_data = selected.getMeshData()
+                    if mesh_data is not None:
+                        verts = mesh_data.getVertices()
+                        indices = mesh_data.getIndices()
+                        if verts is not None:
+                            transform = selected.getWorldTransformation().getData()
+                            verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
+                            verts_world = (transform @ verts_h.T).T[:, :3]
+                            centroid = compute_face_centroid(verts_world, indices, fg.face_indices)
+                            bbox = selected.getBoundingBox()
+                            if bbox:
+                                diag = math.sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
+                                scale = max(0.1, diag / 80.0)
+                            else:
+                                scale = 1.0
+                            self._force_handle.show_at(centroid, scale=scale)
+        self.propertyChanged.emit()
+
+    # ── Delete trigger properties ───────────────────────────────────────────
+
+    def getDeleteActiveSupport(self) -> bool:
+        return False
+
+    def setDeleteActiveSupport(self, value) -> None:
+        if value:
+            selected = Selection.getSelectedObject(0)
+            if selected is None:
+                return
+            bc = selected.callDecoration("getBoundaryConditions")
+            if bc is not None:
+                bc.clearFixedFaces()
+            self._active_support_index = -1
+            self.propertyChanged.emit()
+            self._update_highlights()
+
+    def getDeleteActiveForce(self) -> bool:
+        return False
+
+    def setDeleteActiveForce(self, value) -> None:
+        if value:
+            index = self._active_force_index
+            if index < 0:
+                return
+            selected = Selection.getSelectedObject(0)
+            if selected is None:
+                return
+            bc = selected.callDecoration("getBoundaryConditions")
+            if bc is not None:
+                bc.removeForceGroup(index)
+                if self._rotating_group_index == index:
+                    self._force_handle.hide()
+                    self._rotating_group_index = -1
+            self._active_force_index = -1
+            self.propertyChanged.emit()
+            self._update_highlights()
+
+    # ── Selection mode property ─────────────────────────────────────────────
+
+    def getSelectionMode(self) -> str:
+        return self._selection_mode
+
+    def setSelectionMode(self, mode: str) -> None:
+        if mode in ("single", "flat", "hole", "cylinder"):
+            self._selection_mode = mode
+            self.propertyChanged.emit()
+
     # ── Event handling ─────────────────────────────────────────────────────
 
     def event(self, event: Event) -> bool:
@@ -283,24 +437,46 @@ class BoundaryConditionTool(Tool):
             if face_index is None:
                 return False
 
+            # Expand selection if a face group mode is active
+            if self._selection_mode != "single" and _FACE_GROUP_ANALYZER_AVAILABLE:
+                mesh_data = picked_node.getMeshData()
+                verts = mesh_data.getVertices()
+                indices = mesh_data.getIndices()
+                node_id = id(picked_node)
+                if self._adjacency_cache_node != node_id:
+                    self._adjacency_cache = build_face_adjacency(verts, indices)
+                    self._adjacency_cache_node = node_id
+                if self._selection_mode == "flat":
+                    face_indices_to_add = find_coplanar_group(verts, indices, face_index, self._adjacency_cache)
+                elif self._selection_mode == "hole":
+                    face_indices_to_add = find_hole_surface(verts, indices, face_index, self._adjacency_cache)
+                elif self._selection_mode == "cylinder":
+                    face_indices_to_add = find_cylinder_surface(verts, indices, face_index, self._adjacency_cache)
+                else:
+                    face_indices_to_add = [face_index]
+            else:
+                face_indices_to_add = [face_index]
+
             if self._mode == MODE_FIXED:
                 bc = self._get_or_create_bc(picked_node)
                 if ctrl:
-                    bc.removeFixedFaces([face_index])
+                    bc.removeFixedFaces(face_indices_to_add)
                 else:
-                    bc.addFixedFaces([face_index])
+                    bc.addFixedFaces(face_indices_to_add)
                 self.propertyChanged.emit()
                 self._update_highlights()
 
             elif self._mode == MODE_FORCE:
                 if ctrl:
-                    if face_index in self._current_face_selection:
-                        self._current_face_selection.remove(face_index)
+                    for fi in face_indices_to_add:
+                        if fi in self._current_face_selection:
+                            self._current_face_selection.remove(fi)
                 elif shift:
-                    if face_index not in self._current_face_selection:
-                        self._current_face_selection.append(face_index)
+                    for fi in face_indices_to_add:
+                        if fi not in self._current_face_selection:
+                            self._current_face_selection.append(fi)
                 else:
-                    self._current_face_selection = [face_index]
+                    self._current_face_selection = list(face_indices_to_add)
                 self.propertyChanged.emit()
                 self._update_highlights()
 
@@ -489,6 +665,7 @@ class BoundaryConditionTool(Tool):
         # Enter rotate mode so user can adjust the direction
         group_index = len(bc.getForceGroups()) - 1
         self._rotating_group_index = group_index
+        self._active_force_index = group_index
         self._current_face_selection.clear()
         self._mode = MODE_ROTATE
 
@@ -522,6 +699,8 @@ class BoundaryConditionTool(Tool):
         self._current_face_selection.clear()
         self._force_handle.hide()
         self._rotating_group_index = -1
+        self._active_support_index = -1
+        self._active_force_index = -1
         self._mode = MODE_FIXED
         self.propertyChanged.emit()
         self._update_highlights()
