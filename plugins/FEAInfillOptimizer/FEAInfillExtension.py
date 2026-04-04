@@ -92,46 +92,80 @@ class FEAInfillExtension(QObject, Extension):
             self._deps_available = self._dep_manager.all_available()
             self.depsAvailableChanged.emit()
 
-        # Connect to scene events for BC persistence in 3MF files.
+        # Connect to signals for BC persistence in 3MF project files.
         app = CuraApplication.getInstance()
-        app.fileLoaded.connect(self._onFileLoaded)
-        app.getController().getScene().sceneChanged.connect(self._onSceneChangedForPersistence)
+
+        # Restore BCs when a workspace (3MF project) is loaded.
+        # fileLoaded only fires for individual model imports (STL, OBJ) —
+        # workspaceLoaded fires when a .3mf project is opened.
+        app.fileLoaded.connect(self._restoreBCsFromScene)
+        if hasattr(app, "workspaceLoaded"):
+            app.workspaceLoaded.connect(self._restoreBCsFromScene)
+
+        # Sync BC data to node.metadata before save.  writeStarted fires
+        # right before the 3MF writer serialises nodes, so our metadata
+        # will be picked up by savitar_node.setSetting().
+        app.getOutputDeviceManager().writeStarted.connect(self._syncAllBCsToMetadata)
 
     _BC_METADATA_KEY = "fea_infill_boundary_conditions"
 
-    def _onFileLoaded(self, filename: str) -> None:
-        """Restore BC decorators from node metadata after loading a 3MF."""
+    def _syncAllBCsToMetadata(self, *args) -> None:
+        """Persist BC data from decorators → node.metadata for all scene nodes.
+
+        Called right before writing a 3MF file.  The 3MF writer reads
+        node.metadata and saves each entry via savitar_node.setSetting().
+        """
         import json
-        from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
-        from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
         scene = CuraApplication.getInstance().getController().getScene()
         for node in DepthFirstIterator(scene.getRoot()):
-            if hasattr(node, "metadata") and self._BC_METADATA_KEY in getattr(node, "metadata", {}):
-                try:
-                    bc_data = json.loads(node.metadata[self._BC_METADATA_KEY])
-                    decorator = FEABoundaryConditionDecorator()
-                    decorator.fromDict(bc_data)
-                    node.addDecorator(decorator)
-                    Logger.log("d", "FEA Infill: Restored BCs for node '%s'", node.getName())
-                except Exception:
-                    Logger.logException("w", "FEA Infill: Failed to restore BCs for node '%s'", node.getName())
+            if not isinstance(node, CuraSceneNode):
+                continue
+            try:
+                bc = node.callDecoration("getBoundaryConditions")
+                if bc is not None and bc.hasAnyBC():
+                    node.metadata[self._BC_METADATA_KEY] = json.dumps(bc.toDict())
+                    Logger.log("d", "FEA Infill: Saved BCs for node '%s' (%d fixed, %d forces)",
+                               node.getName(), bc.getFixedFaceCount(), bc.getForceGroupCount())
+                elif self._BC_METADATA_KEY in node.metadata:
+                    del node.metadata[self._BC_METADATA_KEY]
+            except Exception:
+                Logger.logException("w", "FEA Infill: Failed to save BCs for node '%s'",
+                                    node.getName())
 
-    def _onSceneChangedForPersistence(self, node) -> None:
-        """Persist BC data to node metadata so it's saved in 3MF."""
+    def _restoreBCsFromScene(self, *args) -> None:
+        """Restore BC decorators from node.metadata after loading.
+
+        The 3MF reader puts unknown savitar settings into node.metadata.
+        The value might be a Savitar setting object (with .value attr)
+        or a plain string — we handle both.
+        """
         import json
-        if node is None:
-            return
-        # Guard against non-CuraSceneNode objects and partially-initialized nodes
-        if not isinstance(node, CuraSceneNode):
-            return
-        try:
-            bc = node.callDecoration("getBoundaryConditions")
-            if bc is not None and bc.hasAnyBC():
-                node.metadata[self._BC_METADATA_KEY] = json.dumps(bc.toDict())
-            elif self._BC_METADATA_KEY in node.metadata:
-                del node.metadata[self._BC_METADATA_KEY]
-        except Exception:
-            pass  # Silently ignore errors during scene loading/unloading
+        from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
+        scene = CuraApplication.getInstance().getController().getScene()
+        for node in DepthFirstIterator(scene.getRoot()):
+            if not isinstance(node, CuraSceneNode):
+                continue
+            if not hasattr(node, "metadata"):
+                continue
+            if self._BC_METADATA_KEY not in node.metadata:
+                continue
+            # Already has a BC decorator — don't overwrite
+            if node.callDecoration("getBoundaryConditions") is not None:
+                continue
+            try:
+                raw = node.metadata[self._BC_METADATA_KEY]
+                # Handle both plain string and Savitar setting object
+                json_str = raw.value if hasattr(raw, "value") else str(raw)
+                bc_data = json.loads(json_str)
+                decorator = FEABoundaryConditionDecorator()
+                decorator.fromDict(bc_data)
+                node.addDecorator(decorator)
+                Logger.log("d", "FEA Infill: Restored BCs for node '%s' (%d fixed, %d forces)",
+                           node.getName(), decorator.getFixedFaceCount(),
+                           decorator.getForceGroupCount())
+            except Exception:
+                Logger.logException("w", "FEA Infill: Failed to restore BCs for node '%s'",
+                                    node.getName())
 
     # -- Dialog --
 
