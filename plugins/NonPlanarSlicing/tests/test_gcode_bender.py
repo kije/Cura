@@ -554,3 +554,178 @@ class TestZSpikeRegression:
             f"without explicit Z (would inherit stale Z from bent regions):\n"
             + "\n".join(missing_z_lines[:10])
         )
+
+    def test_z_deviation_clamped_relative_to_layer_below(self):
+        """Bent Z must not exceed layer_height + max_path_deviation above
+        the conformal layer below.
+
+        This prevents the nozzle from printing into empty air when the
+        surface height varies sharply (e.g. sphere edges).
+        """
+        n_layers = 20
+        layer_height = 0.2
+        gcode = self._make_multilayer_gcode(
+            n_layers=n_layers, moves_per_layer=8, layer_height=layer_height,
+        )
+
+        # Surface at 3.0mm — well above most layers.
+        hm = _MockHeightMap(z_value=3.0, grid_shape=(20, 20))
+        safe_map = np.ones((20, 20), dtype=bool)
+        blend_map = np.ones((20, 20), dtype=np.float64)
+        max_deviation = 0.4
+
+        settings = {
+            "layer_height": layer_height,
+            "nonplanar_layer_count": 5,
+            "max_angle_deg": 89.0,  # Very permissive angle
+            "flow_compensation": False,
+            "feedrate_compensation": False,
+            "segment_length": 50.0,
+            "surface_mode": "top_only",
+            "max_path_deviation": max_deviation,
+            "nozzle_size": max_deviation,
+        }
+        result = bend_gcode(gcode, hm, safe_map, blend_map, settings)
+
+        # Parse all Z values.  For each bent extrusion on layer L, the
+        # conformal layer below is at surface_z - (layers_from_top+1)*lh.
+        # The bent Z must not exceed that + lh + max_deviation.
+        import re
+        z_pattern = re.compile(r"Z([\d.]+)")
+        current_layer = -1
+        violations = []
+
+        for chunk in result:
+            for line in chunk.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";LAYER:"):
+                    try:
+                        current_layer = int(stripped.split(":")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+                if not stripped.startswith("G1") or "E" not in stripped:
+                    continue
+
+                z_match = z_pattern.search(stripped)
+                if not z_match:
+                    continue
+
+                z_val = float(z_match.group(1))
+                nominal_z = (current_layer + 1) * layer_height
+
+                # For top-only mode, only the top 5 layers are bent.
+                if current_layer < n_layers - 5:
+                    continue
+
+                layers_from_top = n_layers - 1 - current_layer
+                # surface_z = 3.0 for our mock
+                target_z = 3.0 - layers_from_top * layer_height
+                layer_below_z = 3.0 - (layers_from_top + 1) * layer_height
+                max_allowed = layer_below_z + layer_height + max_deviation + 0.01
+
+                if z_val > max_allowed:
+                    violations.append(
+                        f"Layer {current_layer}: Z={z_val:.3f} exceeds "
+                        f"max={max_allowed:.3f} (layer_below={layer_below_z:.3f})"
+                    )
+
+        assert len(violations) == 0, (
+            f"Found {len(violations)} Z deviation violations:\n"
+            + "\n".join(violations[:10])
+        )
+
+    def test_infill_first_in_skin_walls_mode(self):
+        """In skin_walls mode with bent layers, FILL type groups should
+        appear before WALL/SKIN groups in the G-code output.
+        """
+        # Create G-code with mixed types per layer.
+        n_layers = 10
+        layer_height = 0.2
+        chunks = [
+            ";Header\n",
+            "G28\nM83\n",  # Start G-code with relative extrusion
+        ]
+        abs_e = 0.0
+        for layer in range(n_layers):
+            z = (layer + 1) * layer_height
+            lines = [f";LAYER:{layer}"]
+
+            # WALL-OUTER first
+            lines.append(";TYPE:WALL-OUTER")
+            for i in range(3):
+                abs_e += 0.5
+                x = 5.0 + i * 2.0
+                if i == 0:
+                    lines.append(f"G1 X{x:.3f} Y10.000 Z{z:.3f} E{abs_e:.5f} F1500")
+                else:
+                    lines.append(f"G1 X{x:.3f} Y10.000 E{abs_e:.5f}")
+
+            # Then FILL
+            lines.append(";TYPE:FILL")
+            for i in range(3):
+                abs_e += 0.5
+                x = 5.0 + i * 2.0
+                lines.append(f"G1 X{x:.3f} Y12.000 E{abs_e:.5f}")
+
+            # Then SKIN
+            lines.append(";TYPE:SKIN")
+            for i in range(3):
+                abs_e += 0.5
+                x = 5.0 + i * 2.0
+                lines.append(f"G1 X{x:.3f} Y14.000 E{abs_e:.5f}")
+
+            chunks.append("\n".join(lines) + "\n")
+
+        hm = _MockHeightMap(z_value=1.5, grid_shape=(20, 20))
+        safe_map = np.ones((20, 20), dtype=bool)
+        blend_map = np.ones((20, 20), dtype=np.float64)
+
+        settings = {
+            "layer_height": layer_height,
+            "nonplanar_layer_count": 3,
+            "max_angle_deg": 45.0,
+            "flow_compensation": False,
+            "feedrate_compensation": False,
+            "segment_length": 50.0,
+            "surface_mode": "top_only",
+            "nonplanar_line_types": "skin_walls",
+            "max_path_deviation": 0.4,
+            "nozzle_size": 0.4,
+        }
+        result = bend_gcode(chunks, hm, safe_map, blend_map, settings)
+
+        # For each target layer (top 3), verify FILL appears before
+        # WALL-OUTER and SKIN.
+        import re
+        type_re = re.compile(r"^;TYPE:(\S+)", re.IGNORECASE)
+        target_start = n_layers - 3  # layers 7, 8, 9
+
+        for ci in range(2, len(result)):
+            layer_num = -1
+            type_order = []
+            for line in result[ci].split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";LAYER:"):
+                    try:
+                        layer_num = int(stripped.split(":")[1])
+                    except (ValueError, IndexError):
+                        pass
+                type_m = type_re.match(stripped)
+                if type_m:
+                    type_order.append(type_m.group(1).upper())
+
+            if layer_num < target_start:
+                continue
+
+            # FILL should appear before WALL-OUTER and SKIN.
+            if "FILL" in type_order:
+                fill_idx = type_order.index("FILL")
+                for other in ["WALL-OUTER", "SKIN"]:
+                    if other in type_order:
+                        other_idx = type_order.index(other)
+                        assert fill_idx < other_idx, (
+                            f"Layer {layer_num}: FILL (idx={fill_idx}) should "
+                            f"come before {other} (idx={other_idx}) but doesn't. "
+                            f"Type order: {type_order}"
+                        )

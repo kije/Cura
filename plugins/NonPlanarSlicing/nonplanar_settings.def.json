@@ -205,7 +205,7 @@
                 "skin_walls": "Skin & Walls Only",
                 "all": "All Lines"
             },
-            "default_value": "all",
+            "default_value": "skin_walls",
             "enabled": "nonplanar_enabled",
             "settable_per_mesh": false,
             "settable_per_extruder": false,

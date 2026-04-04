@@ -251,7 +251,7 @@ def bend_gcode(
     min_flow_multiplier = float(settings.get("min_flow_multiplier", 0.5))
 
     # Line type filtering: "skin_walls" skips infill, "all" bends everything.
-    nonplanar_line_types = str(settings.get("nonplanar_line_types", "all"))
+    nonplanar_line_types = str(settings.get("nonplanar_line_types", "skin_walls"))
     skip_line_types = set(_NEVER_BEND_LINE_TYPES)
     if nonplanar_line_types == "skin_walls":
         skip_line_types |= _INFILL_LINE_TYPES
@@ -545,6 +545,22 @@ def bend_gcode(
 
                 # Linearly interpolate between original Z and target Z.
                 bent_z = sz + (target_z - sz) * blend_factor
+
+                # Clamp bent_z so the actual layer height (distance from
+                # the conformal layer below) doesn't exceed a safe maximum.
+                # Without this, the nozzle can be multiple layer-heights
+                # above the material below, printing into empty air.
+                #
+                # The conformal layer below sits at:
+                #   layer_below_z = surface_z - (layers_from_top + 1) * layer_height
+                # The actual layer height is: bent_z - layer_below_z
+                # We clamp to: layer_height + max_path_deviation
+                layer_below_z = surface_z - (layers_from_top + 1) * layer_height
+                max_actual_lh = layer_height + max_path_deviation
+                max_bent_z = layer_below_z + max_actual_lh
+                if bent_z > max_bent_z:
+                    bent_z = max_bent_z
+                    _diag_z_clamped += 1
 
                 # Safety: don't go below zero (bed surface).
                 if bent_z < 0.0:
@@ -849,6 +865,12 @@ def bend_gcode(
             )
             result[0] = stats + header
 
+    # Reorder infill-first in non-planar layers when using skin_walls mode.
+    # This ensures flat infill is laid down before bent walls/skin, providing
+    # a stable foundation.
+    if nonplanar_line_types == "skin_walls" and _chunks_with_bending:
+        _reorder_infill_first(result, _chunks_with_bending, is_relative)
+
     # Insert region boundary comments into the reconstructed chunks.
     # Only mark chunks that had actual Z-bending (z_delta > 0.001).
     if _chunks_with_bending:
@@ -904,3 +926,167 @@ def _insert_region_markers(
                 lines.append(";NON-PLANAR END")
 
         chunks[ci] = "\n".join(lines)
+
+
+def _reorder_infill_first(
+    chunks: list[str],
+    bent_chunks: set[int],
+    is_relative_extrusion: bool,
+) -> None:
+    """Reorder non-planar layer chunks so FILL moves print before walls/skin.
+
+    In "skin_walls" mode, infill stays flat while walls/skin are bent.
+    Printing infill first ensures a flat foundation exists under the bent
+    paths.  Without reordering, walls might be bent BEFORE infill is
+    laid down, leaving them unsupported.
+
+    This modifies *chunks* in place.  Only chunks that had actual
+    Z-bending are reordered.
+
+    The function splits each target layer chunk into "type groups"
+    (sections between ;TYPE: comments), moves FILL groups before
+    non-FILL groups, and fixes absolute E values if needed.
+
+    Args:
+        chunks: The reconstructed gcode_list (modified in place).
+        bent_chunks: Set of chunk indices that had actual Z-bending.
+        is_relative_extrusion: True if M83 mode (relative E).
+    """
+    import re
+    type_re = re.compile(r"^;TYPE:(\S+)", re.IGNORECASE)
+    e_re = re.compile(r"E([-+]?\d*\.?\d+)", re.IGNORECASE)
+
+    for ci in sorted(bent_chunks):
+        if ci >= len(chunks):
+            continue
+
+        lines = chunks[ci].split("\n")
+
+        # Split lines into type groups.
+        # A type group starts with a ;TYPE: comment and includes all
+        # subsequent lines until the next ;TYPE: or end of chunk.
+        # Lines before the first ;TYPE: are a "preamble" (layer change,
+        # initial travel, etc.) and are always kept first.
+        groups: list[tuple[str, list[str]]] = []  # (type_name, lines)
+        preamble: list[str] = []
+        current_type = ""
+        current_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            type_m = type_re.match(stripped)
+            if type_m:
+                # Save the previous group if it had content.
+                if current_type or current_lines:
+                    if current_type:
+                        groups.append((current_type, current_lines))
+                    else:
+                        preamble.extend(current_lines)
+                current_type = type_m.group(1).upper()
+                current_lines = [line]
+            else:
+                current_lines.append(line)
+
+        # Save the last group.
+        if current_type:
+            groups.append((current_type, current_lines))
+        elif current_lines:
+            preamble.extend(current_lines)
+
+        if not groups:
+            continue  # No type groups found — skip.
+
+        # Separate FILL groups from non-FILL groups.
+        fill_groups = [(t, ll) for t, ll in groups if t == "FILL"]
+        other_groups = [(t, ll) for t, ll in groups if t != "FILL"]
+
+        if not fill_groups or not other_groups:
+            continue  # Nothing to reorder.
+
+        # Check if FILL is already first — skip if so.
+        first_non_preamble_type = groups[0][0] if groups else ""
+        if first_non_preamble_type == "FILL":
+            continue  # Already in correct order.
+
+        # Reconstruct: preamble + FILL groups + other groups.
+        reordered_lines = list(preamble)
+        for _, group_lines in fill_groups:
+            reordered_lines.extend(group_lines)
+        for _, group_lines in other_groups:
+            reordered_lines.extend(group_lines)
+
+        # For absolute extrusion, we need to renumber E values since
+        # the order changed.  For relative extrusion, E values are
+        # per-move deltas and don't need fixing.
+        if not is_relative_extrusion:
+            _fix_absolute_e_values(reordered_lines, e_re)
+
+        chunks[ci] = "\n".join(reordered_lines)
+        logger.debug("Reordered chunk %d: FILL groups moved before walls/skin", ci)
+
+
+def _fix_absolute_e_values(lines: list[str], e_re) -> None:
+    """Renumber absolute E values after reordering lines.
+
+    Scans for E parameters in G0/G1 lines, computes deltas from the
+    original sequence, and reassigns cumulative absolute E values
+    based on the new order.
+
+    Args:
+        lines: List of G-code lines (modified in place).
+        e_re: Compiled regex for extracting E values.
+    """
+    # First pass: extract E deltas.
+    prev_e = 0.0
+    e_deltas: list[tuple[int, float]] = []  # (line_index, e_delta)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("G0") or stripped.startswith("G1")):
+            continue
+        m = e_re.search(stripped)
+        if m:
+            e_val = float(m.group(1))
+            delta = e_val - prev_e
+            e_deltas.append((idx, delta))
+            prev_e = e_val
+
+    # Second pass: reassign cumulative E values.
+    cumulative_e = 0.0
+    # Find the starting E from before this chunk (first E delta gives us
+    # the offset).  For simplicity, start from whatever the first E value
+    # was in the ORIGINAL order.  We need the E value just before this
+    # chunk starts.  Since we're modifying in place, we can extract
+    # the first E value from the preamble.
+    first_e_found = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("G0") or stripped.startswith("G1")):
+            continue
+        m = e_re.search(stripped)
+        if m:
+            # First E value in the chunk — this is our starting point.
+            # In the original order, the first E might have been on a
+            # different line.  For safety, start cumulative from 0 and
+            # add all deltas.
+            cumulative_e = float(m.group(1)) - e_deltas[0][1] if e_deltas else 0.0
+            first_e_found = True
+            break
+
+    if not first_e_found or not e_deltas:
+        return
+
+    # Apply deltas in the new order.
+    delta_idx = 0
+    for line_idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("G0") or stripped.startswith("G1")):
+            continue
+        m = e_re.search(stripped)
+        if m and delta_idx < len(e_deltas):
+            _, delta = e_deltas[delta_idx]
+            cumulative_e += delta
+            # Replace the E value in the line.
+            old_e_str = m.group(0)  # "E1234.56789"
+            new_e_str = f"E{cumulative_e:.5f}"
+            lines[line_idx] = line.replace(old_e_str, new_e_str, 1)
+            delta_idx += 1
