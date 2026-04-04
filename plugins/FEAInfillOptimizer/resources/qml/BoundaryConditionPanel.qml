@@ -17,25 +17,31 @@ Item
     // Convenience aliases from tool property bag
     readonly property string currentMode:      toolProperties.getValue("Mode")             ?? "fixed"
     readonly property string selectionSummary: toolProperties.getValue("SelectionSummary") ?? ""
-    readonly property real   forceX:           toolProperties.getValue("ForceX")           ?? 0.0
-    readonly property real   forceY:           toolProperties.getValue("ForceY")           ?? 0.0
-    readonly property real   forceZ:           toolProperties.getValue("ForceZ")           ?? 0.0
+    readonly property real   forceX:           Number(toolProperties.getValue("ForceX")           ?? 0)
+    readonly property real   forceY:           Number(toolProperties.getValue("ForceY")           ?? 0)
+    readonly property real   forceZ:           Number(toolProperties.getValue("ForceZ")           ?? 0)
     readonly property string selectionMode:    toolProperties.getValue("SelectionMode")    ?? "single"
     readonly property int    activeSupportIdx: toolProperties.getValue("ActiveSupportIndex") ?? -1
     readonly property int    activeForceIdx:   toolProperties.getValue("ActiveForceIndex")   ?? -1
     readonly property var    supportListModel: JSON.parse(toolProperties.getValue("SupportListModel") ?? "[]")
     readonly property var    forceListModel:   JSON.parse(toolProperties.getValue("ForceListModel")   ?? "[]")
 
-    implicitWidth: columnLayout.implicitWidth
-    implicitHeight: columnLayout.implicitHeight
+    implicitWidth: 280 * screenScaleFactor
+    implicitHeight: 600 * screenScaleFactor
 
     UM.I18nCatalog { id: catalog; name: "cura" }
 
-    ColumnLayout
+    ScrollView
     {
-        id: columnLayout
         anchors.fill: parent
-        spacing: UM.Theme.getSize("default_margin").height
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+        ColumnLayout
+        {
+            id: columnLayout
+            width: bcPanel.width
+            spacing: UM.Theme.getSize("default_margin").height
 
         // ── Step guide (visible when no BCs defined) ────────────────────
         Rectangle
@@ -599,6 +605,7 @@ Item
         }
 
         // Bottom spacer
-        Item { Layout.fillHeight: true }
-    }
+        Item { height: UM.Theme.getSize("default_margin").height }
+        }  // ColumnLayout
+    }  // ScrollView
 }
