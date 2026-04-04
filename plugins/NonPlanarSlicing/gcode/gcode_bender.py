@@ -419,7 +419,19 @@ def bend_gcode(
             ax = move.abs_x - gcode_offset_x
             ay = move.abs_y - gcode_offset_y
             # Check if XY is in a non-planar region.
-            is_safe = _lookup_safe(safe_map, height_map, ax, ay)
+            # Check BOTH start and endpoint: if either is safe, bend the
+            # move.  This prevents paths from being fragmented when they
+            # cross the safe_map boundary — individual moves whose
+            # endpoint happens to land just outside the safe region would
+            # otherwise stay flat while adjacent moves are bent, creating
+            # isolated spikes instead of smooth contours.
+            endpoint_safe = _lookup_safe(safe_map, height_map, ax, ay)
+            start_safe = _lookup_safe(
+                safe_map, height_map,
+                prev_x - gcode_offset_x,
+                prev_y - gcode_offset_y,
+            ) if move_idx > 0 else False
+            is_safe = endpoint_safe or start_safe
             if not is_safe:
                 _diag_not_safe += 1
                 should_bend = False
@@ -431,8 +443,11 @@ def bend_gcode(
             if math.isnan(surface_z_check):
                 _diag_no_surface += 1
                 should_bend = False
-            elif move.abs_z > surface_z_check + layer_height:
+            elif move.abs_z > surface_z_check + 2 * layer_height:
                 # Move is above the surface — don't bend.
+                # Use 2x layer_height margin to prevent path fragmentation
+                # at the surface boundary (adjacent moves can differ by
+                # a fraction of layer_height in their local surface_z).
                 _diag_above += 1
                 should_bend = False
             elif move.abs_z < surface_z_check - max_bend_depth:

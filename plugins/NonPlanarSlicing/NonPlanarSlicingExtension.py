@@ -1333,22 +1333,27 @@ class _AnalysisJob(Job):
 
         # Step 5: Erode safe_map to remove isolated/narrow regions.
         # This prevents isolated raised paths that would print without
-        # neighboring support.  The erosion radius is min_region_width.
+        # neighboring support.  Uses a disk-shaped structuring element
+        # for smoother, more isotropic boundaries (a square element
+        # creates jagged corners that fragment toolpaths).
         safe_map = collision_result.safe_map
         min_region_width = settings.get("min_region_width", 2.0)
         resolution = settings["heightmap_resolution"]
         if min_region_width > 0.0 and resolution > 0.0:
-            erosion_cells = max(1, int(round(min_region_width / resolution)))
+            erosion_cells = max(1, int(round(min_region_width / (2.0 * resolution))))
             try:
                 from scipy.ndimage import binary_erosion, binary_dilation
-                # Erode then dilate (opening) to remove narrow features
-                # while preserving the shape of wide regions.
-                structure = numpy.ones((2 * erosion_cells + 1, 2 * erosion_cells + 1), dtype=bool)
+                # Build a disk-shaped structuring element (isotropic).
+                size = 2 * erosion_cells + 1
+                y, x = numpy.ogrid[-erosion_cells:erosion_cells+1,
+                                   -erosion_cells:erosion_cells+1]
+                structure = (x*x + y*y <= erosion_cells * erosion_cells).astype(bool)
+                # Morphological opening: erode then dilate.
                 eroded = binary_erosion(safe_map, structure=structure)
                 safe_map = binary_dilation(eroded, structure=structure).astype(bool)
                 removed = int(numpy.count_nonzero(collision_result.safe_map) - numpy.count_nonzero(safe_map))
                 if removed > 0:
-                    Logger.log("d", "  Region erosion: removed %d isolated cells (radius=%d cells)",
+                    Logger.log("d", "  Region erosion: removed %d isolated cells (radius=%d cells, disk)",
                                removed, erosion_cells)
             except ImportError:
                 # scipy not available — skip erosion
