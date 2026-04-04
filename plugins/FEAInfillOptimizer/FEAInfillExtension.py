@@ -121,15 +121,17 @@ class FEAInfillExtension(QObject, Extension):
         import json
         if node is None:
             return
-        if not hasattr(node, "callDecoration"):
+        # Guard against non-CuraSceneNode objects and partially-initialized nodes
+        if not isinstance(node, CuraSceneNode):
             return
-        bc = node.callDecoration("getBoundaryConditions")
-        if bc is not None and bc.hasAnyBC():
-            if not hasattr(node, "metadata"):
-                return
-            node.metadata[self._BC_METADATA_KEY] = json.dumps(bc.toDict())
-        elif hasattr(node, "metadata") and self._BC_METADATA_KEY in getattr(node, "metadata", {}):
-            del node.metadata[self._BC_METADATA_KEY]
+        try:
+            bc = node.callDecoration("getBoundaryConditions")
+            if bc is not None and bc.hasAnyBC():
+                node.metadata[self._BC_METADATA_KEY] = json.dumps(bc.toDict())
+            elif self._BC_METADATA_KEY in node.metadata:
+                del node.metadata[self._BC_METADATA_KEY]
+        except Exception:
+            pass  # Silently ignore errors during scene loading/unloading
 
     # -- Dialog --
 
