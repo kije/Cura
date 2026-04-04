@@ -22,7 +22,25 @@ UM.Dialog
 
     onVisibleChanged:
     {
-        if (visible) contentItem.refreshNodeList()
+        if (visible)
+        {
+            contentItem.refreshNodeList()
+            // Fallback: if manager wasn't bound yet when the component first
+            // became visible (race between QML init and .show()), retry once
+            // after a short delay so the engine has time to settle.
+            if (sceneNodeListModel.count === 0)
+                retryTimer.restart()
+        }
+    }
+
+    // Retry timer — fires once 150 ms after the dialog becomes visible if the
+    // node list is still empty (covers QML-engine init races on first open).
+    Timer
+    {
+        id: retryTimer
+        interval: 150
+        repeat: false
+        onTriggered: contentItem.refreshNodeList()
     }
 
     Item
@@ -36,7 +54,11 @@ UM.Dialog
         function refreshNodeList()
         {
             sceneNodeListModel.clear()
-            if (!manager) return
+            if (!manager)
+            {
+                console.log("FEA: refreshNodeList — manager not bound yet, will retry")
+                return
+            }
 
             var nodes = manager.getSceneNodes()
             if (!nodes || nodes.length === undefined) return

@@ -166,8 +166,13 @@ class FEAInfillExtension(QObject, Extension):
             Logger.log("e", "FEA Infill: Dialog is None, cannot show")
 
     def _ensureDialog(self) -> None:
-        # Always recreate — createQmlComponent can return None on error
-        # and we want to retry with fixed QML on next attempt.
+        # Cache the dialog — only create once. Recreating on every call causes
+        # the `manager` context property to not yet be bound when
+        # onVisibleChanged fires immediately after .show(), resulting in
+        # refreshNodeList() returning early with an empty model.
+        # Only retry creation if the previous attempt returned None (QML error).
+        if self._dialog is not None:
+            return
         plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
         if not plugin_path:
             Logger.log("e", "FEA Infill: Could not find plugin path")
