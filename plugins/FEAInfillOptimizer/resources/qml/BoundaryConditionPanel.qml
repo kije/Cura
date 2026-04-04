@@ -56,7 +56,7 @@ Item
                 text: catalog.i18nc("@action:button", "Support / Mount")
                 toolItem: UM.ColorImage
                 {
-                    source: UM.Theme.getIcon("Support")
+                    source: Qt.resolvedUrl("../icons/mount.svg")
                     color: UM.Theme.getColor("icon")
                     width: UM.Theme.getSize("button_icon").width
                     height: UM.Theme.getSize("button_icon").height
@@ -72,7 +72,7 @@ Item
                 text: catalog.i18nc("@action:button", "Apply Load")
                 toolItem: UM.ColorImage
                 {
-                    source: UM.Theme.getIcon("ArrowDown")
+                    source: Qt.resolvedUrl("../icons/force.svg")
                     color: UM.Theme.getColor("icon")
                     width: UM.Theme.getSize("button_icon").width
                     height: UM.Theme.getSize("button_icon").height
@@ -134,39 +134,67 @@ Item
             font: UM.Theme.getFont("medium_bold")
         }
 
-        Row
+        RowLayout
         {
             spacing: UM.Theme.getSize("default_margin").width / 4
 
-            RadioButton
+            UM.ToolbarButton
             {
-                id: singleMode
-                text: catalog.i18nc("@option", "Single")
+                checkable: true
                 checked: bcPanel.selectionMode === "single"
+                text: catalog.i18nc("@option", "Single")
+                toolItem: UM.ColorImage
+                {
+                    source: Qt.resolvedUrl("../icons/select_single.svg")
+                    color: UM.Theme.getColor("icon")
+                    width: UM.Theme.getSize("button_icon").width
+                    height: UM.Theme.getSize("button_icon").height
+                }
                 onClicked: UM.Controller.setProperty("SelectionMode", "single")
             }
 
-            RadioButton
+            UM.ToolbarButton
             {
-                id: flatMode
-                text: catalog.i18nc("@option", "Surface")
+                checkable: true
                 checked: bcPanel.selectionMode === "flat"
+                text: catalog.i18nc("@option", "Surface")
+                toolItem: UM.ColorImage
+                {
+                    source: Qt.resolvedUrl("../icons/select_surface.svg")
+                    color: UM.Theme.getColor("icon")
+                    width: UM.Theme.getSize("button_icon").width
+                    height: UM.Theme.getSize("button_icon").height
+                }
                 onClicked: UM.Controller.setProperty("SelectionMode", "flat")
             }
 
-            RadioButton
+            UM.ToolbarButton
             {
-                id: holeMode
-                text: catalog.i18nc("@option", "Hole")
+                checkable: true
                 checked: bcPanel.selectionMode === "hole"
+                text: catalog.i18nc("@option", "Hole")
+                toolItem: UM.ColorImage
+                {
+                    source: Qt.resolvedUrl("../icons/select_hole.svg")
+                    color: UM.Theme.getColor("icon")
+                    width: UM.Theme.getSize("button_icon").width
+                    height: UM.Theme.getSize("button_icon").height
+                }
                 onClicked: UM.Controller.setProperty("SelectionMode", "hole")
             }
 
-            RadioButton
+            UM.ToolbarButton
             {
-                id: cylinderMode
-                text: catalog.i18nc("@option", "Cylinder")
+                checkable: true
                 checked: bcPanel.selectionMode === "cylinder"
+                text: catalog.i18nc("@option", "Cylinder")
+                toolItem: UM.ColorImage
+                {
+                    source: Qt.resolvedUrl("../icons/select_cylinder.svg")
+                    color: UM.Theme.getColor("icon")
+                    width: UM.Theme.getSize("button_icon").width
+                    height: UM.Theme.getSize("button_icon").height
+                }
                 onClicked: UM.Controller.setProperty("SelectionMode", "cylinder")
             }
         }
