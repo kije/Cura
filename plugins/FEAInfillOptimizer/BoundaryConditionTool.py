@@ -303,6 +303,9 @@ class BoundaryConditionTool(Tool):
 
     def setActiveForceIndex(self, index: int) -> None:
         self._active_force_index = int(index)
+        # Switch to rotate mode so the gizmo is interactive
+        if self._active_force_index >= 0:
+            self._mode = MODE_ROTATE
         # Sync Fx/Fy/Fz to show the selected force group's values
         selected = Selection.getSelectedObject(0)
         if selected is not None:
@@ -334,6 +337,7 @@ class BoundaryConditionTool(Tool):
                                 scale = 1.0
                             self._force_handle.show_at(centroid, scale=scale)
         self.propertyChanged.emit()
+        self._update_highlights()
 
     # ── Delete trigger properties ───────────────────────────────────────────
 

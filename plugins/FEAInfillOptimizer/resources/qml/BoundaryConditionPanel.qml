@@ -56,7 +56,7 @@ Item
                 text: catalog.i18nc("@action:button", "Support / Mount")
                 toolItem: UM.ColorImage
                 {
-                    source: UM.Theme.getIcon("Lock")
+                    source: UM.Theme.getIcon("Support")
                     color: UM.Theme.getColor("icon")
                     width: UM.Theme.getSize("button_icon").width
                     height: UM.Theme.getSize("button_icon").height
@@ -72,7 +72,7 @@ Item
                 text: catalog.i18nc("@action:button", "Apply Load")
                 toolItem: UM.ColorImage
                 {
-                    source: UM.Theme.getIcon("ArrowRight")
+                    source: UM.Theme.getIcon("ArrowDown")
                     color: UM.Theme.getColor("icon")
                     width: UM.Theme.getSize("button_icon").width
                     height: UM.Theme.getSize("button_icon").height

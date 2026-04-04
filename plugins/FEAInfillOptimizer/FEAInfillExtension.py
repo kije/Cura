@@ -92,6 +92,45 @@ class FEAInfillExtension(QObject, Extension):
             self._deps_available = self._dep_manager.all_available()
             self.depsAvailableChanged.emit()
 
+        # Connect to scene events for BC persistence in 3MF files.
+        app = CuraApplication.getInstance()
+        app.fileLoaded.connect(self._onFileLoaded)
+        app.getController().getScene().sceneChanged.connect(self._onSceneChangedForPersistence)
+
+    _BC_METADATA_KEY = "fea_infill_boundary_conditions"
+
+    def _onFileLoaded(self, filename: str) -> None:
+        """Restore BC decorators from node metadata after loading a 3MF."""
+        import json
+        from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
+        from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
+        scene = CuraApplication.getInstance().getController().getScene()
+        for node in DepthFirstIterator(scene.getRoot()):
+            if hasattr(node, "metadata") and self._BC_METADATA_KEY in getattr(node, "metadata", {}):
+                try:
+                    bc_data = json.loads(node.metadata[self._BC_METADATA_KEY])
+                    decorator = FEABoundaryConditionDecorator()
+                    decorator.fromDict(bc_data)
+                    node.addDecorator(decorator)
+                    Logger.log("d", "FEA Infill: Restored BCs for node '%s'", node.getName())
+                except Exception:
+                    Logger.logException("w", "FEA Infill: Failed to restore BCs for node '%s'", node.getName())
+
+    def _onSceneChangedForPersistence(self, node) -> None:
+        """Persist BC data to node metadata so it's saved in 3MF."""
+        import json
+        if node is None:
+            return
+        if not hasattr(node, "callDecoration"):
+            return
+        bc = node.callDecoration("getBoundaryConditions")
+        if bc is not None and bc.hasAnyBC():
+            if not hasattr(node, "metadata"):
+                return
+            node.metadata[self._BC_METADATA_KEY] = json.dumps(bc.toDict())
+        elif hasattr(node, "metadata") and self._BC_METADATA_KEY in getattr(node, "metadata", {}):
+            del node.metadata[self._BC_METADATA_KEY]
+
     # -- Dialog --
 
     def showDialog(self) -> None:

@@ -20,9 +20,6 @@ UM.Dialog
     property var manager  // bound to FEAInfillExtension Python object from caller
     backgroundColor: UM.Theme.getColor("main_background")
 
-    // Scene node list model (populated from Python on dialog open)
-    ListModel { id: sceneNodeListModel }
-
     function refreshNodeList()
     {
         sceneNodeListModel.clear()
@@ -68,6 +65,7 @@ UM.Dialog
         anchors.fill: parent
 
         UM.I18nCatalog { id: catalog; name: "cura" }
+        ListModel { id: sceneNodeListModel }
 
         ScrollView
         {
