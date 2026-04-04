@@ -1,7 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <!-- Large downward arrow (force) -->
-  <line x1="12" y1="3" x2="12" y2="17" />
-  <polyline points="6,12 12,18 18,12" />
-  <!-- Surface/object being pressed -->
-  <rect x="5" y="19" width="14" height="3" rx="1" />
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <rect x="11" y="2" width="2" height="14" fill="#ffffff"/>
+  <polygon points="6,14 12,21 18,14" fill="#ffffff"/>
 </svg>
