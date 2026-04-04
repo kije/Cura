@@ -18,30 +18,49 @@ UM.Dialog
     minimumHeight: 600 * screenScaleFactor
 
     property var manager  // bound to FEAInfillExtension Python object from caller
-    property var sceneNodeModel: []
     backgroundColor: UM.Theme.getColor("main_background")
 
-    onVisibleChanged:
-    {
-        if (visible && manager)
-        {
-            sceneNodeModel = manager.getSceneNodes()
+    // Scene node list model (populated from Python on dialog open)
+    ListModel { id: sceneNodeListModel }
 
-            // If a node was pre-selected (from BC tool's "Confirm and Optimize"),
-            // find and select it in the ComboBox.
-            var preKey = manager.preselectedNodeKey
-            if (preKey && preKey !== "")
+    function refreshNodeList()
+    {
+        sceneNodeListModel.clear()
+        if (!manager) return
+
+        var nodes = manager.getSceneNodes()
+        if (!nodes) return
+
+        for (var i = 0; i < nodes.length; i++)
+        {
+            sceneNodeListModel.append({"name": nodes[i].name, "nodeId": nodes[i].id})
+        }
+
+        // If a node was pre-selected (from BC tool's "Confirm and Optimize"),
+        // find and select it in the ComboBox.
+        var preKey = manager.preselectedNodeKey
+        if (preKey && preKey !== "")
+        {
+            for (var j = 0; j < sceneNodeListModel.count; j++)
             {
-                for (var i = 0; i < sceneNodeModel.length; i++)
+                if (sceneNodeListModel.get(j).nodeId === preKey)
                 {
-                    if (sceneNodeModel[i].id === preKey)
-                    {
-                        nodeSelector.currentIndex = i
-                        break
-                    }
+                    nodeSelector.currentIndex = j
+                    return
                 }
             }
         }
+
+        // Default: select first item if any
+        if (sceneNodeListModel.count > 0)
+        {
+            nodeSelector.currentIndex = 0
+        }
+    }
+
+    onVisibleChanged:
+    {
+        if (visible) refreshNodeList()
     }
 
     Item
@@ -121,7 +140,7 @@ UM.Dialog
 
             UM.Label
             {
-                visible: feaDialog.sceneNodeModel.length === 0
+                visible: sceneNodeListModel.count === 0
                 Layout.fillWidth: true
                 text: catalog.i18nc("@info", "No models loaded. Load a model first, then re-open this dialog.")
                 color: UM.Theme.getColor("text_medium")
@@ -132,10 +151,10 @@ UM.Dialog
             {
                 id: nodeSelector
                 Layout.fillWidth: true
-                visible: feaDialog.sceneNodeModel.length > 0
+                visible: sceneNodeListModel.count > 0
                 textRole: "name"
-                valueRole: "id"
-                model: feaDialog.sceneNodeModel
+                valueRole: "nodeId"
+                model: sceneNodeListModel
             }
 
             // ── Material preset ─────────────────────────────────────────────
