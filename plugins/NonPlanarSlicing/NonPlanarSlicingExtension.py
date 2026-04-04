@@ -251,14 +251,21 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
     def _injectSettings(self, container: DefinitionContainer,
                         category: SettingDefinition) -> None:
-        """Inject setting definitions into a category."""
+        """Inject setting definitions into a category.
+
+        Handles nested ``children`` structures: after deserializing, all
+        child definitions are recursively added to the container's
+        definition cache so Cura can resolve them by key.
+        """
+        expanded_categories = Application.getInstance().expandedCategories.copy()
+
         for setting_key, setting_data in self._settings_dict.items():
             # Check if this setting already exists (avoid duplicates on reload)
-            if container.findDefinitions(key=setting_key):
+            if setting_key in container._definition_cache:
                 continue
 
             try:
-                setting_definition = SettingDefinition(setting_key, container, category)
+                setting_definition = SettingDefinition(setting_key, container, category, None)
                 setting_definition.deserialize(setting_data)
 
                 # Add to the category's children
@@ -267,8 +274,35 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 # Update the container's definition cache
                 container._definition_cache[setting_key] = setting_definition
 
+                # Recursively cache any child definitions so Cura can
+                # look them up by key (needed for nested children).
+                self._cacheChildDefinitions(container, setting_definition, expanded_categories)
+
+                Application.getInstance().setExpandedCategories(expanded_categories)
+
+                # Establish setting relations (enabled, value, etc.)
+                container._updateRelations(setting_definition)
+
             except Exception:
                 Logger.logException("e", "Failed to inject setting: %s", setting_key)
+
+    def _cacheChildDefinitions(
+        self,
+        container: DefinitionContainer,
+        setting_definition: SettingDefinition,
+        expanded_categories: list,
+    ) -> None:
+        """Recursively add child definitions to the container's definition cache."""
+        children = setting_definition.children
+        if not children or not setting_definition.parent:
+            return
+
+        if setting_definition.parent.key in expanded_categories:
+            expanded_categories.append(setting_definition.key)
+
+        for child in children:
+            container._definition_cache[child.key] = child
+            self._cacheChildDefinitions(container, child, expanded_categories)
 
     def _makeSettingsVisible(self) -> None:
         """Add our settings to the visible settings preference."""
@@ -278,7 +312,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
             if visible_settings is None:
                 return
 
-            our_keys = set(self._settings_dict.keys())
+            our_keys = set(self._getAllSettingKeys(self._settings_dict))
             current_visible = set(visible_settings.split(";"))
             missing = our_keys - current_visible
 
@@ -288,6 +322,15 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 Logger.log("d", "Added %d non-planar settings to visibility", len(missing))
         except Exception:
             Logger.logException("w", "Could not update setting visibility")
+
+    def _getAllSettingKeys(self, definition: dict) -> List[str]:
+        """Recursively collect all setting keys including nested children."""
+        keys = []
+        for key, data in definition.items():
+            keys.append(key)
+            if isinstance(data, dict) and "children" in data:
+                keys.extend(self._getAllSettingKeys(data["children"]))
+        return keys
 
     def _emitEnabledChangedForChildren(self) -> None:
         """Force the UI to refresh the 'enabled' state of all child settings.
