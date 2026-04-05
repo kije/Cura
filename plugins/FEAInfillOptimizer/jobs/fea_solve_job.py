@@ -169,5 +169,7 @@ class FEASolveJob(Job):
             )
 
         except Exception as exc:
-            self.setResult(None)
-            self.setError(exc)
+            import traceback
+            from UM.Logger import Logger
+            Logger.log("e", "FEA Infill: Analysis job failed:\n%s", traceback.format_exc())
+            self.setResult(exc)  # Pass the exception as result so Extension can display it

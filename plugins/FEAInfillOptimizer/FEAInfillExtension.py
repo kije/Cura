@@ -95,6 +95,19 @@ class FEAInfillExtension(QObject, Extension):
         plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
         if plugin_path:
             self._dep_manager = DependencyManager(plugin_path)
+
+            # Show platform warning on Linux
+            if not DependencyManager.is_platform_supported():
+                platform_msg = DependencyManager.platform_message()
+                if platform_msg:
+                    Logger.log("w", "FEA Infill: %s", platform_msg)
+                    Message(
+                        platform_msg,
+                        title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer — Platform Notice"),
+                        message_type=Message.MessageType.WARNING,
+                        lifetime=0
+                    ).show()
+
             self._recheckDeps()
 
     _recheck_count = 0
@@ -629,7 +642,16 @@ class FEAInfillExtension(QObject, Extension):
                 self._analysis_status = "error"
                 self._phase = "error"
                 self._results = None
-                Logger.log("e", "FEA Infill: Analysis failed: %s", str(result))
+                error_msg = str(result) if result is not None else "Unknown error (job returned None)"
+                Logger.log("e", "FEA Infill: Analysis failed: %s", error_msg)
+                # Show error to user
+                Message(
+                    i18n_catalog.i18nc("@info:status",
+                                       "FEA analysis failed: {error}").format(error=error_msg),
+                    title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
+                    message_type=Message.MessageType.ERROR,
+                    lifetime=0
+                ).show()
             else:
                 self._analysis_status = "complete"
                 self._phase = "review"
