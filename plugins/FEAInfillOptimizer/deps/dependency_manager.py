@@ -37,8 +37,25 @@ class DependencyManager:
         self._ensure_vendor_on_path()
 
     def _ensure_vendor_on_path(self) -> None:
+        """Add the _vendor/ directory (and its lib/ subdirectory) to paths.
+
+        The vendor dir contains the Python API (gmsh.py) and lib/ contains
+        the native shared library (libgmsh.*.dylib/.so/.dll).
+        """
         if os.path.isdir(self._vendor_dir) and self._vendor_dir not in sys.path:
             sys.path.insert(0, self._vendor_dir)
+
+        # Also add lib/ to the dynamic library search path for ctypes
+        lib_dir = os.path.join(self._vendor_dir, "lib")
+        if os.path.isdir(lib_dir):
+            # On macOS, ctypes uses DYLD_LIBRARY_PATH or direct path
+            # gmsh.py searches moduledir/lib/ which is _vendor/lib/ when
+            # gmsh.py is in _vendor/ — this should work automatically.
+            # But also add to PATH for Windows and LD_LIBRARY_PATH for Linux.
+            if sys.platform == "win32":
+                os.environ["PATH"] = lib_dir + os.pathsep + os.environ.get("PATH", "")
+            elif sys.platform == "linux":
+                os.environ["LD_LIBRARY_PATH"] = lib_dir + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
 
     def check_all(self) -> Dict[str, bool]:
         """Check which required packages are importable.
@@ -70,31 +87,29 @@ class DependencyManager:
     def get_install_command(self) -> List[str]:
         """Return the pip install command for missing packages.
 
-        In a frozen (PyInstaller) build, uses the system ``pip3`` or ``pip``
-        command to install into the plugin's ``_vendor/`` directory.  This
-        works because the vendor dir is on ``sys.path`` and the installed
-        packages are pure-Python or have compatible wheels.
+        Dependencies should be pre-vendored using ``vendor_deps.sh``.
+        This method is a fallback for non-frozen development environments.
+        In frozen builds, it attempts to use the system pip3.
         """
         missing = self.missing_packages()
         if not missing:
             return []
 
         if _is_frozen():
-            # In frozen builds, sys.executable is the Cura binary, not Python.
-            # Use system pip3/pip to install to the vendor dir.
             import shutil
             pip_cmd = shutil.which("pip3") or shutil.which("pip")
             if pip_cmd is None:
-                Logger.log("e", "FEA Infill: Cannot find pip3 or pip on PATH. "
-                           "Install missing packages manually: pip3 install --target '%s' %s",
-                           self._vendor_dir, " ".join(missing))
+                Logger.log("e", "FEA Infill: Missing packages %s. "
+                           "Run vendor_deps.sh from the plugin directory to bundle them.",
+                           missing)
                 return []
-            return [pip_cmd, "install", "--target", self._vendor_dir, "--upgrade"] + missing
+            return [pip_cmd, "install", "--target", self._vendor_dir,
+                    "--upgrade", "--no-deps"] + missing
 
         return [
             sys.executable, "-m", "pip", "install",
             "--target", self._vendor_dir,
-            "--upgrade",
+            "--upgrade", "--no-deps",
         ] + missing
 
     def post_install(self) -> None:
