@@ -104,20 +104,66 @@ def _run_gmsh(
     with _GMSH_LOCK:
         try:
             gmsh.initialize(interruptible=False)
-            gmsh.option.setNumber("General.Verbosity", 1)
+            # Max verbosity so gmsh logs its internal progress
+            gmsh.option.setNumber("General.Verbosity", 99)
+
+            # Log the STL file details for debugging
+            stl_size = os.path.getsize(stl_path)
+            with open(stl_path, 'r') as f:
+                first_line = f.readline().strip()
+            Logger.log("d", "FEA tet: STL file: %d bytes, first line: '%s'", stl_size, first_line[:80])
 
             # Import the STL surface mesh
             Logger.log("d", "FEA tet: merging STL...")
             gmsh.merge(stl_path)
 
-            # Create a volume from the imported surface using classifySurfaces.
-            # Set a timeout-like approach: run in a simpler mode first.
-            Logger.log("d", "FEA tet: classifying surfaces...")
+            # Log what gmsh got from the merge
+            entities_0d = gmsh.model.getEntities(0)
+            entities_1d = gmsh.model.getEntities(1)
+            entities_2d = gmsh.model.getEntities(2)
+            entities_3d = gmsh.model.getEntities(3)
+            Logger.log("d", "FEA tet: after merge — points=%d, curves=%d, surfaces=%d, volumes=%d",
+                       len(entities_0d), len(entities_1d), len(entities_2d), len(entities_3d))
+
+            node_tags_pre, _, _ = gmsh.model.mesh.getNodes()
+            elem_types_pre, _, _ = gmsh.model.mesh.getElements()
+            Logger.log("d", "FEA tet: after merge — %d mesh nodes, %d element types",
+                       len(node_tags_pre), len(elem_types_pre))
+
+            # Try classifySurfaces with a thread-based timeout
+            Logger.log("d", "FEA tet: attempting classifySurfaces (with 30s timeout)...")
             angle = 40.0
-            try:
-                gmsh.model.mesh.classifySurfaces(
-                    np.deg2rad(angle), True, True, np.deg2rad(180.0)
-                )
+            classify_result = [None]  # mutable container for thread result
+            classify_error = [None]
+
+            def _do_classify():
+                try:
+                    gmsh.model.mesh.classifySurfaces(
+                        np.deg2rad(angle), True, True, np.deg2rad(180.0)
+                    )
+                    classify_result[0] = True
+                except Exception as e:
+                    classify_error[0] = e
+
+            import threading as _threading
+            classify_thread = _threading.Thread(target=_do_classify, daemon=True)
+            classify_thread.start()
+            classify_thread.join(timeout=30.0)  # 30 second timeout
+
+            if classify_thread.is_alive():
+                Logger.log("e", "FEA tet: classifySurfaces TIMED OUT after 30s — "
+                           "this gmsh version may have a bug with this mesh. "
+                           "Attempting alternative approach...")
+                # classifySurfaces is stuck — we can't kill the thread but we can
+                # finalize gmsh and restart with a different approach
+                raise RuntimeError("classifySurfaces timed out after 30 seconds. "
+                                   "Try using a different mesh resolution.")
+
+            if classify_error[0]:
+                Logger.log("w", "FEA tet: classifySurfaces failed: %s", str(classify_error[0]))
+                Logger.log("w", "FEA tet: trying direct 3D mesh without volume definition...")
+            else:
+                Logger.log("d", "FEA tet: classifySurfaces completed OK")
                 Logger.log("d", "FEA tet: creating geometry...")
                 gmsh.model.mesh.createGeometry()
 
@@ -127,10 +173,8 @@ def _run_gmsh(
                     sl = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
                     gmsh.model.geo.addVolume([sl])
                     gmsh.model.geo.synchronize()
-            except Exception as e:
-                Logger.log("w", "FEA tet: classifySurfaces failed (%s), trying direct 3D mesh...", str(e))
-                # Fallback: just try to mesh directly — gmsh can sometimes
-                # generate a 3D mesh from a surface mesh without explicit volume
+                else:
+                    Logger.log("w", "FEA tet: no surfaces found after classify, trying direct mesh...")
 
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.1)
