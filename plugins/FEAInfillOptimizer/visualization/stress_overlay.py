@@ -147,18 +147,26 @@ class StressOverlayManager:
                 * ``"stress_field"`` – per-element von Mises stress array.
                 * ``"tet_mesh"`` – :class:`~..fea.tetrahedralization.TetMesh`.
         """
+        from UM.Logger import Logger
+
         stress_field: numpy.ndarray = numpy.asarray(results["stress_field"], dtype=numpy.float32)
         tet_mesh = results["tet_mesh"]
+
+        Logger.log("d", "FEA overlay: stress_field shape=%s, tet_mesh nodes=%d elems=%d",
+                   stress_field.shape, len(tet_mesh.nodes), len(tet_mesh.elements))
 
         # Obtain surface representation from the node's mesh data
         source_mesh = node.getMeshData()
         if source_mesh is None:
+            Logger.log("w", "FEA overlay: node has no mesh data")
             return
 
         raw_verts = source_mesh.getVertices()
         if raw_verts is None or len(raw_verts) == 0:
+            Logger.log("w", "FEA overlay: node has no vertices")
             return
         surface_verts = numpy.asarray(raw_verts, dtype=numpy.float64)
+        Logger.log("d", "FEA overlay: surface has %d vertices", len(surface_verts))
 
         # Map element stress to surface vertices
         vertex_stress = _map_element_stress_to_vertices(
@@ -182,7 +190,10 @@ class StressOverlayManager:
 
         # Build overlay MeshData with colours
         builder = MeshBuilder()
-        builder.setVertices(surface_verts.astype(numpy.float32))
+
+        # Offset vertices slightly along normals to prevent Z-fighting
+        offset_verts = surface_verts.copy().astype(numpy.float32)
+        builder.setVertices(offset_verts)
         builder.setColors(colors)
 
         surface_indices = source_mesh.getIndices()
@@ -190,18 +201,57 @@ class StressOverlayManager:
             builder.setIndices(numpy.asarray(surface_indices, dtype=numpy.int32))
 
         builder.calculateNormals()
+
+        # Apply normal offset for Z-fighting prevention
+        normals = builder.getNormals()
+        if normals is not None and len(normals) == len(offset_verts):
+            offset_verts += normals * 0.15  # 0.15mm offset
+            builder.setVertices(offset_verts)
+
         overlay_mesh = builder.build()
+        Logger.log("d", "FEA overlay: built mesh with %d verts, %d colors",
+                   len(offset_verts), len(colors))
 
         # Create overlay scene node
         application = CuraApplication.getInstance()
         global_stack = application.getGlobalContainerStack()
 
-        # Use a plain SceneNode (NOT CuraSceneNode) so no SettingOverrideDecorator
-        # or SliceableObjectDecorator is attached.  This makes the overlay purely
-        # visual — the slicer ignores it completely and it does not affect
-        # support generation, infill, or any other print parameter.
+        # Create overlay node that renders with the transparent_object shader.
+        # Uses the same approach as NonPlanarSlicing's region_overlay.py:
+        # custom SceneNode with render() method using transparent_object.shader.
         from UM.Scene.SceneNode import SceneNode
-        overlay_node = SceneNode()
+        from UM.View.GL.OpenGL import OpenGL
+
+        class _StressOverlayNode(SceneNode):
+            """SceneNode that renders per-vertex colored stress visualization."""
+
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._shader = None
+
+            def render(self, renderer):
+                if not self.getMeshData():
+                    return True
+                if self._shader is None:
+                    # Use the default shader which supports per-vertex colors
+                    self._shader = OpenGL.getInstance().createShaderProgram(
+                        Resources.getPath(Resources.Shaders, "default.shader")
+                    )
+                    if self._shader is None:
+                        return True
+
+                renderer.queueNode(
+                    self,
+                    shader=self._shader,
+                    transparent=True,
+                    backface_cull=False,
+                    sort=-8,
+                )
+                return True
+
+        from UM.Resources import Resources
+
+        overlay_node = _StressOverlayNode()
         overlay_node.setName(_OVERLAY_NAME)
         overlay_node.setSelectable(False)
         overlay_node.setMeshData(overlay_mesh)
@@ -218,7 +268,9 @@ class StressOverlayManager:
         grouped_op.addOperation(SetParentOperation(overlay_node, node))
         grouped_op.push()
 
-        # Notify the scene so renderers pick up the new node immediately
+        Logger.log("d", "FEA overlay: overlay node created with transparent shader, added to '%s'",
+                   node.getName())
+
         scene.sceneChanged.emit(overlay_node)
 
     # ------------------------------------------------------------------
