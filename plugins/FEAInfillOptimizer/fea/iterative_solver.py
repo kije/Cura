@@ -158,17 +158,13 @@ class IterativeFEASolver:
         for iteration in range(max_iter):
             _iter_start = _time.monotonic()
             # --- Homogenize ---
-            E_eff_arr = np.array(
-                [
-                    effective_properties(material.E_xy, material.nu, float(rho), pattern)[0]
-                    for rho in density
-                ],
-                dtype=np.float64,
-            )
+            # Vectorized: compute E_eff for all elements at once
+            n_exp = {'lines': 1.0, 'grid': 2.0, 'triangles': 1.3, 'gyroid': 1.6,
+                     'cubic': 2.0, 'honeycomb': 2.3}.get(pattern, 1.5)
+            E_eff_arr = material.E_xy * np.power(density, n_exp)
             nu_arr = np.full(n_elems, material.nu, dtype=np.float64)
-
-            # --- Assemble & apply BCs ---
             _t1 = _time.monotonic()
+            Logger.log("d", "FEA iter %d: homogenize=%.3fs", iteration + 1, _t1 - _iter_start)
             K = fea_solver.assemble_stiffness_matrix(
                 tet_mesh, E_eff_arr, nu_arr, bonding_coeff=bonding_coeff
             )
