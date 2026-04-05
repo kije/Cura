@@ -204,6 +204,7 @@ def bend_gcode(
     safe_map: NDArray[np.bool_],
     blend_map: NDArray[np.floating],
     settings: dict[str, Any],
+    deformation_field: Any = None,
 ) -> list[str]:
     """Apply non-planar Z-bending to Cura G-code.
 
@@ -231,6 +232,10 @@ def bend_gcode(
             - ``is_relative_extrusion`` (bool): extrusion mode.
             - ``segment_length`` (float, optional): subdivision
               length, default 1.0 mm.
+        deformation_field: Optional DeformationField for curvislicer
+            mode.  When provided and surface_mode is 'curvislicer',
+            Z bending uses the deformation field instead of the
+            blend-factor approach.
 
     Returns:
         Modified gcode_list with non-planar Z offsets applied.
@@ -310,14 +315,19 @@ def bend_gcode(
         if nonplanar_layer_count == 0:
             nonplanar_layer_count = 5
 
-    # In "all_surfaces" mode, all layers are candidates — eligibility
-    # is determined per-move based on proximity to the surface height
-    # map.  In "top_only" mode, only the topmost N layers are bent.
-    all_surfaces_mode = surface_mode == "all_surfaces"
+    # Determine mode and target layers.
+    # "curvislicer" and "curvislicer_mesh" modes use the deformation
+    # field approach — all layers are candidates with Z from the field.
+    curvislicer_mode = surface_mode in ("curvislicer", "curvislicer_mesh")
+    all_surfaces_mode = surface_mode == "all_surfaces" or curvislicer_mode
+    use_deformation_field = curvislicer_mode and deformation_field is not None
     if all_surfaces_mode:
         target_layers = set(range(0, max_layer + 1))
         # Max depth below surface to consider for bending (mm).
         max_bend_depth = nonplanar_layer_count * layer_height
+        if curvislicer_mode:
+            # In curvislicer mode, bend all layers regardless of depth.
+            max_bend_depth = float("inf")
     else:
         top_layer_start = max(0, max_layer - nonplanar_layer_count + 1)
         target_layers = set(range(top_layer_start, max_layer + 1))
@@ -497,6 +507,9 @@ def bend_gcode(
                 # Outside the height map -- no bending, pass through.
                 bent_z = sz
                 _diag_nan_interp += 1
+            elif use_deformation_field:
+                # CurviSlicer mode: use the deformation field directly.
+                bent_z = deformation_field.get_target_z(sax, say, sz)
             else:
                 # Compute target Z: surface minus layers_from_top offsets.
                 target_z = surface_z - layers_from_top * layer_height
@@ -570,18 +583,24 @@ def bend_gcode(
             # Flow compensation.
             final_e_delta = e_delta
             if flow_compensation and layer_height > 0.0:
-                # Compute the Z of the layer directly below at this XY.
-                # For conformal layers that follow the surface contour,
-                # the layer below sits at: surface_z - (layers_from_top+1) * layer_height.
-                if not math.isnan(surface_z):
-                    layer_below_z = surface_z - (layers_from_top + 1) * layer_height
+                if use_deformation_field:
+                    # CurviSlicer mode: get thickness directly from field.
+                    actual_lh = deformation_field.get_local_thickness(
+                        sax, say, sz, layer_height,
+                    )
                 else:
-                    layer_below_z = None
-                actual_lh = compute_actual_layer_height(
-                    bent_z,
-                    layer_below_z,
-                    layer_height,
-                )
+                    # Compute the Z of the layer directly below at this XY.
+                    # For conformal layers that follow the surface contour,
+                    # the layer below sits at: surface_z - (layers_from_top+1) * layer_height.
+                    if not math.isnan(surface_z):
+                        layer_below_z = surface_z - (layers_from_top + 1) * layer_height
+                    else:
+                        layer_below_z = None
+                    actual_lh = compute_actual_layer_height(
+                        bent_z,
+                        layer_below_z,
+                        layer_height,
+                    )
                 # Path length ratio: the bent 3D path is longer than
                 # the original planar path.  More material must be
                 # deposited over the longer distance.

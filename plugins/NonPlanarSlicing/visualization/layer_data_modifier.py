@@ -76,6 +76,7 @@ class LayerDataModifier:
         total_layers: int,
         surface_mode: str = "all_surfaces",
         nozzle_clearance: float = 0.0,
+        deformation_field=None,
     ) -> None:
         self._height_map = height_map
         self._safe_map = numpy.asarray(safe_map, dtype=bool)
@@ -84,6 +85,8 @@ class LayerDataModifier:
         self._nonplanar_layer_count = int(nonplanar_layer_count)
         self._total_layers = int(total_layers)
         self._surface_mode = surface_mode
+        self._deformation_field = deformation_field
+        self._curvislicer_mode = surface_mode in ("curvislicer", "curvislicer_mesh")
         # Maximum Z displacement for unsupported-extrusion protection.
         if nozzle_clearance > 0.0:
             self._max_z_displacement = nozzle_clearance
@@ -118,7 +121,7 @@ class LayerDataModifier:
         if not sorted_layer_numbers:
             return False
 
-        all_surfaces_mode = self._surface_mode == "all_surfaces"
+        all_surfaces_mode = self._surface_mode == "all_surfaces" or self._curvislicer_mode
         max_bend_depth = self._nonplanar_layer_count * self._layer_height
 
         if all_surfaces_mode:
@@ -334,6 +337,19 @@ class LayerDataModifier:
 
         if not self._safe_map[row, col]:
             return None
+
+        # CurviSlicer mode: use deformation field directly.
+        if self._curvislicer_mode and self._deformation_field is not None:
+            bent_z = self._deformation_field.get_target_z(
+                slicing_x, slicing_y, original_height,
+            )
+            # Safety clamps.
+            z_displacement = bent_z - original_height
+            if abs(z_displacement) > self._max_z_displacement:
+                bent_z = original_height + math.copysign(self._max_z_displacement, z_displacement)
+            if bent_z < 0.0:
+                bent_z = max(0.05, original_height)
+            return bent_z
 
         blend = float(self._blend_map[row, col])
         if blend <= 0.0:

@@ -30,11 +30,13 @@
         },
         "nonplanar_surface_mode": {
             "label": "Non-Planar Surface Mode",
-            "description": "Which surfaces to apply non-planar slicing to. 'top_only' bends only the topmost N layers. 'all_surfaces' analyzes the entire model and bends layers near any suitable inclined surface.",
+            "description": "Which surfaces to apply non-planar slicing to. 'top_only' bends only the topmost N layers. 'all_surfaces' analyzes the entire model and bends layers near any suitable inclined surface. 'curvislicer' curves ALL layers using a smooth deformation field with exponential decay. 'curvislicer_mesh' (experimental) deforms the mesh before slicing for genuinely curved infill.",
             "type": "enum",
             "options": {
                 "top_only": "Top Layers Only",
-                "all_surfaces": "All Suitable Surfaces"
+                "all_surfaces": "All Suitable Surfaces",
+                "curvislicer": "Extended Mode (All Layers)",
+                "curvislicer_mesh": "Extended Mode - Curved Infill (Experimental)"
             },
             "default_value": "all_surfaces",
             "enabled": "nonplanar_enabled",
@@ -193,6 +195,60 @@
             "maximum_value": "1.0",
             "minimum_value_warning": "0.3",
             "enabled": "nonplanar_enabled and nonplanar_flow_compensation",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_field_decay_mm": {
+            "label": "Non-Planar Deformation Decay Distance",
+            "description": "Controls how quickly the surface deformation diminishes for deeper layers (mm). Larger values produce smoother, more gradual transitions but affect more layers. Only used in Extended Mode.",
+            "type": "float",
+            "unit": "mm",
+            "default_value": 5.0,
+            "minimum_value": "0.5",
+            "maximum_value": "50.0",
+            "maximum_value_warning": "20.0",
+            "enabled": "nonplanar_enabled and (nonplanar_surface_mode == 'curvislicer' or nonplanar_surface_mode == 'curvislicer_mesh')",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_min_thickness_ratio": {
+            "label": "Non-Planar Min Layer Thickness Ratio",
+            "description": "Minimum allowed layer thickness as a fraction of the nominal layer height. Prevents layers from becoming too thin after deformation. Only used in Extended Mode.",
+            "type": "float",
+            "default_value": 0.5,
+            "minimum_value": "0.1",
+            "maximum_value": "1.0",
+            "minimum_value_warning": "0.3",
+            "enabled": "nonplanar_enabled and (nonplanar_surface_mode == 'curvislicer' or nonplanar_surface_mode == 'curvislicer_mesh')",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_max_thickness_ratio": {
+            "label": "Non-Planar Max Layer Thickness Ratio",
+            "description": "Maximum allowed layer thickness as a fraction of the nominal layer height. Prevents layers from becoming too thick after deformation. Only used in Extended Mode.",
+            "type": "float",
+            "default_value": 2.0,
+            "minimum_value": "1.0",
+            "maximum_value": "5.0",
+            "maximum_value_warning": "3.0",
+            "enabled": "nonplanar_enabled and (nonplanar_surface_mode == 'curvislicer' or nonplanar_surface_mode == 'curvislicer_mesh')",
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
+        },
+        "nonplanar_optimization_resolution": {
+            "label": "Non-Planar Deformation Grid Resolution",
+            "description": "Grid cell size (mm) for computing the deformation field. Larger values are faster but less precise. Set to 0 to use the height map resolution directly. Only used in Extended Mode.",
+            "type": "float",
+            "unit": "mm",
+            "default_value": 2.0,
+            "minimum_value": "0.0",
+            "maximum_value": "10.0",
+            "maximum_value_warning": "5.0",
+            "enabled": "nonplanar_enabled and (nonplanar_surface_mode == 'curvislicer' or nonplanar_surface_mode == 'curvislicer_mesh')",
             "settable_per_mesh": false,
             "settable_per_extruder": false,
             "settable_per_meshgroup": false

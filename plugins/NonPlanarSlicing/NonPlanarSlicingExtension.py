@@ -58,6 +58,10 @@ SETTING_SAFETY_MARGIN = "nonplanar_safety_margin"
 SETTING_MIN_BENEFIT_ANGLE = "nonplanar_min_benefit_angle"
 SETTING_MAX_FLOW_MULTIPLIER = "nonplanar_max_flow_multiplier"
 SETTING_MIN_FLOW_MULTIPLIER = "nonplanar_min_flow_multiplier"
+SETTING_FIELD_DECAY_MM = "nonplanar_field_decay_mm"
+SETTING_MIN_THICKNESS_RATIO = "nonplanar_min_thickness_ratio"
+SETTING_MAX_THICKNESS_RATIO = "nonplanar_max_thickness_ratio"
+SETTING_OPTIMIZATION_RESOLUTION = "nonplanar_optimization_resolution"
 
 # Existing Cura settings we read from the printer profile
 MACHINE_HEAD_POLYGON = "machine_head_with_fans_polygon"
@@ -82,6 +86,10 @@ SETTINGS_INVALIDATE_ANALYSIS = frozenset([
     SETTING_HEIGHTMAP_RESOLUTION,
     SETTING_SAFETY_MARGIN,
     SETTING_MIN_BENEFIT_ANGLE,
+    SETTING_FIELD_DECAY_MM,
+    SETTING_MIN_THICKNESS_RATIO,
+    SETTING_MAX_THICKNESS_RATIO,
+    SETTING_OPTIMIZATION_RESOLUTION,
     MACHINE_HEAD_POLYGON,
     MACHINE_GANTRY_HEIGHT,
     MACHINE_NOZZLE_EXPANSION_ANGLE,
@@ -164,6 +172,17 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
         # Track whether we've already post-processed the current slice
         self._postprocessing_done_for_gcode = False
+
+        # Phase II (curvislicer_mesh): Track original meshes for swap/restore.
+        self._mesh_swap_originals: Dict[int, tuple] = {}  # id(node) → (node, MeshData)
+        self._mesh_swap_active = False
+
+        # Connect slicingStarted for mesh swap (Phase II).
+        if backend is not None:
+            try:
+                backend.slicingStarted.connect(self._onSlicingStarted)
+            except AttributeError:
+                pass  # Signal may not exist in all Cura versions.
 
         Logger.log("i", "Non-Planar Slicing plugin initialized")
 
@@ -306,6 +325,11 @@ class NonPlanarSlicingExtension(QObject, Extension):
             "min_benefit_angle_deg": float(self._getSetting(SETTING_MIN_BENEFIT_ANGLE, 5.0)),
             "max_flow_multiplier": float(self._getSetting(SETTING_MAX_FLOW_MULTIPLIER, 2.0)),
             "min_flow_multiplier": float(self._getSetting(SETTING_MIN_FLOW_MULTIPLIER, 0.5)),
+            # Extended mode (curvislicer) settings
+            "field_decay_mm": float(self._getSetting(SETTING_FIELD_DECAY_MM, 5.0)),
+            "min_thickness_ratio": float(self._getSetting(SETTING_MIN_THICKNESS_RATIO, 0.5)),
+            "max_thickness_ratio": float(self._getSetting(SETTING_MAX_THICKNESS_RATIO, 2.0)),
+            "optimization_resolution": float(self._getSetting(SETTING_OPTIMIZATION_RESOLUTION, 2.0)),
             # Machine settings (read-only from printer profile)
             "printhead_polygon": self._getSetting(MACHINE_HEAD_POLYGON, [[-20, 10], [10, 10], [10, -10], [-20, -10]]),
             "gantry_height": float(self._getSetting(MACHINE_GANTRY_HEIGHT, 99999)),
@@ -663,12 +687,28 @@ class NonPlanarSlicingExtension(QObject, Extension):
         settings = self._getSettings()
         try:
             t0 = time.time()
-            modified_gcode = self._bendGCode(gcode_list, analysis_result, settings)
-            gcode_dict[active_plate] = modified_gcode
-            setattr(scene, "gcode_dict", gcode_dict)
-            Logger.log("i", "Non-planar G-code bending completed in %.2fs", time.time() - t0)
+
+            # Phase II: If mesh swap was active, restore meshes and
+            # back-transform G-code instead of standard bending.
+            if self._mesh_swap_active and settings.get("surface_mode") == "curvislicer_mesh":
+                self._restoreMeshes()
+                modified_gcode = self._backTransformGCode(
+                    gcode_list, analysis_result, settings,
+                )
+                gcode_dict[active_plate] = modified_gcode
+                setattr(scene, "gcode_dict", gcode_dict)
+                Logger.log("i", "curvislicer_mesh: G-code back-transform completed in %.2fs",
+                           time.time() - t0)
+            else:
+                modified_gcode = self._bendGCode(gcode_list, analysis_result, settings)
+                gcode_dict[active_plate] = modified_gcode
+                setattr(scene, "gcode_dict", gcode_dict)
+                Logger.log("i", "Non-planar G-code bending completed in %.2fs", time.time() - t0)
         except Exception:
             Logger.logException("e", "Failed to apply non-planar G-code bending after slicing")
+            # Ensure meshes are restored even on failure.
+            if self._mesh_swap_active:
+                self._restoreMeshes()
 
     def _onWriteStarted(self, output_device) -> None:
         """Post-process G-code before export: apply non-planar bending."""
@@ -778,6 +818,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
             safe_map=analysis.safe_map,
             blend_map=analysis.blend_map,
             settings=bender_settings,
+            deformation_field=analysis.deformation_field,
         )
 
     def _detectLayerHeight(self, gcode_list: List[str], settings: Dict[str, Any]) -> float:
@@ -799,6 +840,187 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 return float(lh)
 
         return 0.2  # safe default
+
+    # -------------------------------------------------------------------------
+    # Phase II: Mesh Swap for curvislicer_mesh Mode
+    # -------------------------------------------------------------------------
+
+    def _onSlicingStarted(self) -> None:
+        """Hook into slicingStarted to swap meshes for curvislicer_mesh mode.
+
+        Deforms mesh vertices using the deformation field before CuraEngine
+        slices them.  The originals are saved for restoration after slicing.
+        Signal suppression prevents recursive re-slicing.
+        """
+        settings = self._getSettings()
+        if not settings.get("enabled", False):
+            return
+        if settings.get("surface_mode") != "curvislicer_mesh":
+            return
+
+        # Find analysis results with a deformation field.
+        analysis_result = self._getActiveAnalysisResult()
+        if analysis_result is None or analysis_result.deformation_field is None:
+            return
+
+        try:
+            from .analysis.mesh_deformer import deform_mesh_vertices, validate_deformation
+
+            app = Application.getInstance()
+            backend = app.getBackend()
+            scene = backend._scene if backend is not None else None
+            if scene is None:
+                return
+
+            deformation_field = analysis_result.deformation_field
+
+            # Validate deformation before applying.
+            # We use the analysis vertices, but for speed just check the field.
+            # Full mesh validation would be too slow here.
+
+            # Suppress sceneChanged to prevent recursive re-slicing.
+            if backend is not None:
+                try:
+                    scene.sceneChanged.disconnect(backend._onSceneChanged)
+                except (TypeError, AttributeError):
+                    pass
+
+            try:
+                from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
+
+                self._mesh_swap_originals.clear()
+                swap_count = 0
+
+                for node in DepthFirstIterator(scene.getRoot()):
+                    if not hasattr(node, "callDecoration"):
+                        continue
+                    if not node.callDecoration("isSliceable"):
+                        continue
+
+                    mesh_data = node.getMeshData()
+                    if mesh_data is None:
+                        continue
+
+                    vertices = mesh_data.getVertices()
+                    if vertices is None or len(vertices) == 0:
+                        continue
+
+                    # Save original for restoration.
+                    self._mesh_swap_originals[id(node)] = (node, mesh_data)
+
+                    # Deform vertices (scene coordinates: Y-up).
+                    deformed_verts = deform_mesh_vertices(
+                        vertices, deformation_field, z_up=False,
+                    )
+
+                    # Create new MeshData with deformed vertices.
+                    from UM.Mesh.MeshData import MeshData
+                    new_mesh = MeshData(
+                        vertices=deformed_verts,
+                        indices=mesh_data.getIndices(),
+                        normals=mesh_data.getNormals(),
+                    )
+                    node.setMeshData(new_mesh)
+                    swap_count += 1
+
+                self._mesh_swap_active = swap_count > 0
+                if swap_count > 0:
+                    Logger.log("i", "curvislicer_mesh: swapped %d meshes for deformed slicing",
+                               swap_count)
+
+            finally:
+                # Always reconnect sceneChanged.
+                if backend is not None:
+                    try:
+                        scene.sceneChanged.connect(backend._onSceneChanged)
+                    except (TypeError, AttributeError):
+                        pass
+
+        except Exception:
+            Logger.logException("e", "curvislicer_mesh: mesh swap failed")
+            self._restoreMeshes()
+
+    def _restoreMeshes(self) -> None:
+        """Restore original meshes after slicing completes."""
+        if not self._mesh_swap_originals:
+            return
+
+        app = Application.getInstance()
+        backend = app.getBackend()
+        scene = backend._scene if backend is not None else None
+
+        # Suppress sceneChanged during restoration.
+        if scene is not None and backend is not None:
+            try:
+                scene.sceneChanged.disconnect(backend._onSceneChanged)
+            except (TypeError, AttributeError):
+                pass
+
+        try:
+            restored = 0
+            for node_id, (node, original_mesh) in self._mesh_swap_originals.items():
+                try:
+                    node.setMeshData(original_mesh)
+                    restored += 1
+                except Exception:
+                    Logger.logException("w", "Failed to restore mesh for node %s", node_id)
+
+            if restored > 0:
+                Logger.log("i", "curvislicer_mesh: restored %d original meshes", restored)
+        finally:
+            self._mesh_swap_originals.clear()
+            self._mesh_swap_active = False
+            if scene is not None and backend is not None:
+                try:
+                    scene.sceneChanged.connect(backend._onSceneChanged)
+                except (TypeError, AttributeError):
+                    pass
+
+    def _backTransformGCode(self, gcode_list: list, analysis: _AnalysisResult,
+                            settings: dict) -> list:
+        """Apply inverse deformation to G-code Z coordinates after mesh-mode slicing.
+
+        This undoes the mesh deformation in the G-code so the printer
+        produces the original geometry with curved layers.
+        """
+        if analysis.deformation_field is None:
+            return gcode_list
+
+        from .analysis.mesh_deformer import inverse_deform_gcode_line
+
+        # Compute offsets (same logic as _bendGCode).
+        gcode_offset_x = 0.0
+        gcode_offset_y = 0.0
+        stack = self._getGlobalStack()
+        if stack is not None:
+            center_is_zero = stack.getProperty("machine_center_is_zero", "value")
+            if not center_is_zero:
+                machine_width = float(stack.getProperty("machine_width", "value") or 0)
+                machine_depth = float(stack.getProperty("machine_depth", "value") or 0)
+                gcode_offset_x = machine_width / 2.0
+                gcode_offset_y = machine_depth / 2.0
+
+        current_x, current_y, current_z = 0.0, 0.0, 0.0
+        result = []
+
+        for chunk_idx, chunk in enumerate(gcode_list):
+            if chunk_idx < 2:
+                # Header and start G-code: pass through.
+                result.append(chunk)
+                continue
+
+            lines = chunk.split("\n")
+            new_lines = []
+            for line in lines:
+                modified, current_x, current_y, current_z = inverse_deform_gcode_line(
+                    line, analysis.deformation_field,
+                    current_x, current_y, current_z,
+                    gcode_offset_x, gcode_offset_y,
+                )
+                new_lines.append(modified)
+            result.append("\n".join(new_lines))
+
+        return result
 
     # -------------------------------------------------------------------------
     # Layer Data Modification (SimulationView preview)
@@ -959,6 +1181,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     total_layers=total_layers,
                     surface_mode=settings.get("surface_mode", "all_surfaces"),
                     nozzle_clearance=settings.get("nozzle_clearance_mm", 8.0),
+                    deformation_field=analysis_result.deformation_field,
                 )
 
                 if modifier.modify_layer_data(layer_data):
@@ -1122,6 +1345,7 @@ class _AnalysisResult:
     __slots__ = [
         "analysis", "candidate_regions", "height_map",
         "collision_result", "safe_map", "blend_map",
+        "deformation_field",
     ]
 
     def __init__(
@@ -1132,6 +1356,7 @@ class _AnalysisResult:
         collision_result: Optional[CollisionResult] = None,
         safe_map: Optional[numpy.ndarray] = None,
         blend_map: Optional[numpy.ndarray] = None,
+        deformation_field=None,
     ) -> None:
         self.analysis = analysis
         self.candidate_regions = candidate_regions
@@ -1139,6 +1364,7 @@ class _AnalysisResult:
         self.collision_result = collision_result
         self.safe_map = safe_map
         self.blend_map = blend_map
+        self.deformation_field = deformation_field
 
 
 class _NodeSnapshot:
@@ -1307,6 +1533,49 @@ class _AnalysisJob(Job):
             blend_distance=settings["blend_distance_mm"],
         )
 
+        # Step 6: Compute deformation field for curvislicer modes
+        deformation_field = None
+        surface_mode = settings.get("surface_mode", "all_surfaces")
+        if surface_mode in ("curvislicer", "curvislicer_mesh"):
+            try:
+                from .analysis.deformation_field import compute_deformation_field
+
+                # Estimate total layers from height map Z range.
+                layer_height_est = settings.get("heightmap_resolution", 0.5)
+                # Use a rough estimate; actual layer height comes from G-code.
+                # For analysis, use a reasonable default.
+                lh = 0.2  # Will be refined at G-code bending time.
+                z_vals = height_map.z_values
+                finite_z = z_vals[numpy.isfinite(z_vals)]
+                if finite_z.size > 0:
+                    z_max = float(numpy.max(finite_z))
+                    total_layers_est = max(1, int(z_max / lh) + 1)
+                else:
+                    total_layers_est = 1
+
+                t0 = time.time()
+                deformation_field = compute_deformation_field(
+                    height_map,
+                    collision_result.safe_map,
+                    layer_height=lh,
+                    total_layers=total_layers_est,
+                    first_layer_z=lh,
+                    decay_distance=settings.get("field_decay_mm", 5.0),
+                    min_thickness_ratio=settings.get("min_thickness_ratio", 0.5),
+                    max_thickness_ratio=settings.get("max_thickness_ratio", 2.0),
+                    max_angle_deg=settings["max_angle_deg"],
+                    optimization_resolution=settings.get("optimization_resolution", 2.0),
+                )
+                Logger.log("d", "  Deformation field: %d layers, grid %dx%d in %.2fs",
+                           deformation_field.num_layers,
+                           deformation_field.grid_shape[0],
+                           deformation_field.grid_shape[1],
+                           time.time() - t0)
+            except Exception:
+                Logger.logException("e", "Failed to compute deformation field; "
+                                    "falling back to standard mode")
+                deformation_field = None
+
         return _AnalysisResult(
             analysis=analysis,
             candidate_regions=candidates,
@@ -1314,4 +1583,5 @@ class _AnalysisJob(Job):
             collision_result=collision_result,
             safe_map=collision_result.safe_map,
             blend_map=blend_map_arr,
+            deformation_field=deformation_field,
         )
