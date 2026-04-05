@@ -181,6 +181,13 @@ class IterativeFEASolver:
         bonding_coeff = float(config.get("bonding_coeff", material.bonding_coefficient))
 
         # Import EasyFEA mesh from .msh file
+        # Initialize gmsh with interruptible=False BEFORE EasyFEA touches it
+        # (EasyFEA's Mesher.__init__ calls gmsh.initialize() which tries to
+        # register signal handlers — fails on background threads)
+        import gmsh as _gmsh
+        if not _gmsh.isInitialized():
+            _gmsh.initialize(interruptible=False)
+
         _t0 = _time.monotonic()
         mesher = Mesher()
         mesh = mesher.Mesh_Import_mesh(tet_mesh.msh_path)
