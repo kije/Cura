@@ -54,36 +54,21 @@ class TetMesh:
 def tetrahedralize(surface_mesh: "trimesh.Trimesh", element_size: float) -> TetMesh:
     """Generate a 3D tetrahedral mesh from a closed surface mesh.
 
-    The surface is exported as a temporary STL file, imported into Gmsh, and
-    meshed with the given characteristic element length.  After meshing the
-    temporary file is removed.
-
-    ``element_size`` can be:
-    - A string preset: ``"coarse"``, ``"medium"``, or ``"fine"`` — resolved as a
-      fraction of the bounding-box diagonal.
-    - A positive float giving the absolute element size in millimetres.
-
     Args:
         surface_mesh: Closed, (ideally watertight) trimesh.Trimesh surface.
         element_size: Characteristic element length (mm) or a preset name.
 
     Returns:
         A :class:`TetMesh` with nodes, elements, and surface_node_map populated.
-
-    Raises:
-        ImportError: If gmsh or trimesh is not installed.
-        RuntimeError: If Gmsh fails to produce any tetrahedral elements.
     """
     if gmsh is None:
         raise ImportError("gmsh is required but not installed.")
-    if trimesh is None:
-        raise ImportError("trimesh is required but not installed.")
 
     # Resolve preset or absolute size
     if isinstance(element_size, str):
         fraction = _PRESET_FRACTIONS.get(element_size, _PRESET_FRACTIONS["medium"])
         diagonal = float(np.linalg.norm(surface_mesh.bounds[1] - surface_mesh.bounds[0]))
-        char_length = max(diagonal * fraction, 0.1)  # floor at 0.1 mm
+        char_length = max(diagonal * fraction, 0.1)
     else:
         char_length = float(element_size)
 
@@ -94,12 +79,14 @@ def tetrahedralize(surface_mesh: "trimesh.Trimesh", element_size: float) -> TetM
         len(surface_mesh.vertices),
     )
 
-    # Write surface to a temporary STL
+    # We still need a temp STL because gmsh.model.occ.importShapes needs a file.
+    # Direct API mesh input is possible but unreliable across gmsh versions.
     with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        surface_mesh.export(tmp_path)
+        # Export as ASCII STL (binary STL can cause gmsh parse issues)
+        surface_mesh.export(tmp_path, file_type="stl_ascii")
         tet_mesh = _run_gmsh(tmp_path, char_length, surface_mesh)
     finally:
         try:
@@ -113,27 +100,13 @@ def tetrahedralize(surface_mesh: "trimesh.Trimesh", element_size: float) -> TetM
 def _run_gmsh(
     stl_path: str, char_length: float, surface_mesh: "trimesh.Trimesh"
 ) -> TetMesh:
-    """Internal: run Gmsh on an STL file and extract node/element arrays.
-
-    Args:
-        stl_path: Path to the temporary STL file.
-        char_length: Characteristic element length in mm.
-        surface_mesh: Original surface mesh (used to build surface_node_map).
-
-    Returns:
-        Populated :class:`TetMesh`.
-    """
+    """Internal: run Gmsh on an STL file and extract node/element arrays."""
     with _GMSH_LOCK:
         try:
-            # Pass interruptible=False to prevent gmsh from registering
-            # signal handlers (which fails on background threads with
-            # "signal only works in main thread of the main interpreter").
             gmsh.initialize(interruptible=False)
             gmsh.option.setNumber("General.Verbosity", 1)
 
             # Use OCC kernel to import STL and create a volume.
-            # The geo kernel approach (classifySurfaces + createGeometry)
-            # hangs in some gmsh versions — OCC is more robust.
             Logger.log("d", "FEA tet: importing STL via OCC...")
             shapes = gmsh.model.occ.importShapes(stl_path)
             Logger.log("d", "FEA tet: imported %d shapes", len(shapes))
@@ -145,11 +118,13 @@ def _run_gmsh(
 
             Logger.log("d", "FEA tet: generating 3D mesh...")
             gmsh.model.mesh.generate(3)
+
             Logger.log("d", "FEA tet: optimizing mesh...")
             try:
                 gmsh.model.mesh.optimize("Netgen")
             except Exception:
                 Logger.log("w", "FEA tet: Netgen optimization failed, using unoptimized mesh")
+
             Logger.log("d", "FEA tet: mesh generation complete")
 
             # Extract nodes
@@ -177,14 +152,15 @@ def _run_gmsh(
             # Convert Gmsh 1-based tags to 0-based indices
             elements = np.vectorize(tag_to_idx.__getitem__)(elements_gmsh)
 
+            Logger.log("d", "FEA tet: %d nodes, %d tets extracted", len(nodes), len(elements))
+
         finally:
             gmsh.finalize()
 
-    # Build surface_node_map: match surface vertices to tet nodes by position
-    # using KDTree for O(S log N) instead of O(S × N) brute-force.
+    # Build surface_node_map using KDTree for O(S log N)
     import scipy.spatial
     surface_node_map: Dict[int, int] = {}
-    tolerance = char_length * 0.1  # within 10% of element size
+    tolerance = char_length * 0.1
     kd_tree = scipy.spatial.KDTree(nodes)
     dists, indices = kd_tree.query(surface_mesh.vertices)
     for surf_idx in range(len(surface_mesh.vertices)):
