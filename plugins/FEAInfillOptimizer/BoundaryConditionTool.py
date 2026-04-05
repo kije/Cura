@@ -142,6 +142,7 @@ class BoundaryConditionTool(Tool):
             "SupportListModel", "ForceListModel",
             "SelectionMode",
             "DeleteActiveSupport", "DeleteActiveForce",
+            "UpdateForceAtIndex", "UpdateTorqueAtIndex",
             # Inline phase flow
             "Phase",
             "RunAnalysis", "CancelAnalysis", "GoBackToDefine",
@@ -804,6 +805,74 @@ class BoundaryConditionTool(Tool):
                             else:
                                 scale = 1.0
                             self._force_handle.show_at(centroid, scale=scale)
+        self.propertyChanged.emit()
+        self._update_highlights()
+
+    # ── Inline-edit trigger properties ─────────────────────────────────────
+
+    def getUpdateForceAtIndex(self) -> str:
+        return ""
+
+    def setUpdateForceAtIndex(self, value) -> None:
+        if not value:
+            return
+        try:
+            data = json.loads(str(value))
+        except (json.JSONDecodeError, TypeError):
+            return
+        index = int(data.get("index", -1))
+        new_mag = float(data.get("magnitude", 0))
+
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return
+        bc = selected.callDecoration("getBoundaryConditions")
+        if bc is None:
+            return
+        groups = bc.getForceGroups()
+        if index < 0 or index >= len(groups):
+            return
+
+        fg = groups[index]
+        old_mag = math.sqrt(fg.force.x**2 + fg.force.y**2 + fg.force.z**2)
+        if old_mag < 1e-9:
+            return
+        scale = new_mag / old_mag
+        fg.force = Vector(fg.force.x * scale, fg.force.y * scale, fg.force.z * scale)
+
+        self._force_x = fg.force.x
+        self._force_y = fg.force.y
+        self._force_z = fg.force.z
+        self._force_magnitude = new_mag
+
+        self.propertyChanged.emit()
+        self._update_highlights()
+
+    def getUpdateTorqueAtIndex(self) -> str:
+        return ""
+
+    def setUpdateTorqueAtIndex(self, value) -> None:
+        if not value:
+            return
+        try:
+            data = json.loads(str(value))
+        except (json.JSONDecodeError, TypeError):
+            return
+        index = int(data.get("index", -1))
+        new_mag = float(data.get("magnitude", 0))
+
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return
+        bc = selected.callDecoration("getBoundaryConditions")
+        if bc is None or not hasattr(bc, "getTorqueGroups"):
+            return
+        groups = bc.getTorqueGroups()
+        if index < 0 or index >= len(groups):
+            return
+
+        groups[index].torque_magnitude = new_mag
+        self._torque_magnitude = new_mag
         self.propertyChanged.emit()
         self._update_highlights()
 
