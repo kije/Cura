@@ -115,6 +115,22 @@ Item
                 }
                 onClicked: UM.Controller.setProperty("Mode", "force")
             }
+
+            UM.ToolbarButton
+            {
+                id: torqueModeButton
+                checkable: true
+                checked: bcPanel.currentMode === "torque"
+                text: catalog.i18nc("@action:button", "Torque")
+                toolItem: UM.ColorImage
+                {
+                    source: Qt.resolvedUrl("../icons/torque.svg")
+                    color: UM.Theme.getColor("icon")
+                    width: UM.Theme.getSize("button_icon").width
+                    height: UM.Theme.getSize("button_icon").height
+                }
+                onClicked: UM.Controller.setProperty("Mode", "torque")
+            }
         }
 
         UM.Label
@@ -123,11 +139,15 @@ Item
             wrapMode: Text.WordWrap
             font: UM.Theme.getFont("small")
             color: UM.Theme.getColor("text_medium")
-            text: bcPanel.currentMode === "fixed"
-                ? catalog.i18nc("@info", "Click faces where the part is held, screwed down, or resting on a surface.")
-                : bcPanel.currentMode === "rotate"
-                    ? catalog.i18nc("@info", "Drag the rotation rings to adjust force direction.")
-                    : catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
+            text: {
+                if (bcPanel.currentMode === "fixed")
+                    return catalog.i18nc("@info", "Click faces where the part is held, screwed down, or resting on a surface.")
+                if (bcPanel.currentMode === "torque")
+                    return catalog.i18nc("@info", "Click faces where a rotational load (twist) is applied. Then set the torque amount below.")
+                if (bcPanel.currentMode === "rotate")
+                    return catalog.i18nc("@info", "Drag the rotation rings to adjust force direction.")
+                return catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
+            }
         }
 
         UM.Label
@@ -525,6 +545,63 @@ Item
             text: catalog.i18nc("@action:button", "Confirm Load on Selected Faces")
             enabled: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
             onClicked: UM.Controller.setProperty("ConfirmForceGroup", true)
+        }
+
+        // ── Torque settings (torque mode) ───────────────────────────────
+        ColumnLayout
+        {
+            Layout.fillWidth: true
+            spacing: UM.Theme.getSize("default_margin").height / 2
+            visible: bcPanel.currentMode === "torque"
+
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "Torque Amount")
+                font: UM.Theme.getFont("medium_bold")
+            }
+
+            RowLayout
+            {
+                Layout.fillWidth: true
+                spacing: UM.Theme.getSize("default_margin").width / 2
+
+                TextField
+                {
+                    Layout.fillWidth: true
+                    text: Number(toolProperties.getValue("TorqueMagnitude") ?? 1).toFixed(2)
+                    validator: DoubleValidator { bottom: 0; decimals: 2 }
+                    onEditingFinished: UM.Controller.setProperty("TorqueMagnitude", parseFloat(text) || 1.0)
+                }
+                UM.Label { text: "Nm" }
+            }
+
+            UM.Label
+            {
+                Layout.fillWidth: true
+                text: catalog.i18nc("@info", "Tip: Hand-tightened bolt ≈ 1-5 Nm. Wrench-tightened ≈ 10-50 Nm.")
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_inactive")
+                wrapMode: Text.WordWrap
+            }
+
+            UM.Label
+            {
+                Layout.fillWidth: true
+                visible: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+                text: catalog.i18nc("@info", "%1 face(s) selected for torque. The torque axis will be the average surface normal.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_medium")
+                wrapMode: Text.WordWrap
+            }
+        }
+
+        Cura.PrimaryButton
+        {
+            Layout.fillWidth: true
+            visible: bcPanel.currentMode === "torque"
+            text: catalog.i18nc("@action:button", "Confirm Torque on Selected Faces")
+            enabled: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+            onClicked: UM.Controller.setProperty("ConfirmTorqueGroup", true)
         }
 
         // ── Quick setup ──────────────────────────────────────────────────

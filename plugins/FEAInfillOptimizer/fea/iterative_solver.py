@@ -322,4 +322,62 @@ def _build_force_vector(bc, tet_mesh: TetMesh, surface_mesh: Any = None) -> np.n
             f[tn * 3 + 1] += fy_per
             f[tn * 3 + 2] += fz_per
 
+    # ── Torque groups → equivalent tangential nodal forces ───────────
+    if hasattr(bc, "getTorqueGroups"):
+        for torque_group in bc.getTorqueGroups():
+            axis = torque_group.torque_axis  # UM Vector
+            T_mag = float(torque_group.torque_magnitude)
+            n_axis = np.array([float(axis.x), float(axis.y), float(axis.z)])
+            n_norm = np.linalg.norm(n_axis)
+            if n_norm < 1e-12 or abs(T_mag) < 1e-12:
+                continue
+            n_axis = n_axis / n_norm
+
+            if surface_mesh is not None:
+                sv_indices = _face_indices_to_vertex_indices(
+                    [int(fi) for fi in torque_group.face_indices], surface_mesh
+                )
+            else:
+                sv_indices = [int(fi) for fi in torque_group.face_indices]
+
+            tet_nodes_in_group_t: List[int] = []
+            for sv_idx in sv_indices:
+                tn = smap.get(sv_idx)
+                if tn is not None:
+                    tet_nodes_in_group_t.append(tn)
+
+            if not tet_nodes_in_group_t:
+                continue
+
+            # Compute center of all torque nodes
+            node_positions = np.array([tet_mesh.nodes[tn] for tn in tet_nodes_in_group_t])
+            center = node_positions.mean(axis=0)
+
+            # For each node, compute tangential force from torque
+            for tn in tet_nodes_in_group_t:
+                pos = tet_mesh.nodes[tn]
+                r = pos - center
+                # Project r onto plane perpendicular to axis
+                r_along_axis = np.dot(r, n_axis) * n_axis
+                r_perp = r - r_along_axis
+                r_perp_mag = np.linalg.norm(r_perp)
+                if r_perp_mag < 1e-12:
+                    continue  # node is on the axis — no tangential force
+
+                # Tangential direction = axis × r_perp (right-hand rule)
+                tangent = np.cross(n_axis, r_perp)
+                tangent_mag = np.linalg.norm(tangent)
+                if tangent_mag < 1e-12:
+                    continue
+                tangent = tangent / tangent_mag
+
+                # Force magnitude: T = sum(F_t * r_perp) across all nodes
+                # Distribute equally: F_t = T / (N * r_perp)
+                n_nodes_t = len(tet_nodes_in_group_t)
+                F_t = T_mag / (n_nodes_t * r_perp_mag)
+
+                f[tn * 3 + 0] += F_t * tangent[0]
+                f[tn * 3 + 1] += F_t * tangent[1]
+                f[tn * 3 + 2] += F_t * tangent[2]
+
     return f

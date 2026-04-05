@@ -61,6 +61,7 @@ except ImportError:
 # Modes for the boundary condition tool
 MODE_FIXED = "fixed"
 MODE_FORCE = "force"
+MODE_TORQUE = "torque"
 MODE_ROTATE = "rotate"
 
 
@@ -98,6 +99,9 @@ class BoundaryConditionTool(Tool):
         self._adjacency_cache = None
         self._adjacency_cache_node = None
 
+        # Torque state
+        self._torque_magnitude = 1.0  # Nm
+
         # Quick setup state
         self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed"
         self._quick_setup_hole_diameter = 8.0  # mm
@@ -120,6 +124,7 @@ class BoundaryConditionTool(Tool):
             "OpenOptimizeDialog",
             "QuickGravityStart", "QuickMountHoles", "QuickCantileverStart",
             "QuickSetupMode", "QuickHoleDiameter",
+            "TorqueMagnitude", "ConfirmTorqueGroup",
             "ActiveSupportIndex", "ActiveForceIndex",
             "SupportListModel", "ForceListModel",
             "SelectionMode",
@@ -132,7 +137,7 @@ class BoundaryConditionTool(Tool):
         return self._mode
 
     def setMode(self, mode: str) -> None:
-        if mode in (MODE_FIXED, MODE_FORCE, MODE_ROTATE):
+        if mode in (MODE_FIXED, MODE_FORCE, MODE_TORQUE, MODE_ROTATE):
             self._mode = mode
             self._current_face_selection.clear()
             if mode != MODE_ROTATE:
@@ -189,6 +194,20 @@ class BoundaryConditionTool(Tool):
             self._force_x**2 + self._force_y**2 + self._force_z**2
         )
 
+    def getTorqueMagnitude(self) -> float:
+        return self._torque_magnitude
+
+    def setTorqueMagnitude(self, value) -> None:
+        self._torque_magnitude = float(value)
+        self.propertyChanged.emit()
+
+    def getConfirmTorqueGroup(self) -> bool:
+        return False
+
+    def setConfirmTorqueGroup(self, value) -> None:
+        if value:
+            self._confirmTorqueGroup()
+
     def getCurrentSelectionCount(self) -> int:
         return len(self._current_face_selection)
 
@@ -204,6 +223,8 @@ class BoundaryConditionTool(Tool):
         for i, fg in enumerate(bc.getForceGroups()):
             mag = math.sqrt(fg.force.x**2 + fg.force.y**2 + fg.force.z**2)
             parts.append(f"Force {i+1}: {mag:.0f}N ({len(fg.face_indices)} faces)")
+        for i, tg in enumerate(bc.getTorqueGroups()):
+            parts.append(f"Torque {i+1}: {tg.torque_magnitude:.1f}Nm ({len(tg.face_indices)} faces)")
         if self._current_face_selection:
             parts.append(f"Pending: {len(self._current_face_selection)} faces")
         if self._mode == MODE_ROTATE and self._rotating_group_index >= 0:
@@ -619,9 +640,8 @@ class BoundaryConditionTool(Tool):
                 self.propertyChanged.emit()
                 self._update_highlights()
 
-            elif self._mode == MODE_FORCE:
+            elif self._mode in (MODE_FORCE, MODE_TORQUE):
                 if alt:
-                    # Alt+click toggles face in/out of pending selection
                     existing = set(self._current_face_selection)
                     for fi in face_indices_to_add:
                         if fi in existing:
@@ -629,7 +649,6 @@ class BoundaryConditionTool(Tool):
                         else:
                             self._current_face_selection.append(fi)
                 else:
-                    # Plain click: add to pending selection (accumulate)
                     existing = set(self._current_face_selection)
                     for fi in face_indices_to_add:
                         if fi not in existing:
@@ -843,6 +862,37 @@ class BoundaryConditionTool(Tool):
             scale = 1.0
         self._force_handle.show_at(centroid, scale=scale)
 
+        self.propertyChanged.emit()
+        self._update_highlights()
+
+    def _confirmTorqueGroup(self) -> None:
+        """Confirm selected faces as a torque application region."""
+        if not self._current_face_selection:
+            return
+
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return
+
+        mesh_data = selected.getMeshData()
+        if mesh_data is None:
+            return
+        verts = mesh_data.getVertices()
+        indices = mesh_data.getIndices()
+        if verts is None:
+            return
+
+        # Torque axis = average surface normal of selected faces
+        normal = compute_face_normal(verts, indices, self._current_face_selection)
+
+        bc = self._get_or_create_bc(selected)
+        bc.addTorqueGroup(
+            list(self._current_face_selection),
+            normal,
+            self._torque_magnitude,
+        )
+
+        self._current_face_selection.clear()
         self.propertyChanged.emit()
         self._update_highlights()
 
