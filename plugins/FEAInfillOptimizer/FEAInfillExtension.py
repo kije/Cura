@@ -601,7 +601,7 @@ class FEAInfillExtension(QObject, Extension):
         job.progress.connect(self._onFEAProgress)
         JobQueue.getInstance().add(job)
 
-    def _onFEAProgress(self, job, progress: float) -> None:
+    def _onFEAProgress(self, progress: float) -> None:
         # Marshal to the main thread; this slot may be called from the
         # background Job thread via UM.Signal (C15: thread safety).
         def _update() -> None:
