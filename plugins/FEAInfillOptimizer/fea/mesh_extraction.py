@@ -73,7 +73,16 @@ def extract_trimesh(node) -> "trimesh.Trimesh":
     verts_world = (transform_matrix @ verts_h.T).T
     vertices = verts_world[:, :3]
 
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    # process=True merges duplicate vertices (critical for flat/non-indexed
+    # meshes from Cura where each triangle has its own vertex copies).
+    # Without merging, a cube has 36 vertices instead of 8, which causes:
+    # - gmsh: "overlapping facets" (triangles not topologically connected)
+    # - scipy: singular stiffness matrix (BCs only fix some copies of
+    #   each corner, leaving unconstrained rigid-body modes)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+
+    Logger.log("d", "FEA mesh: after merge — %d vertices, %d faces (from %d input vertices)",
+               len(mesh.vertices), len(mesh.faces), len(vertices))
 
     # Repair
     trimesh.repair.fix_normals(mesh)
