@@ -102,6 +102,9 @@ class BoundaryConditionTool(Tool):
         # Torque state
         self._torque_magnitude = 1.0  # Nm
 
+        # Hover preview faces (shown in orange when mouse hovers over model)
+        self._hover_faces: list = []
+
         # Quick setup state
         self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed"
         self._quick_setup_hole_diameter = 8.0  # mm
@@ -159,6 +162,7 @@ class BoundaryConditionTool(Tool):
         if mode in (MODE_FIXED, MODE_FORCE, MODE_TORQUE, MODE_ROTATE):
             self._mode = mode
             self._current_face_selection.clear()
+            self._hover_faces = []
             if mode != MODE_ROTATE:
                 self._force_handle.hide()
                 self._rotating_group_index = -1
@@ -830,7 +834,13 @@ class BoundaryConditionTool(Tool):
             self._bc_highlight.clear()
             self._force_handle.hide()
             self._rotating_group_index = -1
+            self._hover_faces = []
             return False
+
+        # ── Hover preview: highlight face under cursor ─────────────────────
+        if event.type == Event.MouseMoveEvent and self._mode in (MODE_FIXED, MODE_FORCE, MODE_TORQUE):
+            self._update_hover_preview(event)
+            # Don't return True — let the event propagate for camera control
 
         # ── Rotation mode: handle ring dragging ────────────────────────────
         if self._mode == MODE_ROTATE and self._rotating_group_index >= 0:
@@ -1218,20 +1228,88 @@ class BoundaryConditionTool(Tool):
         has_bc = bc is not None and bc.hasAnyBC()
         has_pending = len(self._current_face_selection) > 0
 
-        if not has_bc and not has_pending:
+        has_hover = len(self._hover_faces) > 0
+
+        if not has_bc and not has_pending and not has_hover:
             self._bc_highlight.clear()
             return
 
         try:
-            # Paint confirmed BCs + pending selection + active force handle
             self._bc_highlight.update_visualization(
                 node, bc,
                 pending_faces=self._current_face_selection if has_pending else None,
                 active_force_index=self._active_force_index,
+                hover_faces=self._hover_faces if has_hover else None,
             )
         except Exception:
             Logger.logException("w", "FEA Infill: Failed to update BC highlight overlay")
             self._bc_highlight.clear()
+
+    def _update_hover_preview(self, event) -> None:
+        """Update the hover face preview on mouse move."""
+        if self._selection_pass is None:
+            self._selection_pass = Application.getInstance().getRenderer().getRenderPass("selection")
+            if not self._selection_pass:
+                return
+
+        picked_node = self._controller.getScene().findObject(
+            self._selection_pass.getIdAtPosition(event.x, event.y)
+        )
+        if not picked_node or not isinstance(picked_node, CuraSceneNode):
+            if self._hover_faces:
+                self._hover_faces = []
+                self._update_highlights()
+            return
+
+        if picked_node.callDecoration("isNonPrintingMesh"):
+            if self._hover_faces:
+                self._hover_faces = []
+                self._update_highlights()
+            return
+
+        if self._picking_pass is None:
+            self._picking_pass = Application.getInstance().getRenderer().getRenderPass("picking_selected")
+            if not self._picking_pass:
+                return
+
+        picked_position = self._picking_pass.getPickedPosition(event.x, event.y)
+        face_index = self._find_closest_face(picked_node, picked_position)
+        if face_index is None:
+            if self._hover_faces:
+                self._hover_faces = []
+                self._update_highlights()
+            return
+
+        # Expand hover to show full group in surface/hole/cylinder mode
+        if self._selection_mode != "single" and _FACE_GROUP_ANALYZER_AVAILABLE:
+            mesh_data = picked_node.getMeshData()
+            if mesh_data is not None:
+                verts = mesh_data.getVertices()
+                indices = mesh_data.getIndices()
+                if verts is not None:
+                    adjacency = self._ensure_adjacency(picked_node, verts, indices)
+                    if adjacency is not None:
+                        if self._selection_mode == "flat":
+                            hover = find_coplanar_group(verts, indices, face_index, adjacency)
+                        elif self._selection_mode == "hole":
+                            hover = find_hole_surface(verts, indices, face_index, adjacency)
+                        elif self._selection_mode == "cylinder":
+                            hover = find_cylinder_surface(verts, indices, face_index, adjacency)
+                        else:
+                            hover = [face_index]
+                    else:
+                        hover = [face_index]
+                else:
+                    hover = [face_index]
+            else:
+                hover = [face_index]
+        else:
+            hover = [face_index]
+
+        # Only update if hover changed (avoid constant repainting)
+        if hover != self._hover_faces:
+            self._hover_faces = hover
+            self._update_highlights()
 
     def getRequiredExtraRenderingPasses(self) -> list:
         return ["picking_selected"]

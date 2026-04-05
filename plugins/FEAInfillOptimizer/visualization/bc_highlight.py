@@ -32,7 +32,8 @@ class BCHighlightHandle(ToolHandle):
 
     def update_visualization(self, node, bc_decorator,
                              pending_faces=None,
-                             active_force_index=-1) -> None:
+                             active_force_index=-1,
+                             hover_faces=None) -> None:
         """Rebuild the highlight mesh from current BC data.
 
         Vertices are taken in local mesh space; the handle's world
@@ -115,6 +116,12 @@ class BCHighlightHandle(ToolHandle):
             yellow = Color(255, 220, 0, 200)
             for face_idx in pending_faces:
                 self._paint_face(mb, verts, indices, face_idx, yellow)
+
+        # Paint HOVER faces in ORANGE (preview of what would be selected)
+        if hover_faces:
+            orange = Color(255, 160, 40, 160)
+            for face_idx in hover_faces:
+                self._paint_face(mb, verts, indices, face_idx, orange)
 
         self.setSolidMesh(mb.build())
 
