@@ -1,10 +1,9 @@
 # Copyright (c) 2024 FEA Infill Contributors
 # Released under the terms of the LGPLv3 or higher.
 
-"""Convert a surface trimesh to a volumetric tetrahedral mesh using Gmsh.
+"""Convert a surface trimesh to a volumetric tetrahedral mesh.
 
-Uses gmsh's Python API + native library for robust tetrahedralization.
-Falls back to scipy.spatial.Delaunay if gmsh is unavailable.
+Tries gmsh first (best quality), falls back to scipy Delaunay if gmsh fails.
 """
 
 import os
@@ -27,7 +26,6 @@ except ImportError:
 
 from UM.Logger import Logger
 
-# Gmsh is not thread-safe; serialise all calls with this lock.
 _GMSH_LOCK = threading.Lock()
 
 _PRESET_FRACTIONS: Dict[str, float] = {
@@ -36,18 +34,21 @@ _PRESET_FRACTIONS: Dict[str, float] = {
     "fine": 0.03,
 }
 
+# Track which containment method was last used
+_last_containment_method = "unknown"
+
 
 @dataclass
 class TetMesh:
     nodes: np.ndarray
     elements: np.ndarray
     surface_node_map: Dict[int, int] = field(default_factory=dict)
-    mesh_quality: str = "high"  # "high" (gmsh), "medium" (scipy+raycast), "low" (scipy+bbox)
-    mesh_method: str = ""       # human-readable description of method used
-    warnings: list = field(default_factory=list)  # list of warning strings
+    mesh_quality: str = "high"
+    mesh_method: str = ""
+    warnings: list = field(default_factory=list)
 
 
-def tetrahedralize(surface_mesh: "trimesh.Trimesh", element_size: float) -> TetMesh:
+def tetrahedralize(surface_mesh, element_size) -> TetMesh:
     if isinstance(element_size, str):
         fraction = _PRESET_FRACTIONS.get(element_size, _PRESET_FRACTIONS["medium"])
         diagonal = float(np.linalg.norm(surface_mesh.bounds[1] - surface_mesh.bounds[0]))
@@ -62,15 +63,13 @@ def tetrahedralize(surface_mesh: "trimesh.Trimesh", element_size: float) -> TetM
         try:
             return _tetrahedralize_gmsh(surface_mesh, char_length)
         except Exception as e:
-            Logger.log("w", "FEA tet: gmsh tetrahedralization failed (%s), falling back to scipy", str(e))
+            Logger.log("w", "FEA tet: gmsh failed (%s), falling back to scipy", str(e))
 
     Logger.log("d", "FEA tet: using scipy Delaunay fallback")
     return _tetrahedralize_scipy(surface_mesh, char_length)
 
 
-def _tetrahedralize_gmsh(surface_mesh: "trimesh.Trimesh", char_length: float) -> TetMesh:
-    """Tetrahedralize using gmsh — tries multiple approaches."""
-
+def _tetrahedralize_gmsh(surface_mesh, char_length: float) -> TetMesh:
     with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -90,40 +89,35 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
             gmsh.initialize(interruptible=False)
             gmsh.option.setNumber("General.Verbosity", 5)
 
-            # Log which native library gmsh loaded
-            if hasattr(gmsh, 'libpath') and gmsh.libpath:
-                Logger.log("d", "FEA tet: gmsh native lib: %s", gmsh.libpath)
-            else:
-                Logger.log("d", "FEA tet: gmsh loaded (libpath not exposed)")
-
             Logger.log("d", "FEA tet: merging STL...")
             gmsh.merge(stl_path)
 
-            # Approach 1: Try createTopology (simpler than classifySurfaces)
-            Logger.log("d", "FEA tet: trying createTopology...")
-            try:
-                gmsh.model.mesh.createTopology()
-                Logger.log("d", "FEA tet: createTopology succeeded")
-            except Exception as e:
-                Logger.log("w", "FEA tet: createTopology failed: %s", str(e))
+            # classifySurfaces with forReparametrization=FALSE (the True
+            # setting was causing infinite hangs in gmsh 4.15.2).
+            # Also use a generous angle threshold to group coplanar triangles.
+            Logger.log("d", "FEA tet: classifying surfaces (forReparam=False)...")
+            angle = 40.0
+            gmsh.model.mesh.classifySurfaces(
+                np.deg2rad(angle),      # angle threshold
+                True,                    # boundary
+                False,                   # forReparametrization — was True, caused hang!
+                np.deg2rad(180.0),       # curveAngle
+            )
+            Logger.log("d", "FEA tet: classifySurfaces completed")
 
-            # Check if we have any volumes now
-            volumes = gmsh.model.getEntities(3)
+            Logger.log("d", "FEA tet: creating geometry...")
+            gmsh.model.mesh.createGeometry()
+
             surfaces = gmsh.model.getEntities(2)
-            Logger.log("d", "FEA tet: after topology — %d surfaces, %d volumes",
-                       len(surfaces), len(volumes))
+            Logger.log("d", "FEA tet: %d surfaces found", len(surfaces))
 
-            # If no volume, try to create one from surfaces
-            if not volumes and surfaces:
-                Logger.log("d", "FEA tet: creating volume from %d surfaces...", len(surfaces))
-                try:
-                    sl = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
-                    gmsh.model.geo.addVolume([sl])
-                    gmsh.model.geo.synchronize()
-                    volumes = gmsh.model.getEntities(3)
-                    Logger.log("d", "FEA tet: volume created, %d volumes now", len(volumes))
-                except Exception as e:
-                    Logger.log("w", "FEA tet: geo volume creation failed: %s", str(e))
+            if not surfaces:
+                raise RuntimeError("No surfaces after classifySurfaces")
+
+            Logger.log("d", "FEA tet: creating volume...")
+            sl = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
+            gmsh.model.geo.addVolume([sl])
+            gmsh.model.geo.synchronize()
 
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.1)
@@ -132,7 +126,7 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
             Logger.log("d", "FEA tet: generating 3D mesh...")
             gmsh.model.mesh.generate(3)
 
-            Logger.log("d", "FEA tet: optimizing mesh...")
+            Logger.log("d", "FEA tet: optimizing...")
             try:
                 gmsh.model.mesh.optimize("Netgen")
             except Exception:
@@ -140,12 +134,10 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
 
             Logger.log("d", "FEA tet: extracting mesh data...")
 
-            # Extract nodes
             node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
             nodes = np.array(node_coords, dtype=np.float64).reshape(-1, 3)
             tag_to_idx = {int(tag): i for i, tag in enumerate(node_tags)}
 
-            # Extract tets (type 4)
             elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements()
             tet_nodes = []
             for etype, _, enodes in zip(elem_types, elem_tags, elem_node_tags):
@@ -153,20 +145,20 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
                     tet_nodes.append(np.array(enodes, dtype=np.int64).reshape(-1, 4))
 
             if not tet_nodes:
-                raise RuntimeError("Gmsh produced no tetrahedral elements.")
+                raise RuntimeError("Gmsh produced no tetrahedral elements")
 
             elements_gmsh = np.vstack(tet_nodes)
             elements = np.vectorize(tag_to_idx.__getitem__)(elements_gmsh)
 
-            Logger.log("d", "FEA tet: %d nodes, %d tets extracted", len(nodes), len(elements))
+            Logger.log("d", "FEA tet: %d nodes, %d tets", len(nodes), len(elements))
 
         finally:
             try:
                 gmsh.finalize()
             except Exception:
-                pass  # Don't crash on finalize
+                pass
 
-    # Build surface_node_map using KDTree
+    # Build surface_node_map
     import scipy.spatial
     surface_node_map: Dict[int, int] = {}
     tolerance = char_length * 0.1
@@ -186,14 +178,13 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
 
 
 def _tetrahedralize_scipy(surface_mesh, char_length: float) -> TetMesh:
-    """Fallback tetrahedralization using scipy.spatial.Delaunay."""
+    """Fallback using scipy.spatial.Delaunay."""
     from scipy.spatial import Delaunay
 
     surface_verts = np.array(surface_mesh.vertices, dtype=np.float64)
     n_surface = len(surface_verts)
     warnings = ["Gmsh unavailable — using scipy Delaunay (reduced mesh quality near sharp features)"]
 
-    # Generate interior points
     Logger.log("d", "FEA tet (scipy): generating interior points...")
     interior = _generate_interior_points(surface_mesh, char_length)
     Logger.log("d", "FEA tet (scipy): %d interior points", len(interior))
@@ -210,16 +201,13 @@ def _tetrahedralize_scipy(surface_mesh, char_length: float) -> TetMesh:
     elements = all_tets[inside]
     Logger.log("d", "FEA tet (scipy): %d/%d tets inside mesh", len(elements), len(all_tets))
 
-    # Determine quality based on containment method used
     containment_quality = _last_containment_method
     if containment_quality == "bbox":
         quality = "low"
         warnings.append("Point containment used bounding-box approximation — "
                         "some elements may be outside the model surface")
-    elif containment_quality == "raycast":
-        quality = "medium"
     else:
-        quality = "medium"  # scipy fallback is always at most medium
+        quality = "medium"
 
     if len(elements) == 0:
         raise RuntimeError("No interior tetrahedra found. Mesh may not be watertight.")
@@ -267,19 +255,11 @@ def _generate_interior_points(surface_mesh, char_length: float) -> np.ndarray:
     return interior
 
 
-# Module-level tracker for which containment method was last used
-_last_containment_method = "unknown"
-
-
 def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
-    """Test which points are inside a closed surface mesh.
-
-    Tries multiple methods in order of quality. Sets _last_containment_method
-    so callers can report which method was used.
-    """
+    """Test which points are inside a closed surface mesh."""
     global _last_containment_method
 
-    # Method 1: trimesh.contains() — best quality
+    # Method 1: trimesh.contains()
     try:
         result = mesh.contains(points)
         if result.any():
@@ -289,7 +269,7 @@ def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
     except Exception:
         pass
 
-    # Method 2: ray-triangle intersection — good quality
+    # Method 2: ray casting
     try:
         from trimesh.ray.ray_triangle import RayMeshIntersector
         intersector = RayMeshIntersector(mesh)
@@ -297,8 +277,7 @@ def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
         hits = intersector.intersects_location(points, directions, multiple_hits=True)
         hit_counts = np.zeros(len(points), dtype=int)
         if len(hits[0]) > 0:
-            ray_indices = hits[1]
-            for idx in ray_indices:
+            for idx in hits[1]:
                 hit_counts[idx] += 1
         result = (hit_counts % 2) == 1
         if result.any():
@@ -309,11 +288,10 @@ def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
     except Exception as e:
         Logger.log("w", "FEA tet: ray casting failed: %s", str(e))
 
-    # Method 3: bounding box — low quality fallback
-    Logger.log("w", "FEA tet: all containment methods failed, using bounding box filter")
+    # Method 3: bounding box
+    Logger.log("w", "FEA tet: all containment methods failed, using bounding box")
     _last_containment_method = "bbox"
     bbox_min = mesh.bounds[0]
     bbox_max = mesh.bounds[1]
     margin = (bbox_max - bbox_min) * 0.05
-    inside = np.all((points >= bbox_min + margin) & (points <= bbox_max - margin), axis=1)
-    return inside
+    return np.all((points >= bbox_min + margin) & (points <= bbox_max - margin), axis=1)
