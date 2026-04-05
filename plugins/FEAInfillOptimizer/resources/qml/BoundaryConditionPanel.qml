@@ -782,13 +782,15 @@ Item
                             text: catalog.i18nc("@action:button", "Fix Bolt Holes")
                             onClicked: UM.Controller.setProperty("QuickMountHoles", true)
                         }
-                        TextField
+                        SpinBox
                         {
-                            id: holeDiameterField
-                            Layout.preferredWidth: 60 * screenScaleFactor
-                            text: Number(toolProperties.getValue("QuickHoleDiameter") ?? 8).toFixed(2)
-                            validator: DoubleValidator { bottom: 0.5; top: 50; decimals: 2 }
-                            onEditingFinished: UM.Controller.setProperty("QuickHoleDiameter", parseFloat(text) || 8.0)
+                            id: holeDiameterSpinBox
+                            // Internal integer ×100 → display as mm with 2 decimals
+                            // e.g. value 625 → "6.25 mm"
+                            from: 50; to: 5000; value: 800; stepSize: 25
+                            onValueModified: UM.Controller.setProperty("QuickHoleDiameter", value / 100.0)
+                            textFromValue: function(v) { return (v / 100.0).toFixed(2) }
+                            valueFromText: function(t) { return Math.round(parseFloat(t) * 100) }
                         }
                         UM.Label { text: "mm"; font: UM.Theme.getFont("small") }
                     }
