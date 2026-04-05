@@ -19,6 +19,8 @@ REQUIRED_PACKAGES = {
     "trimesh": "trimesh",
     "gmsh": "gmsh",
     "scipy": "scipy",
+    "EasyFEA": "EasyFEA",
+    "pytetwild": "pytetwild",
 }
 
 # numpy is already available in Cura's Python environment

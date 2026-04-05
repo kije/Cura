@@ -24,6 +24,11 @@ try:
 except ImportError:
     gmsh = None  # type: ignore[assignment]
 
+try:
+    import pytetwild
+except ImportError:
+    pytetwild = None  # type: ignore[assignment]
+
 from UM.Logger import Logger
 
 _GMSH_LOCK = threading.Lock()
@@ -46,6 +51,7 @@ class TetMesh:
     mesh_quality: str = "high"
     mesh_method: str = ""
     warnings: list = field(default_factory=list)
+    msh_path: str = ""
 
 
 def tetrahedralize(surface_mesh, element_size) -> TetMesh:
@@ -59,14 +65,97 @@ def tetrahedralize(surface_mesh, element_size) -> TetMesh:
     Logger.log("d", "FEA tetrahedralization: char_length=%.3f mm for mesh with %d vertices",
                char_length, len(surface_mesh.vertices))
 
+    # Try pytetwild first (most robust, handles non-manifold meshes)
+    if pytetwild is not None:
+        try:
+            return _tetrahedralize_pytetwild(surface_mesh, char_length)
+        except Exception as e:
+            Logger.log("w", "FEA tet: pytetwild failed (%s), trying gmsh...", str(e))
+
+    # Try gmsh second (good quality but fragile on some meshes)
     if gmsh is not None:
         try:
             return _tetrahedralize_gmsh(surface_mesh, char_length)
         except Exception as e:
             Logger.log("w", "FEA tet: gmsh failed (%s), falling back to scipy", str(e))
 
+    # Last resort: scipy Delaunay
     Logger.log("d", "FEA tet: using scipy Delaunay fallback")
     return _tetrahedralize_scipy(surface_mesh, char_length)
+
+
+def _tetrahedralize_pytetwild(surface_mesh, char_length: float) -> TetMesh:
+    """Tetrahedralize using pytetwild (fTetWild) — most robust method."""
+    V = np.array(surface_mesh.vertices, dtype=np.float64)
+    F = np.array(surface_mesh.faces, dtype=np.int32)
+
+    diagonal = float(np.linalg.norm(surface_mesh.bounds[1] - surface_mesh.bounds[0]))
+    edge_fac = char_length / diagonal if diagonal > 0 else 0.06
+
+    Logger.log("d", "FEA tet: pytetwild — %d verts, %d faces, edge_fac=%.4f",
+               len(V), len(F), edge_fac)
+
+    v_out, tets = pytetwild.tetrahedralize(V, F, edge_length_fac=edge_fac, optimize=True)
+
+    nodes = np.array(v_out, dtype=np.float64)
+    elements = np.array(tets, dtype=np.int64)
+
+    Logger.log("d", "FEA tet: pytetwild — %d nodes, %d tets", len(nodes), len(elements))
+
+    if len(elements) == 0:
+        raise RuntimeError("pytetwild produced no tetrahedra")
+
+    # Save as .msh for EasyFEA import via gmsh
+    msh_path = ""
+    if gmsh is not None:
+        try:
+            msh_tmp = tempfile.NamedTemporaryFile(suffix=".msh", delete=False)
+            msh_tmp.close()
+            msh_path = msh_tmp.name
+
+            gmsh.initialize(interruptible=False)
+            gmsh.option.setNumber("General.Verbosity", 0)
+
+            # Add nodes
+            node_tags = list(range(1, len(nodes) + 1))
+            gmsh.model.addDiscreteEntity(3, 1)
+            gmsh.model.mesh.addNodes(3, 1, node_tags, nodes.flatten().tolist())
+
+            # Add tet elements (type 4 = linear tetrahedron)
+            elem_tags = list(range(1, len(elements) + 1))
+            # gmsh expects 1-based node tags
+            node_tags_flat = (elements + 1).flatten().tolist()
+            gmsh.model.mesh.addElements(3, 1, [4], [elem_tags], [node_tags_flat])
+
+            gmsh.write(msh_path)
+            gmsh.finalize()
+            Logger.log("d", "FEA tet: saved pytetwild mesh to %s", msh_path)
+        except Exception as e:
+            Logger.log("w", "FEA tet: failed to save .msh for EasyFEA: %s", str(e))
+            msh_path = ""
+            try:
+                gmsh.finalize()
+            except Exception:
+                pass
+
+    # Build surface_node_map using KDTree
+    import scipy.spatial
+    surface_node_map: Dict[int, int] = {}
+    tolerance = char_length * 0.1
+    kd_tree = scipy.spatial.KDTree(nodes)
+    dists, indices = kd_tree.query(surface_mesh.vertices)
+    for surf_idx in range(len(surface_mesh.vertices)):
+        if dists[surf_idx] < tolerance:
+            surface_node_map[surf_idx] = int(indices[surf_idx])
+
+    Logger.log("d", "FEA tet: pytetwild — %d surface nodes mapped", len(surface_node_map))
+
+    return TetMesh(
+        nodes=nodes, elements=elements, surface_node_map=surface_node_map,
+        mesh_quality="high",
+        mesh_method="fTetWild (pytetwild) robust tetrahedralization",
+        msh_path=msh_path,
+    )
 
 
 def _tetrahedralize_gmsh(surface_mesh, char_length: float) -> TetMesh:
@@ -132,6 +221,13 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
             except Exception:
                 Logger.log("w", "FEA tet: Netgen optimization skipped")
 
+            # Save .msh file for EasyFEA import before extracting nodes
+            msh_tmp = tempfile.NamedTemporaryFile(suffix=".msh", delete=False)
+            msh_tmp.close()
+            msh_path = msh_tmp.name
+            gmsh.write(msh_path)
+            Logger.log("d", "FEA tet: saved mesh to %s", msh_path)
+
             Logger.log("d", "FEA tet: extracting mesh data...")
 
             node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
@@ -174,6 +270,7 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
         nodes=nodes, elements=elements, surface_node_map=surface_node_map,
         mesh_quality="high",
         mesh_method="Gmsh Delaunay tetrahedralization",
+        msh_path=msh_path,
     )
 
 

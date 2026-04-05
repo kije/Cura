@@ -127,6 +127,14 @@ class FEASolveJob(Job):
             iterations = info["iterations"]
             converged = info["converged"]
 
+            # Clean up the temporary .msh file used by EasyFEA
+            if tet_mesh.msh_path:
+                try:
+                    import os as _os
+                    _os.unlink(tet_mesh.msh_path)
+                except OSError:
+                    pass
+
             # ── Step 5: Discretize density ───────────────────────────── 92 %
             self._emit_progress(92.0)
             zone_objects = discretize_density(

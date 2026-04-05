@@ -7,8 +7,9 @@ The algorithm is:
 
 1. Initialise all element densities to ``config["min_density"]``.
 2. Repeat until convergence or max iterations:
-   a. Homogenize: compute E_eff per element from current density.
-   b. Assemble and solve the FEA system.
+   a. Homogenize: compute average effective E from current density field.
+   b. Solve the FEA system via EasyFEA (primary) or custom scipy solver
+      (fallback).
    c. Compute von Mises stress per element.
    d. Map stress → new density field.
    e. Apply damping: ``ρ_new = 0.5 × ρ_old + 0.5 × ρ_candidate``.
@@ -17,9 +18,11 @@ The algorithm is:
 
 Boundary conditions (fixed faces and force groups) are mapped from surface
 triangle face indices to tet-mesh node indices via
-``TetMesh.surface_node_map``.
+``TetMesh.surface_node_map`` (scipy fallback) or via position-based
+``mesh.Nodes_Conditions`` queries (EasyFEA path).
 """
 
+import os
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -31,6 +34,13 @@ try:
 except ImportError:
     _trimesh = None  # type: ignore[assignment]
 
+try:
+    from EasyFEA import Mesher, Simulations
+    from EasyFEA.Models.Elastic import TransverselyIsotropic, Isotropic
+    _EASYFEA_AVAILABLE = True
+except Exception:
+    _EASYFEA_AVAILABLE = False
+
 from .fea_solver import LinearElasticitySolver
 from .homogenization import effective_properties
 from .material_database import Material
@@ -40,9 +50,17 @@ from .tetrahedralization import TetMesh
 _CONVERGENCE_TOL = 1e-3
 _DAMPING = 0.5
 
+_PATTERN_EXPONENTS: Dict[str, float] = {
+    "lines": 1.0, "grid": 2.0, "triangles": 1.3,
+    "gyroid": 1.6, "cubic": 2.0, "honeycomb": 2.3,
+}
+
 
 class IterativeFEASolver:
     """Orchestrate the fixed-point FEA ↔ density iteration.
+
+    Uses EasyFEA as the primary solver when available, falling back to the
+    custom scipy-based ``LinearElasticitySolver`` otherwise.
 
     Example::
 
@@ -66,7 +84,7 @@ class IterativeFEASolver:
 
         Args:
             tet_mesh: Tetrahedral mesh (nodes N×3, elements M×4,
-                surface_node_map).
+                surface_node_map, msh_path).
             boundary_conditions: A ``FEABoundaryConditionDecorator`` instance
                 providing ``getFixedFaces()`` and ``getForceGroups()``.
             material: :class:`~fea.material_database.Material` with E_xy,
@@ -112,19 +130,6 @@ class IterativeFEASolver:
                 stacklevel=2,
             )
 
-        n_elems = tet_mesh.elements.shape[0]
-        min_rho = float(config.get("min_density", 0.10))
-        max_rho = float(config.get("max_density", 0.80))
-        max_iter = int(config.get("max_iterations", 5))
-        pattern = str(config.get("infill_pattern", "gyroid"))
-        safety_factor = float(config.get("safety_factor", 2.0))
-
-        # Layer bonding coefficient: read from config (UI override) or fall
-        # back to the material's implicit value (E_z / E_xy).
-        bonding_coeff = float(
-            config.get("bonding_coeff", material.bonding_coefficient)
-        )
-
         # Warn if material failure mode is not suited for von Mises criterion
         if hasattr(material, "failure_mode") and material.failure_mode == "brittle":
             warnings.warn(
@@ -136,8 +141,180 @@ class IterativeFEASolver:
                 stacklevel=2,
             )
 
-        # --- Build boundary condition arrays from surface face → tet node map ---
+        use_easyfea = _EASYFEA_AVAILABLE and bool(tet_mesh.msh_path) and os.path.exists(tet_mesh.msh_path)
+
+        if use_easyfea:
+            Logger.log("i", "FEA solve: using EasyFEA solver (msh=%s)", tet_mesh.msh_path)
+            return self._solve_easyfea(
+                tet_mesh, boundary_conditions, material, config,
+                progress_callback, surface_mesh,
+            )
+        else:
+            Logger.log("i", "FEA solve: using scipy fallback solver (EasyFEA available=%s)",
+                       _EASYFEA_AVAILABLE)
+            return self._solve_scipy(
+                tet_mesh, boundary_conditions, material, config,
+                progress_callback, surface_mesh,
+            )
+
+    # ------------------------------------------------------------------
+    # EasyFEA solver path
+    # ------------------------------------------------------------------
+
+    def _solve_easyfea(
+        self,
+        tet_mesh: TetMesh,
+        boundary_conditions: Any,
+        material: Material,
+        config: Dict[str, Any],
+        progress_callback: Optional[Callable[[float], None]],
+        surface_mesh: Any,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        """Fixed-point iteration using EasyFEA as the FEA kernel."""
         import time as _time
+
+        min_rho = float(config.get("min_density", 0.10))
+        max_rho = float(config.get("max_density", 0.80))
+        max_iter = int(config.get("max_iterations", 5))
+        pattern = str(config.get("infill_pattern", "gyroid"))
+        safety_factor = float(config.get("safety_factor", 2.0))
+        bonding_coeff = float(config.get("bonding_coeff", material.bonding_coefficient))
+
+        # Import EasyFEA mesh from .msh file
+        _t0 = _time.monotonic()
+        mesher = Mesher()
+        mesh = mesher.Mesh_Import_mesh(tet_mesh.msh_path)
+        n_elems = mesh.Ne
+        Logger.log("d", "FEA EasyFEA: imported mesh: %d nodes, %d elems (%.3fs)",
+                   mesh.Nn, n_elems, _time.monotonic() - _t0)
+
+        # Resolve BC nodes by bounding-box position queries against the mesh
+        _t1 = _time.monotonic()
+        fixed_nodes_ef = _easyfea_fixed_nodes(boundary_conditions, mesh, surface_mesh)
+        force_groups_ef = _easyfea_force_groups(boundary_conditions, mesh, surface_mesh)
+        Logger.log("d", "FEA EasyFEA: BC mapping: %d fixed nodes, %d force groups (%.3fs)",
+                   len(fixed_nodes_ef) if fixed_nodes_ef is not None else 0,
+                   len(force_groups_ef), _time.monotonic() - _t1)
+
+        # Material scalars
+        E_xy = material.E_xy
+        nu = material.nu
+        n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
+
+        density = np.full(n_elems, min_rho, dtype=np.float64)
+        stress = np.zeros(n_elems, dtype=np.float64)
+        converged = False
+        max_change = float("inf")
+        iteration = 0
+
+        for iteration in range(max_iter):
+            _iter_t = _time.monotonic()
+
+            # Effective isotropic-equivalent properties from density field
+            rho_mean = float(np.mean(density))
+            scale = rho_mean ** n_exp
+
+            E_avg = E_xy * scale
+            E_t_avg = E_xy * bonding_coeff * scale
+            # Shear: G = E / (2(1+ν)) for isotropic layer, scaled by bonding for transverse
+            G_avg = E_avg / (2.0 * (1.0 + nu))
+            nu_t = nu * (bonding_coeff ** 0.5)
+
+            mat = TransverselyIsotropic(
+                dim=3,
+                El=E_avg,
+                Et=E_t_avg,
+                Gl=G_avg,
+                vl=nu,
+                vt=nu_t,
+            )
+
+            simu = Simulations.Elastic(mesh, mat)
+
+            # Apply Dirichlet BCs (zero displacement)
+            if fixed_nodes_ef is not None and len(fixed_nodes_ef) > 0:
+                simu.add_dirichlet(fixed_nodes_ef, [0, 0, 0], ["x", "y", "z"])
+
+            # Apply Neumann BCs (distributed forces)
+            for force_nodes, force_vec in force_groups_ef:
+                if len(force_nodes) > 0:
+                    n_fn = len(force_nodes)
+                    fx = float(force_vec.x) / n_fn
+                    fy = float(force_vec.y) / n_fn
+                    fz = float(force_vec.z) / n_fn
+                    simu.add_neumann(force_nodes, [fx, fy, fz], ["x", "y", "z"])
+
+            simu.Solve()
+
+            # Extract von Mises stress per element
+            svm = simu.Result("Svm")
+            if svm is None or len(svm) == 0:
+                stress = np.zeros(n_elems, dtype=np.float64)
+            else:
+                stress = np.asarray(svm, dtype=np.float64)
+                if len(stress) != n_elems:
+                    # EasyFEA may return nodal values; average to elements
+                    stress = np.full(n_elems, float(np.mean(stress)), dtype=np.float64)
+
+            # Map stress → density candidate
+            density_candidate = stress_to_density(
+                stress,
+                sigma_yield=material.yield_strength,
+                rho_min=min_rho,
+                rho_max=max_rho,
+                method="power",
+                safety_factor=safety_factor,
+            )
+
+            # Damping
+            density_new = _DAMPING * density + (1.0 - _DAMPING) * density_candidate
+            density_new = np.clip(density_new, min_rho, max_rho)
+
+            max_change = float(np.max(np.abs(density_new - density)))
+            density = density_new
+
+            Logger.log("d", "FEA EasyFEA iter %d: max_change=%.4f, rho_mean=%.3f (%.1fs)",
+                       iteration + 1, max_change, float(np.mean(density)),
+                       _time.monotonic() - _iter_t)
+
+            if progress_callback is not None:
+                progress_callback((iteration + 1) / max_iter)
+
+            if max_change < _CONVERGENCE_TOL:
+                converged = True
+                break
+
+        info: Dict[str, Any] = {
+            "iterations": iteration + 1,
+            "converged": converged,
+            "max_change": max_change,
+        }
+        return density, stress, info
+
+    # ------------------------------------------------------------------
+    # Scipy fallback solver path (original implementation)
+    # ------------------------------------------------------------------
+
+    def _solve_scipy(
+        self,
+        tet_mesh: TetMesh,
+        boundary_conditions: Any,
+        material: Material,
+        config: Dict[str, Any],
+        progress_callback: Optional[Callable[[float], None]],
+        surface_mesh: Any,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        """Fixed-point iteration using the custom scipy FEA kernel."""
+        import time as _time
+
+        n_elems = tet_mesh.elements.shape[0]
+        min_rho = float(config.get("min_density", 0.10))
+        max_rho = float(config.get("max_density", 0.80))
+        max_iter = int(config.get("max_iterations", 5))
+        pattern = str(config.get("infill_pattern", "gyroid"))
+        safety_factor = float(config.get("safety_factor", 2.0))
+        bonding_coeff = float(config.get("bonding_coeff", material.bonding_coefficient))
+
         _t0 = _time.monotonic()
         fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh, surface_mesh)
         force_vector = _build_force_vector(boundary_conditions, tet_mesh, surface_mesh)
@@ -147,20 +324,15 @@ class IterativeFEASolver:
 
         fea_solver = LinearElasticitySolver()
 
-        # Initialise uniform density
         density = np.full(n_elems, min_rho, dtype=np.float64)
         stress = np.zeros(n_elems, dtype=np.float64)
-
         converged = False
         max_change = float("inf")
         iteration = 0
 
         for iteration in range(max_iter):
             _iter_start = _time.monotonic()
-            # --- Homogenize ---
-            # Vectorized: compute E_eff for all elements at once
-            n_exp = {'lines': 1.0, 'grid': 2.0, 'triangles': 1.3, 'gyroid': 1.6,
-                     'cubic': 2.0, 'honeycomb': 2.3}.get(pattern, 1.5)
+            n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
             E_eff_arr = material.E_xy * np.power(density, n_exp)
             nu_arr = np.full(n_elems, material.nu, dtype=np.float64)
             _t1 = _time.monotonic()
@@ -172,11 +344,9 @@ class IterativeFEASolver:
             K, f = fea_solver.apply_boundary_conditions(K, force_vector.copy(), fixed_nodes)
             _t3 = _time.monotonic()
 
-            # --- Solve ---
             displacements = fea_solver.solve(K, f)
             _t4 = _time.monotonic()
 
-            # --- Compute stress ---
             stress = fea_solver.compute_element_stress(
                 tet_mesh, displacements, E_eff_arr, nu_arr,
                 bonding_coeff=bonding_coeff,
@@ -185,7 +355,6 @@ class IterativeFEASolver:
             Logger.log("d", "FEA iter %d: assemble=%.1fs, BCs=%.1fs, solve=%.1fs, stress=%.1fs",
                        iteration + 1, _t2 - _t1, _t3 - _t2, _t4 - _t3, _t5 - _t4)
 
-            # --- Map stress → density candidate ---
             density_candidate = stress_to_density(
                 stress,
                 sigma_yield=material.yield_strength,
@@ -195,7 +364,6 @@ class IterativeFEASolver:
                 safety_factor=safety_factor,
             )
 
-            # --- Damping to prevent oscillation ---
             density_new = _DAMPING * density + (1.0 - _DAMPING) * density_candidate
             density_new = np.clip(density_new, min_rho, max_rho)
 
@@ -214,12 +382,96 @@ class IterativeFEASolver:
             "converged": converged,
             "max_change": max_change,
         }
-
         return density, stress, info
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# EasyFEA BC helpers (position-based node queries)
+# ---------------------------------------------------------------------------
+
+
+def _easyfea_fixed_nodes(bc: Any, mesh: Any, surface_mesh: Any) -> Optional[np.ndarray]:
+    """Resolve fixed-face indices to EasyFEA mesh node indices via AABB query.
+
+    Args:
+        bc: ``FEABoundaryConditionDecorator`` instance.
+        mesh: EasyFEA mesh object.
+        surface_mesh: ``trimesh.Trimesh`` surface mesh (may be None).
+
+    Returns:
+        Array of EasyFEA node indices, or None if no fixed faces.
+    """
+    fixed_face_indices: List[int] = bc.getFixedFaces()
+    if not fixed_face_indices:
+        return None
+
+    if surface_mesh is not None:
+        sv_indices = _face_indices_to_vertex_indices(fixed_face_indices, surface_mesh)
+        if not sv_indices:
+            return None
+        pos_arr = np.array([surface_mesh.vertices[i] for i in sv_indices], dtype=np.float64)
+    else:
+        # No surface mesh: treat face indices as vertex indices of the tet mesh
+        # (legacy fallback — positional query not possible without coordinates)
+        return None
+
+    pos_min = pos_arr.min(axis=0) - 0.1
+    pos_max = pos_arr.max(axis=0) + 0.1
+
+    nodes = mesh.Nodes_Conditions(
+        lambda x, y, z: (
+            (x >= pos_min[0]) & (x <= pos_max[0]) &
+            (y >= pos_min[1]) & (y <= pos_max[1]) &
+            (z >= pos_min[2]) & (z <= pos_max[2])
+        )
+    )
+    return nodes if nodes is not None and len(nodes) > 0 else None
+
+
+def _easyfea_force_groups(
+    bc: Any, mesh: Any, surface_mesh: Any
+) -> List[Tuple[np.ndarray, Any]]:
+    """Map force groups to (EasyFEA node array, force UM.Vector) pairs.
+
+    Args:
+        bc: ``FEABoundaryConditionDecorator`` instance.
+        mesh: EasyFEA mesh object.
+        surface_mesh: ``trimesh.Trimesh`` surface mesh (may be None).
+
+    Returns:
+        List of ``(node_array, force_vector)`` tuples.
+    """
+    result: List[Tuple[np.ndarray, Any]] = []
+
+    for force_group in bc.getForceGroups():
+        if surface_mesh is not None:
+            sv_indices = _face_indices_to_vertex_indices(
+                [int(fi) for fi in force_group.face_indices], surface_mesh
+            )
+            if not sv_indices:
+                continue
+            fp_arr = np.array([surface_mesh.vertices[i] for i in sv_indices], dtype=np.float64)
+        else:
+            continue  # Cannot resolve without surface mesh coordinates
+
+        fp_min = fp_arr.min(axis=0) - 0.1
+        fp_max = fp_arr.max(axis=0) + 0.1
+
+        force_nodes = mesh.Nodes_Conditions(
+            lambda x, y, z: (
+                (x >= fp_min[0]) & (x <= fp_max[0]) &
+                (y >= fp_min[1]) & (y <= fp_max[1]) &
+                (z >= fp_min[2]) & (z <= fp_max[2])
+            )
+        )
+        if force_nodes is not None and len(force_nodes) > 0:
+            result.append((force_nodes, force_group.force))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers (scipy path)
 # ---------------------------------------------------------------------------
 
 

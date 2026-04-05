@@ -154,6 +154,19 @@ with zipfile.ZipFile(wheel) as z:
     echo ""
 done
 
+# ── EasyFEA (pure Python, platform-independent) ────────────────────────────
+echo "── Downloading EasyFEA (pure Python) ──"
+"$PYTHON" -m pip install EasyFEA --no-deps \
+    --target "$VENDOR_DIR" --upgrade --quiet 2>&1 | grep -v "^\[notice\]" || true
+
+# Verify EasyFEA installed
+if "$PYTHON" -c "import sys; sys.path.insert(0,'${VENDOR_DIR}'); import EasyFEA" 2>/dev/null; then
+    echo "  ✓ EasyFEA installed"
+else
+    echo "  ✗ EasyFEA install failed (non-fatal — scipy fallback will be used)"
+fi
+echo ""
+
 # Create a symlink or copy for the current platform's lib
 echo "Setting up current platform library path..."
 "$PYTHON" -c "
@@ -202,7 +215,13 @@ try:
     print('  ✓ Native library loads OK')
 except Exception as e:
     print(f'  ✗ Native library failed: {e}')
-" 2>/dev/null || echo "  ✗ Import failed"
+" 2>/dev/null || echo "  ✗ gmsh import failed"
+
+PYTHONPATH="$VENDOR_DIR" "$PYTHON" -c "
+import EasyFEA
+ver = getattr(EasyFEA, '__version__', 'unknown')
+print(f'  ✓ EasyFEA {ver}')
+" 2>/dev/null || echo "  ✗ EasyFEA import failed (will use scipy fallback)"
 
 echo ""
 echo "Vendor directory:"
