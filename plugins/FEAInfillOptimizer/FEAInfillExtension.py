@@ -167,9 +167,11 @@ class FEAInfillExtension(QObject, Extension):
             try:
                 bc = node.callDecoration("getBoundaryConditions")
                 if bc is not None and bc.hasAnyBC():
-                    node.metadata[self._BC_METADATA_KEY] = json.dumps(bc.toDict())
-                    Logger.log("d", "FEA Infill: Saved BCs for node '%s' (%d fixed, %d forces)",
-                               node.getName(), bc.getFixedFaceCount(), bc.getForceGroupCount())
+                    bc_dict = bc.toDict()
+                    node.metadata[self._BC_METADATA_KEY] = json.dumps(bc_dict)
+                    Logger.log("d", "FEA Infill: Saved BCs for node '%s' (%d fixed, %d forces, %d torques)",
+                               node.getName(), bc.getFixedFaceCount(),
+                               bc.getForceGroupCount(), bc.getTorqueGroupCount())
                 elif self._BC_METADATA_KEY in node.metadata:
                     del node.metadata[self._BC_METADATA_KEY]
             except Exception:
