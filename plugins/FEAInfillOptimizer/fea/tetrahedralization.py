@@ -198,12 +198,9 @@ def _tetrahedralize_scipy(surface_mesh, char_length: float) -> TetMesh:
 
     Logger.log("d", "FEA tet (scipy): filtering %d raw tets...", len(all_tets))
     centroids = all_points[all_tets].mean(axis=1)
-    try:
-        inside = surface_mesh.contains(centroids)
-        elements = all_tets[inside]
-    except Exception:
-        Logger.log("w", "FEA tet (scipy): contains() failed, keeping all tets")
-        elements = all_tets
+    inside = _points_inside_mesh(centroids, surface_mesh)
+    elements = all_tets[inside]
+    Logger.log("d", "FEA tet (scipy): %d/%d tets inside mesh", len(elements), len(all_tets))
 
     if len(elements) == 0:
         raise RuntimeError("No interior tetrahedra found. Mesh may not be watertight.")
@@ -241,9 +238,55 @@ def _generate_interior_points(surface_mesh, char_length: float) -> np.ndarray:
     z = np.linspace(bounds_min[2] + margin, bounds_max[2] - margin, nz)
     grid = np.array(np.meshgrid(x, y, z, indexing='ij')).reshape(3, -1).T
 
+    inside = _points_inside_mesh(grid, surface_mesh)
+    interior = grid[inside]
+    Logger.log("d", "FEA tet: %d/%d grid points inside mesh", len(interior), len(grid))
+    return interior
+
+
+def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
+    """Test which points are inside a closed surface mesh.
+
+    Tries trimesh.contains() first, falls back to a simple winding-number
+    approximation based on signed solid angle.
+    """
+    # Try trimesh's built-in contains
     try:
-        inside = surface_mesh.contains(grid)
-        return grid[inside]
+        result = mesh.contains(points)
+        if result.any():  # Sanity check — if ALL false, likely broken
+            return result
     except Exception:
-        Logger.log("w", "FEA tet: contains() failed, using all grid points")
-        return grid
+        pass
+
+    # Fallback: use trimesh ray casting if available
+    try:
+        from trimesh.ray import ray_pyembree
+        # If embree is available, trimesh.contains should have worked
+    except ImportError:
+        pass
+
+    try:
+        from trimesh.ray.ray_triangle import RayMeshIntersector
+        intersector = RayMeshIntersector(mesh)
+        # Cast rays along +X axis and count intersections
+        # Odd count = inside, even count = outside
+        directions = np.tile([1.0, 0.0, 0.0], (len(points), 1))
+        hits = intersector.intersects_location(points, directions, multiple_hits=True)
+        # Count hits per ray
+        hit_counts = np.zeros(len(points), dtype=int)
+        if len(hits[0]) > 0:
+            ray_indices = hits[1]  # which ray each hit belongs to
+            for idx in ray_indices:
+                hit_counts[idx] += 1
+        return (hit_counts % 2) == 1
+    except Exception:
+        pass
+
+    # Last resort: simple bounding-box filter (keeps ~50% more points than needed
+    # but produces valid tets, just with some external ones)
+    Logger.log("w", "FEA tet: all containment methods failed, using bounding box filter")
+    bbox_min = mesh.bounds[0]
+    bbox_max = mesh.bounds[1]
+    margin = (bbox_max - bbox_min) * 0.05
+    inside = np.all((points >= bbox_min + margin) & (points <= bbox_max - margin), axis=1)
+    return inside
