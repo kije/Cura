@@ -838,6 +838,15 @@ class BoundaryConditionTool(Tool):
             self._hover_faces = []
             return False
 
+        # ── Only allow face interaction in DEFINE phase ──────────────────
+        current_phase = self._extension.phase if self._extension else "define"
+        if current_phase != "define":
+            # Clear hover when leaving define phase
+            if self._hover_faces:
+                self._hover_faces = []
+                self._update_highlights()
+            return False
+
         # ── Hover preview: highlight face under cursor ─────────────────────
         if event.type == Event.MouseMoveEvent and self._mode in (MODE_FIXED, MODE_FORCE, MODE_TORQUE):
             self._update_hover_preview(event)
