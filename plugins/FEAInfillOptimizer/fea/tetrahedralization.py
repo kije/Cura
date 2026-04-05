@@ -125,7 +125,10 @@ def _run_gmsh(
     """
     with _GMSH_LOCK:
         try:
-            gmsh.initialize()
+            # Pass interruptible=False to prevent gmsh from registering
+            # signal handlers (which fails on background threads with
+            # "signal only works in main thread of the main interpreter").
+            gmsh.initialize(interruptible=False)
             gmsh.option.setNumber("General.Verbosity", 1)
 
             gmsh.merge(stl_path)
