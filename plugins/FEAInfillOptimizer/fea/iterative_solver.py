@@ -135,8 +135,13 @@ class IterativeFEASolver:
             )
 
         # --- Build boundary condition arrays from surface face → tet node map ---
+        import time as _time
+        _t0 = _time.monotonic()
         fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh, surface_mesh)
         force_vector = _build_force_vector(boundary_conditions, tet_mesh, surface_mesh)
+        Logger.log("d", "FEA solve: %d fixed nodes, force vector norm=%.2f (%.3fs)",
+                   len(fixed_nodes), float(np.linalg.norm(force_vector)),
+                   _time.monotonic() - _t0)
 
         fea_solver = LinearElasticitySolver()
 
@@ -149,6 +154,7 @@ class IterativeFEASolver:
         iteration = 0
 
         for iteration in range(max_iter):
+            _iter_start = _time.monotonic()
             # --- Homogenize ---
             E_eff_arr = np.array(
                 [
@@ -160,19 +166,26 @@ class IterativeFEASolver:
             nu_arr = np.full(n_elems, material.nu, dtype=np.float64)
 
             # --- Assemble & apply BCs ---
+            _t1 = _time.monotonic()
             K = fea_solver.assemble_stiffness_matrix(
                 tet_mesh, E_eff_arr, nu_arr, bonding_coeff=bonding_coeff
             )
+            _t2 = _time.monotonic()
             K, f = fea_solver.apply_boundary_conditions(K, force_vector.copy(), fixed_nodes)
+            _t3 = _time.monotonic()
 
             # --- Solve ---
             displacements = fea_solver.solve(K, f)
+            _t4 = _time.monotonic()
 
             # --- Compute stress ---
             stress = fea_solver.compute_element_stress(
                 tet_mesh, displacements, E_eff_arr, nu_arr,
                 bonding_coeff=bonding_coeff,
             )
+            _t5 = _time.monotonic()
+            Logger.log("d", "FEA iter %d: assemble=%.1fs, BCs=%.1fs, solve=%.1fs, stress=%.1fs",
+                       iteration + 1, _t2 - _t1, _t3 - _t2, _t4 - _t3, _t5 - _t4)
 
             # --- Map stress → density candidate ---
             density_candidate = stress_to_density(
