@@ -884,8 +884,12 @@ class BoundaryConditionTool(Tool):
                 return False
 
             # Quick setup: if in a pick-face mode, handle it first
-            if self._quick_setup_mode and self._handle_quick_setup_click(picked_node, face_index):
-                return True
+            if self._quick_setup_mode:
+                Logger.log("d", "FEA: Quick setup mode '%s' active, handling face %d",
+                           self._quick_setup_mode, face_index)
+                if self._handle_quick_setup_click(picked_node, face_index):
+                    return True
+                Logger.log("w", "FEA: Quick setup click handler returned False")
 
             # Expand selection if a face group mode is active
             if self._selection_mode != "single" and _FACE_GROUP_ANALYZER_AVAILABLE:

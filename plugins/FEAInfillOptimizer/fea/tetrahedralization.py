@@ -131,29 +131,32 @@ def _run_gmsh(
             gmsh.initialize(interruptible=False)
             gmsh.option.setNumber("General.Verbosity", 1)
 
+            Logger.log("d", "FEA tet: merging STL...")
             gmsh.merge(stl_path)
 
-            # Classify surfaces and create geometry entities in the built-in
-            # (geo) kernel from the imported mesh.
-            angle = 40.0  # angle threshold for feature detection (degrees)
+            Logger.log("d", "FEA tet: classifying surfaces...")
+            angle = 40.0
             gmsh.model.mesh.classifySurfaces(
                 np.deg2rad(angle), True, True, np.deg2rad(180.0)
             )
+            Logger.log("d", "FEA tet: creating geometry...")
             gmsh.model.mesh.createGeometry()
 
-            # Create volume from all surfaces (built-in geo kernel)
             surfaces = gmsh.model.getEntities(2)
+            Logger.log("d", "FEA tet: found %d surfaces, creating volume...", len(surfaces))
             surface_loop = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
             gmsh.model.geo.addVolume([surface_loop])
             gmsh.model.geo.synchronize()
 
-            # Mesh options
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.1)
             gmsh.option.setNumber("Mesh.Algorithm3D", 1)  # Delaunay
 
+            Logger.log("d", "FEA tet: generating 3D mesh...")
             gmsh.model.mesh.generate(3)
+            Logger.log("d", "FEA tet: optimizing mesh...")
             gmsh.model.mesh.optimize("Netgen")
+            Logger.log("d", "FEA tet: mesh generation complete")
 
             # Extract nodes
             node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
