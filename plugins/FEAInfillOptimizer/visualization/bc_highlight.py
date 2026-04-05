@@ -24,6 +24,7 @@ class BCHighlightHandle(ToolHandle):
         super().__init__(parent)
         self._name = "FEABCHighlight"
         self._auto_scale = False
+        self.setEnabled(False)  # Start disabled to avoid "batch without mesh" warnings
 
     # ------------------------------------------------------------------
     # Public API
