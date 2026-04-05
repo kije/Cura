@@ -131,22 +131,13 @@ def _run_gmsh(
             gmsh.initialize(interruptible=False)
             gmsh.option.setNumber("General.Verbosity", 1)
 
-            Logger.log("d", "FEA tet: merging STL...")
-            gmsh.merge(stl_path)
-
-            Logger.log("d", "FEA tet: classifying surfaces...")
-            angle = 40.0
-            gmsh.model.mesh.classifySurfaces(
-                np.deg2rad(angle), True, True, np.deg2rad(180.0)
-            )
-            Logger.log("d", "FEA tet: creating geometry...")
-            gmsh.model.mesh.createGeometry()
-
-            surfaces = gmsh.model.getEntities(2)
-            Logger.log("d", "FEA tet: found %d surfaces, creating volume...", len(surfaces))
-            surface_loop = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
-            gmsh.model.geo.addVolume([surface_loop])
-            gmsh.model.geo.synchronize()
+            # Use OCC kernel to import STL and create a volume.
+            # The geo kernel approach (classifySurfaces + createGeometry)
+            # hangs in some gmsh versions — OCC is more robust.
+            Logger.log("d", "FEA tet: importing STL via OCC...")
+            shapes = gmsh.model.occ.importShapes(stl_path)
+            Logger.log("d", "FEA tet: imported %d shapes", len(shapes))
+            gmsh.model.occ.synchronize()
 
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.1)
@@ -155,7 +146,10 @@ def _run_gmsh(
             Logger.log("d", "FEA tet: generating 3D mesh...")
             gmsh.model.mesh.generate(3)
             Logger.log("d", "FEA tet: optimizing mesh...")
-            gmsh.model.mesh.optimize("Netgen")
+            try:
+                gmsh.model.mesh.optimize("Netgen")
+            except Exception:
+                Logger.log("w", "FEA tet: Netgen optimization failed, using unoptimized mesh")
             Logger.log("d", "FEA tet: mesh generation complete")
 
             # Extract nodes
