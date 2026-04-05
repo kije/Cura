@@ -1,0 +1,16 @@
+pytetwild-0.2.3.dist-info/INSTALLER,sha256=zuuue4knoyJ-UwPPXg8fezS7VCrXJQrAP7zeNuwvFQg,4
+pytetwild-0.2.3.dist-info/METADATA,sha256=FvgvCsE6ZKwL-he3KpoQ9Hx931_-0xtE0wvbLQQC18Y,6138
+pytetwild-0.2.3.dist-info/RECORD,,
+pytetwild-0.2.3.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+pytetwild-0.2.3.dist-info/WHEEL,sha256=KOmT2yX44Vs3NIXB-Eq_iqa3u0-3wKdePRE7rAXXlQQ,140
+pytetwild-0.2.3.dist-info/licenses/LICENSE,sha256=S4nUUYvRNatO4VSnvOciJGtXqYw9fvwaCUCYmBYMK9E,16724
+pytetwild/.dylibs/libgmp.10.dylib,sha256=IrE5eu6F50OYUD8UvHwYN-ZM5rJwy2J3vWtzJwtYPd4,452832
+pytetwild/PyfTetWildWrapper.abi3.so,sha256=6NVfLRL7v_hChps8Vp9uNqrfl4F-ftPv8eSc9Sk-VYs,5602336
+pytetwild/PyfTetWildWrapper.pyi,sha256=rbPefBam_p_N0UE1SgTjvLNLSkRYHmkAbyKobWlJsO0,769
+pytetwild/__init__.py,sha256=uIyInmpybLC_OCJyr2yYVcdp0WxweLudksNqKvOijpY,168
+pytetwild/__pycache__/__init__.cpython-312.pyc,,
+pytetwild/__pycache__/_version.cpython-312.pyc,,
+pytetwild/__pycache__/pytetwild.cpython-312.pyc,,
+pytetwild/_version.py,sha256=qDxTMPS7diuO_YwLR1aF11vCH9c4gjMocv2O7QB-wFk,115
+pytetwild/py.typed,sha256=mDShSrm8qg9qjacQc2F-rI8ATllqP6EdgHuEYxuCXZ0,7
+pytetwild/pytetwild.py,sha256=HSVhEvfJRRbewIOb1o9MWTyY4fC7wNHvQjv3t6C1A_A,12658

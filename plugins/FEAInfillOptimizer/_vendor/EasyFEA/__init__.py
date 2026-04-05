@@ -1,0 +1,18 @@
+# Copyright (C) 2021-2024 Université Gustave Eiffel.
+# Copyright (C) 2025-2026 Université Gustave Eiffel, INRIA.
+# This file is part of the EasyFEA project.
+# EasyFEA is distributed under the terms of the GNU General Public License v3, see LICENSE.txt and CREDITS.md for more information.
+
+BUILDING_GALLERY = False
+
+# utilities
+from .Utilities import Display, Folder, Paraview, PyVista, Vizir, MeshIO, Tic, GLTF, USD
+
+# fem
+from .FEM import Mesher, ElemType, Mesh, MatrixType
+
+# simulations
+from .Simulations.Solvers import SolverType, AlgoType
+
+# version
+from .__about__ import __version__
