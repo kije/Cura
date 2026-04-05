@@ -24,6 +24,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
+from UM.Logger import Logger
+
 try:
     import trimesh as _trimesh
 except ImportError:
