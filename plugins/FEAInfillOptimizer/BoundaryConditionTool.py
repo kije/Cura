@@ -1121,9 +1121,11 @@ class BoundaryConditionTool(Tool):
         # Auto-compute outward surface normal as initial force direction
         normal = compute_face_normal(verts, indices, self._current_face_selection)
 
-        # Apply the force in the INWARD direction (push into the surface)
-        # with current magnitude
-        force_dir = Vector(-normal.x, -normal.y, -normal.z)
+        # Apply the force along the OUTWARD normal (pressing into the surface
+        # from the outside, which is the common real-world load direction).
+        # The surface normal points outward, so the force acts in the normal
+        # direction — e.g. pressing down on a top face, pushing in on a side.
+        force_dir = Vector(normal.x, normal.y, normal.z)
         mag = self._force_magnitude
         force = Vector(force_dir.x * mag, force_dir.y * mag, force_dir.z * mag)
 
