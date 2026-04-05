@@ -104,6 +104,7 @@ class BoundaryConditionTool(Tool):
 
         # Hover preview faces (shown in orange when mouse hovers over model)
         self._hover_faces: list = []
+        self._hover_preview_enabled = True
 
         # Quick setup state
         self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed"
@@ -152,6 +153,7 @@ class BoundaryConditionTool(Tool):
             "ActiveNodeName", "MeshQuality", "MeshWarnings",
             "MinDensity", "MaxDensity", "NumZones", "MaxIterations", "BondingCoeff",
             "DepsAvailable", "InstallDependencies",
+            "HoverPreviewEnabled",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -672,6 +674,16 @@ class BoundaryConditionTool(Tool):
 
     def setDepsAvailable(self, value) -> None:
         pass
+
+    def getHoverPreviewEnabled(self) -> bool:
+        return self._hover_preview_enabled
+
+    def setHoverPreviewEnabled(self, value) -> None:
+        self._hover_preview_enabled = bool(value)
+        if not self._hover_preview_enabled and self._hover_faces:
+            self._hover_faces = []
+            self._update_highlights()
+        self.propertyChanged.emit()
 
     def getInstallDependencies(self) -> bool:
         return False
@@ -1284,6 +1296,9 @@ class BoundaryConditionTool(Tool):
 
     def _update_hover_preview(self, event) -> None:
         """Update the hover face preview on mouse move."""
+        if not self._hover_preview_enabled:
+            return
+
         if self._selection_pass is None:
             self._selection_pass = Application.getInstance().getRenderer().getRenderPass("selection")
             if not self._selection_pass:
@@ -1319,27 +1334,7 @@ class BoundaryConditionTool(Tool):
 
         # Expand hover to show full group in surface/hole/cylinder mode
         if self._selection_mode != "single" and _FACE_GROUP_ANALYZER_AVAILABLE:
-            mesh_data = picked_node.getMeshData()
-            if mesh_data is not None:
-                verts = mesh_data.getVertices()
-                indices = mesh_data.getIndices()
-                if verts is not None:
-                    adjacency = self._ensure_adjacency(picked_node, verts, indices)
-                    if adjacency is not None:
-                        if self._selection_mode == "flat":
-                            hover = find_coplanar_group(verts, indices, face_index, adjacency)
-                        elif self._selection_mode == "hole":
-                            hover = find_hole_surface(verts, indices, face_index, adjacency)
-                        elif self._selection_mode == "cylinder":
-                            hover = find_cylinder_surface(verts, indices, face_index, adjacency)
-                        else:
-                            hover = [face_index]
-                    else:
-                        hover = [face_index]
-                else:
-                    hover = [face_index]
-            else:
-                hover = [face_index]
+            hover = self._compute_hover_group_with_timeout(picked_node, face_index)
         else:
             hover = [face_index]
 
@@ -1347,6 +1342,53 @@ class BoundaryConditionTool(Tool):
         if hover != self._hover_faces:
             self._hover_faces = hover
             self._update_highlights()
+
+    def _compute_hover_group_with_timeout(self, node, face_index, timeout=2.0):
+        """Compute face group for hover with a timeout to prevent UI freeze.
+
+        Complex meshes can take a long time for BFS flood-fill in hole/cylinder
+        mode. This runs the computation in a thread with a 2-second timeout.
+        Falls back to single-face highlight if the computation takes too long.
+        """
+        import threading
+
+        mesh_data = node.getMeshData()
+        if mesh_data is None:
+            return [face_index]
+        verts = mesh_data.getVertices()
+        indices = mesh_data.getIndices()
+        if verts is None:
+            return [face_index]
+
+        adjacency = self._ensure_adjacency(node, verts, indices)
+        if adjacency is None:
+            return [face_index]
+
+        result = [None]  # mutable container for thread result
+
+        def _compute():
+            try:
+                if self._selection_mode == "flat":
+                    result[0] = find_coplanar_group(verts, indices, face_index, adjacency)
+                elif self._selection_mode == "hole":
+                    result[0] = find_hole_surface(verts, indices, face_index, adjacency)
+                elif self._selection_mode == "cylinder":
+                    result[0] = find_cylinder_surface(verts, indices, face_index, adjacency)
+                else:
+                    result[0] = [face_index]
+            except Exception:
+                result[0] = [face_index]
+
+        thread = threading.Thread(target=_compute, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            # Computation timed out — fall back to single face
+            Logger.log("w", "FEA: hover group computation timed out (>%.0fs), showing single face", timeout)
+            return [face_index]
+
+        return result[0] if result[0] is not None else [face_index]
 
     def getRequiredExtraRenderingPasses(self) -> list:
         return ["picking_selected"]

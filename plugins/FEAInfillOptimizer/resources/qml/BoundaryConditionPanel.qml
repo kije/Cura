@@ -187,6 +187,34 @@ Item
                         text: catalog.i18nc("@info", "Click: select face | Alt+click (Option on Mac): toggle face")
                     }
 
+                    // Hover preview toggle
+                    RowLayout
+                    {
+                        Layout.fillWidth: true
+                        spacing: UM.Theme.getSize("default_margin").width / 2
+
+                        CheckBox
+                        {
+                            id: hoverToggle
+                            checked: toolProperties.getValue("HoverPreviewEnabled") !== false
+                            onClicked: UM.Controller.setProperty("HoverPreviewEnabled", checked)
+                        }
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@option", "Highlight face on hover")
+                            font: UM.Theme.getFont("small")
+                            color: UM.Theme.getColor("text_medium")
+                            Layout.fillWidth: true
+
+                            MouseArea
+                            {
+                                anchors.fill: parent
+                                onClicked: { hoverToggle.checked = !hoverToggle.checked; UM.Controller.setProperty("HoverPreviewEnabled", hoverToggle.checked) }
+                            }
+                        }
+                    }
+
                     // ── Rotate mode indicator ─────────────────────────────
                     Rectangle
                     {
