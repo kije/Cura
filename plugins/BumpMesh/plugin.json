@@ -1,0 +1,8 @@
+{
+    "name": "BumpMesh",
+    "author": "Community",
+    "version": "1.0.0",
+    "description": "Applies displacement/texture mapping to 3D model surfaces for texturizing geometry",
+    "api": 8,
+    "i18n-catalog": "cura"
+}
