@@ -13,7 +13,7 @@ Item
     id: base
 
     width: childrenRect.width
-    height: Math.min(mainColumn.implicitHeight, UM.Theme.getSize("toolbox").height)
+    height: childrenRect.height
     UM.I18nCatalog { id: catalog; name: "cura"}
 
     property int currentDrawingMode: UM.Controller.properties.getValue("DrawingMode") ?? 0
@@ -39,447 +39,396 @@ Item
         onTriggered: UM.Controller.triggerAction("redoStackAction")
     }
 
-    Flickable
+    Column
     {
-        id: scrollView
-        anchors.fill: parent
-        contentHeight: mainColumn.implicitHeight
-        contentWidth: mainColumn.implicitWidth
-        clip: true
-        flickableDirection: Flickable.VerticalFlick
-        boundsBehavior: Flickable.StopAtBounds
+        id: mainColumn
+        spacing: UM.Theme.getSize("default_margin").height
 
-        ScrollBar.vertical: ScrollBar
+        // --- Paint Mode ---
+        RowLayout
         {
-            policy: scrollView.contentHeight > scrollView.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            id: rowPaintMode
+            width: parent.width
+
+            PaintModeButton
+            {
+                text: catalog.i18nc("@action:button", "Seam")
+                icon: "Seam"
+                tooltipText: catalog.i18nc("@tooltip", "Refine seam placement by defining preferred/avoidance areas")
+                mode: "seam"
+            }
+
+            PaintModeButton
+            {
+                text: catalog.i18nc("@action:button", "Support")
+                icon: "Support"
+                tooltipText: catalog.i18nc("@tooltip", "Refine support placement by defining preferred/avoidance areas")
+                mode: "support"
+                visible: false
+            }
+
+            PaintModeButton
+            {
+                text: catalog.i18nc("@action:button", "Material")
+                icon: "Extruder"
+                tooltipText: catalog.i18nc("@tooltip", "Paint on model to select the material to be used")
+                mode: "extruder"
+            }
         }
 
-        Column
+        Rectangle
         {
-            id: mainColumn
-            spacing: UM.Theme.getSize("default_margin").height
+            width: parent.width
+            height: UM.Theme.getSize("default_lining").height
+            color: UM.Theme.getColor("lining")
+        }
 
-            // --- Paint Mode ---
-            RowLayout
-            {
-                id: rowPaintMode
-                width: parent.width
+        // --- Brush Color / Extruder ---
+        RowLayout
+        {
+            id: rowBrushColor
+            visible: !rowExtruder.visible
 
-                PaintModeButton
-                {
-                    text: catalog.i18nc("@action:button", "Seam")
-                    icon: "Seam"
-                    tooltipText: catalog.i18nc("@tooltip", "Refine seam placement by defining preferred/avoidance areas")
-                    mode: "seam"
-                }
-
-                PaintModeButton
-                {
-                    text: catalog.i18nc("@action:button", "Support")
-                    icon: "Support"
-                    tooltipText: catalog.i18nc("@tooltip", "Refine support placement by defining preferred/avoidance areas")
-                    mode: "support"
-                    visible: false
-                }
-
-                PaintModeButton
-                {
-                    text: catalog.i18nc("@action:button", "Material")
-                    icon: "Extruder"
-                    tooltipText: catalog.i18nc("@tooltip", "Paint on model to select the material to be used")
-                    mode: "extruder"
-                }
-            }
-
-            //Line between the sections.
-            Rectangle
-            {
-                width: parent.width
-                height: UM.Theme.getSize("default_lining").height
-                color: UM.Theme.getColor("lining")
-            }
-
-            // --- Brush Color / Extruder ---
-            RowLayout
-            {
-                id: rowBrushColor
-                visible: !rowExtruder.visible
-
-                UM.Label
-                {
-                    text: catalog.i18nc("@label", "Mark as")
-                }
-
-                BrushColorButton
-                {
-                    id: buttonPreferredArea
-                    color: "preferred"
-
-                    text: catalog.i18nc("@action:button", "Preferred")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("CheckBadge", "low")
-                        color: UM.Theme.getColor("paint_preferred_area")
-                    }
-                }
-
-                BrushColorButton
-                {
-                    id: buttonAvoidArea
-                    color: "avoid"
-
-                    text: catalog.i18nc("@action:button", "Avoid")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("CancelBadge", "low")
-                        color: UM.Theme.getColor("paint_avoid_area")
-                    }
-                }
-
-                BrushColorButton
-                {
-                    id: buttonEraseArea
-                    color: "none"
-
-                    text: catalog.i18nc("@action:button", "Erase")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("Eraser")
-                        color: UM.Theme.getColor("icon")
-                    }
-                }
-            }
-
-            RowLayout
-            {
-                id: rowExtruder
-                visible: UM.Controller.properties.getValue("PaintType") === "extruder"
-
-                UM.Label
-                {
-                    text: catalog.i18nc("@label", "Mark as")
-                }
-
-                Repeater
-                {
-                    id: repeaterExtruders
-                    model: CuraApplication.getExtrudersModel()
-                    delegate: Cura.ExtruderButton
-                    {
-                        extruder: model
-
-                        checked: UM.Controller.properties.getValue("BrushExtruder") === model.index
-                        onClicked: UM.Controller.setProperty("BrushExtruder", model.index)
-                    }
-                }
-            }
-
-            //Line between the sections.
-            Rectangle
-            {
-                width: parent.width
-                height: UM.Theme.getSize("default_lining").height
-                color: UM.Theme.getColor("lining")
-            }
-
-            // --- Drawing Tool ---
             UM.Label
             {
-                text: catalog.i18nc("@label", "Drawing Tool")
+                text: catalog.i18nc("@label", "Mark as")
             }
 
-            GridLayout
+            BrushColorButton
             {
-                id: gridDrawingTool
-                columns: 3
-                columnSpacing: UM.Theme.getSize("default_margin").width / 2
-                rowSpacing: UM.Theme.getSize("default_margin").height / 2
-
-                DrawingToolButton
+                id: buttonPreferredArea
+                color: "preferred"
+                text: catalog.i18nc("@action:button", "Preferred")
+                toolItem: UM.ColorImage
                 {
-                    drawingMode: Cura.ExtPaintToolDrawingMode.FREEHAND
-                    text: catalog.i18nc("@action:button", "Brush")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("Brush")
-                        color: UM.Theme.getColor("icon")
-                    }
-                }
-
-                DrawingToolButton
-                {
-                    drawingMode: Cura.ExtPaintToolDrawingMode.LINE
-                    text: catalog.i18nc("@action:button", "Line")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("Pen")
-                        color: UM.Theme.getColor("icon")
-                    }
-                }
-
-                DrawingToolButton
-                {
-                    drawingMode: Cura.ExtPaintToolDrawingMode.RECTANGLE
-                    text: catalog.i18nc("@action:button", "Rect")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("MeshTypeNormal")
-                        color: UM.Theme.getColor("icon")
-                    }
-                }
-
-                DrawingToolButton
-                {
-                    drawingMode: Cura.ExtPaintToolDrawingMode.CIRCLE
-                    text: catalog.i18nc("@action:button", "Circle")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("Circle")
-                        color: UM.Theme.getColor("icon")
-                    }
-                }
-
-                DrawingToolButton
-                {
-                    drawingMode: Cura.ExtPaintToolDrawingMode.POLYGON
-                    text: catalog.i18nc("@action:button", "Polygon")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("Star")
-                        color: UM.Theme.getColor("icon")
-                    }
-                }
-
-                DrawingToolButton
-                {
-                    drawingMode: Cura.ExtPaintToolDrawingMode.FILL
-                    text: catalog.i18nc("@action:button", "Fill")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("Hammer")
-                        color: UM.Theme.getColor("icon")
-                    }
+                    source: UM.Theme.getIcon("CheckBadge", "low")
+                    color: UM.Theme.getColor("paint_preferred_area")
                 }
             }
 
-            //Line between the sections.
-            Rectangle
+            BrushColorButton
             {
-                width: parent.width
-                height: UM.Theme.getSize("default_lining").height
-                color: UM.Theme.getColor("lining")
+                id: buttonAvoidArea
+                color: "avoid"
+                text: catalog.i18nc("@action:button", "Avoid")
+                toolItem: UM.ColorImage
+                {
+                    source: UM.Theme.getIcon("CancelBadge", "low")
+                    color: UM.Theme.getColor("paint_avoid_area")
+                }
             }
 
-            // --- Brush Shape (Freehand only) ---
-            RowLayout
+            BrushColorButton
             {
-                id: rowBrushShape
-                visible: base.showBrushShape
-
-                UM.Label
+                id: buttonEraseArea
+                color: "none"
+                text: catalog.i18nc("@action:button", "Erase")
+                toolItem: UM.ColorImage
                 {
-                    text: catalog.i18nc("@label", "Brush Shape")
-                }
-
-                BrushShapeButton
-                {
-                    id: buttonBrushCircle
-                    shape: Cura.ExtPaintToolBrush.CIRCLE
-
-                    text: catalog.i18nc("@action:button", "Circle")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("Circle")
-                        color: UM.Theme.getColor("icon")
-                    }
-                }
-
-                BrushShapeButton
-                {
-                    id: buttonBrushSquare
-                    shape: Cura.ExtPaintToolBrush.SQUARE
-
-                    text: catalog.i18nc("@action:button", "Square")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("MeshTypeNormal")
-                        color: UM.Theme.getColor("icon")
-                    }
+                    source: UM.Theme.getIcon("Eraser")
+                    color: UM.Theme.getColor("icon")
                 }
             }
+        }
 
-            // --- Brush Size (Freehand + Line) ---
+        RowLayout
+        {
+            id: rowExtruder
+            visible: UM.Controller.properties.getValue("PaintType") === "extruder"
+
             UM.Label
             {
-                text: catalog.i18nc("@label", "Brush Size")
-                visible: base.showBrushSize
+                text: catalog.i18nc("@label", "Mark as")
             }
 
-            UM.Slider
+            Repeater
             {
-                id: shapeSizeSlider
-                width: parent.width
-                indicatorVisible: false
-                visible: base.showBrushSize
-
-                from: 1
-                to: 100
-                value: UM.Controller.properties.getValue("BrushSize")
-
-                onPressedChanged: function(pressed)
+                id: repeaterExtruders
+                model: CuraApplication.getExtrudersModel()
+                delegate: Cura.ExtruderButton
                 {
-                    if(! pressed)
-                    {
-                        UM.Controller.setProperty("BrushSize", shapeSizeSlider.value);
-                    }
+                    extruder: model
+                    checked: UM.Controller.properties.getValue("BrushExtruder") === model.index
+                    onClicked: UM.Controller.setProperty("BrushExtruder", model.index)
+                }
+            }
+        }
+
+        Rectangle
+        {
+            width: parent.width
+            height: UM.Theme.getSize("default_lining").height
+            color: UM.Theme.getColor("lining")
+        }
+
+        // --- Drawing Tool ---
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Drawing Tool")
+        }
+
+        GridLayout
+        {
+            id: gridDrawingTool
+            columns: 3
+            columnSpacing: UM.Theme.getSize("default_margin").width / 2
+            rowSpacing: UM.Theme.getSize("default_margin").height / 2
+
+            DrawingToolButton
+            {
+                drawingMode: Cura.ExtPaintToolDrawingMode.FREEHAND
+                text: catalog.i18nc("@action:button", "Brush")
+                toolItem: UM.ColorImage
+                {
+                    source: UM.Theme.getIcon("Brush")
+                    color: UM.Theme.getColor("icon")
                 }
             }
 
-            //Line between the sections.
-            Rectangle
+            DrawingToolButton
             {
-                width: parent.width
-                height: UM.Theme.getSize("default_lining").height
-                color: UM.Theme.getColor("lining")
+                drawingMode: Cura.ExtPaintToolDrawingMode.LINE
+                text: catalog.i18nc("@action:button", "Line")
+                toolItem: UM.ColorImage
+                {
+                    source: UM.Theme.getIcon("Pen")
+                    color: UM.Theme.getColor("icon")
+                }
             }
 
-            // --- Symmetry ---
+            DrawingToolButton
+            {
+                drawingMode: Cura.ExtPaintToolDrawingMode.RECTANGLE
+                text: catalog.i18nc("@action:button", "Rect")
+                toolItem: UM.ColorImage
+                {
+                    source: UM.Theme.getIcon("MeshTypeNormal")
+                    color: UM.Theme.getColor("icon")
+                }
+            }
+
+            DrawingToolButton
+            {
+                drawingMode: Cura.ExtPaintToolDrawingMode.CIRCLE
+                text: catalog.i18nc("@action:button", "Circle")
+                toolItem: UM.ColorImage
+                {
+                    source: UM.Theme.getIcon("Circle")
+                    color: UM.Theme.getColor("icon")
+                }
+            }
+
+            DrawingToolButton
+            {
+                drawingMode: Cura.ExtPaintToolDrawingMode.POLYGON
+                text: catalog.i18nc("@action:button", "Polygon")
+                toolItem: UM.ColorImage
+                {
+                    source: UM.Theme.getIcon("Star")
+                    color: UM.Theme.getColor("icon")
+                }
+            }
+
+            DrawingToolButton
+            {
+                drawingMode: Cura.ExtPaintToolDrawingMode.FILL
+                text: catalog.i18nc("@action:button", "Fill")
+                toolItem: UM.ColorImage
+                {
+                    source: UM.Theme.getIcon("Hammer")
+                    color: UM.Theme.getColor("icon")
+                }
+            }
+        }
+
+        Rectangle
+        {
+            width: parent.width
+            height: UM.Theme.getSize("default_lining").height
+            color: UM.Theme.getColor("lining")
+        }
+
+        // --- Brush Shape (Freehand only) ---
+        RowLayout
+        {
+            id: rowBrushShape
+            visible: base.showBrushShape
+
             UM.Label
             {
-                text: catalog.i18nc("@label", "Symmetry")
+                text: catalog.i18nc("@label", "Brush Shape")
             }
 
-            RowLayout
+            BrushShapeButton
             {
-                id: rowSymmetry
-
-                UM.ToolbarButton
+                id: buttonBrushCircle
+                shape: Cura.ExtPaintToolBrush.CIRCLE
+                text: catalog.i18nc("@action:button", "Circle")
+                toolItem: UM.ColorImage
                 {
-                    text: "X"
-                    checked: UM.Controller.properties.getValue("SymmetryX") === true
-                    onClicked: UM.Controller.setProperty("SymmetryX", !checked)
-                }
-
-                UM.ToolbarButton
-                {
-                    text: "Y"
-                    checked: UM.Controller.properties.getValue("SymmetryY") === true
-                    onClicked: UM.Controller.setProperty("SymmetryY", !checked)
-                }
-
-                UM.ToolbarButton
-                {
-                    text: "Z"
-                    checked: UM.Controller.properties.getValue("SymmetryZ") === true
-                    onClicked: UM.Controller.setProperty("SymmetryZ", !checked)
+                    source: UM.Theme.getIcon("Circle")
+                    color: UM.Theme.getColor("icon")
                 }
             }
 
-            // --- Stabilizer (Freehand only) ---
-            RowLayout
+            BrushShapeButton
             {
-                id: rowStabilize
-                visible: base.isFreehand
-
-                CheckBox
+                id: buttonBrushSquare
+                shape: Cura.ExtPaintToolBrush.SQUARE
+                text: catalog.i18nc("@action:button", "Square")
+                toolItem: UM.ColorImage
                 {
-                    id: stabilizeCheckbox
-                    text: catalog.i18nc("@label", "Stabilize Stroke")
-                    checked: UM.Controller.properties.getValue("Stabilize") === true
-                    onClicked: UM.Controller.setProperty("Stabilize", checked)
+                    source: UM.Theme.getIcon("MeshTypeNormal")
+                    color: UM.Theme.getColor("icon")
                 }
             }
+        }
 
-            UM.Slider
+        // --- Brush Size (Freehand + Line) ---
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Brush Size")
+            visible: base.showBrushSize
+        }
+
+        UM.Slider
+        {
+            id: shapeSizeSlider
+            width: parent.width
+            indicatorVisible: false
+            visible: base.showBrushSize
+
+            from: 1
+            to: 100
+            value: UM.Controller.properties.getValue("BrushSize") ?? 10
+
+            onPressedChanged: function(pressed)
             {
-                id: stabilizeStrengthSlider
-                width: parent.width
-                indicatorVisible: false
-                visible: base.isFreehand && (UM.Controller.properties.getValue("Stabilize") === true)
-
-                from: 2
-                to: 20
-                value: UM.Controller.properties.getValue("StabilizeStrength") ?? 5
-
-                onPressedChanged: function(pressed)
+                if(! pressed)
                 {
-                    if(! pressed)
-                    {
-                        UM.Controller.setProperty("StabilizeStrength", stabilizeStrengthSlider.value);
-                    }
+                    UM.Controller.setProperty("BrushSize", shapeSizeSlider.value);
                 }
             }
+        }
 
-            //Line between the sections.
-            Rectangle
+        Rectangle
+        {
+            width: parent.width
+            height: UM.Theme.getSize("default_lining").height
+            color: UM.Theme.getColor("lining")
+        }
+
+        // --- Symmetry ---
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Symmetry")
+        }
+
+        RowLayout
+        {
+            id: rowSymmetry
+
+            UM.ToolbarButton
             {
-                width: parent.width
-                height: UM.Theme.getSize("default_lining").height
-                color: UM.Theme.getColor("lining")
+                text: "X"
+                checked: UM.Controller.properties.getValue("SymmetryX") === true
+                onClicked: UM.Controller.setProperty("SymmetryX", !checked)
             }
 
-            // --- Layers ---
-            UM.Label
+            UM.ToolbarButton
             {
-                text: catalog.i18nc("@label", "Layers")
+                text: "Y"
+                checked: UM.Controller.properties.getValue("SymmetryY") === true
+                onClicked: UM.Controller.setProperty("SymmetryY", !checked)
             }
 
-            LayerPanel
+            UM.ToolbarButton
             {
-                id: layerPanel
-                width: parent.width
+                text: "Z"
+                checked: UM.Controller.properties.getValue("SymmetryZ") === true
+                onClicked: UM.Controller.setProperty("SymmetryZ", !checked)
             }
+        }
 
-            //Line between the sections.
-            Rectangle
+        // --- Stabilizer (Freehand only) ---
+        RowLayout
+        {
+            id: rowStabilize
+            visible: base.isFreehand
+
+            CheckBox
             {
-                width: parent.width
-                height: UM.Theme.getSize("default_lining").height
-                color: UM.Theme.getColor("lining")
+                id: stabilizeCheckbox
+                text: catalog.i18nc("@label", "Stabilize Stroke")
+                checked: UM.Controller.properties.getValue("Stabilize") === true
+                onClicked: UM.Controller.setProperty("Stabilize", checked)
             }
+        }
 
-            // --- Undo / Redo / Clear ---
-            RowLayout
+        UM.Slider
+        {
+            id: stabilizeStrengthSlider
+            width: parent.width
+            indicatorVisible: false
+            visible: base.isFreehand && (UM.Controller.properties.getValue("Stabilize") === true)
+
+            from: 2
+            to: 20
+            value: UM.Controller.properties.getValue("StabilizeStrength") ?? 5
+
+            onPressedChanged: function(pressed)
             {
-                UM.ToolbarButton
+                if(! pressed)
                 {
-                    id: undoButton
-
-                    enabled: undoAction.enabled
-                    text: catalog.i18nc("@action:button", "Undo Stroke")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("ArrowReset")
-                        color: UM.Theme.getColor("icon")
-                    }
-
-                    onClicked: undoAction.trigger()
+                    UM.Controller.setProperty("StabilizeStrength", stabilizeStrengthSlider.value);
                 }
+            }
+        }
 
-                UM.ToolbarButton
+        Rectangle
+        {
+            width: parent.width
+            height: UM.Theme.getSize("default_lining").height
+            color: UM.Theme.getColor("lining")
+        }
+
+        // --- Undo / Redo / Clear ---
+        RowLayout
+        {
+            UM.ToolbarButton
+            {
+                id: undoButton
+                enabled: undoAction.enabled
+                text: catalog.i18nc("@action:button", "Undo Stroke")
+                toolItem: UM.ColorImage
                 {
-                    id: redoButton
-
-                    enabled: redoAction.enabled
-                    text: catalog.i18nc("@action:button", "Redo Stroke")
-                    toolItem: UM.ColorImage
-                    {
-                        source: UM.Theme.getIcon("ArrowReset")
-                        color: UM.Theme.getColor("icon")
-                        transform: [
-                            Scale { xScale: -1; origin.x: width/2 }
-                        ]
-                    }
-
-                    onClicked: redoAction.trigger()
+                    source: UM.Theme.getIcon("ArrowReset")
+                    color: UM.Theme.getColor("icon")
                 }
+                onClicked: undoAction.trigger()
+            }
 
-                Cura.SecondaryButton
+            UM.ToolbarButton
+            {
+                id: redoButton
+                enabled: redoAction.enabled
+                text: catalog.i18nc("@action:button", "Redo Stroke")
+                toolItem: UM.ColorImage
                 {
-                    id: clearButton
-                    text: catalog.i18nc("@button", "Clear all")
-                    onClicked: UM.Controller.triggerAction("clear")
+                    source: UM.Theme.getIcon("ArrowReset")
+                    color: UM.Theme.getColor("icon")
+                    transform: [
+                        Scale { xScale: -1; origin.x: width/2 }
+                    ]
                 }
+                onClicked: redoAction.trigger()
+            }
+
+            Cura.SecondaryButton
+            {
+                id: clearButton
+                text: catalog.i18nc("@button", "Clear all")
+                onClicked: UM.Controller.triggerAction("clear")
             }
         }
     }
@@ -500,7 +449,6 @@ Item
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Layout.verticalStretchFactor: 2
-
                 text: catalog.i18nc("@label", "Preparing model for painting...")
                 verticalAlignment: Text.AlignBottom
                 horizontalAlignment: Text.AlignHCenter
@@ -516,7 +464,6 @@ Item
                 UM.ColorImage
                 {
                     id: loadingIndicator
-
                     anchors.top: parent.top
                     anchors.left: parent.left
                     width: UM.Theme.getSize("card_icon").width
