@@ -823,8 +823,8 @@ class TestCollinearMerge:
         assert len(result) == 2, f"Expected 2 moves, got {len(result)}"
         assert abs(result[-1].abs_z - 2.0) < 1e-6
 
-    def test_e_accumulated_on_merge(self):
-        """Merged extrusion segments must sum their E values."""
+    def test_e_accumulated_on_merge_relative(self):
+        """Merged extrusion segments must sum E deltas in relative mode."""
         moves = [
             self._make_move(0, 0, 1.0, e=0.0, f=1500, chunk=2, line=5),
             self._make_move(1, 0, 1.0, e=0.5, f=1500, chunk=2, line=5),
@@ -836,7 +836,27 @@ class TestCollinearMerge:
         moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 1.0})
         moves[3] = GCodeMove(**{**moves[3].__dict__, "abs_e": 1.5})
 
-        result = _merge_collinear_segments(moves)
+        result = _merge_collinear_segments(moves, is_relative_extrusion=True)
         assert len(result) == 2
-        # E should be 0.5 + 0.5 + 0.5 = 1.5 total.
+        # E should be 0.5 + 0.5 + 0.5 = 1.5 total (relative deltas summed).
         assert abs(result[-1].e - 1.5) < 1e-6
+
+    def test_e_absolute_on_merge(self):
+        """Merged segments in absolute mode keep the final E position."""
+        moves = [
+            self._make_move(0, 0, 1.0, e=10.0, f=1500, chunk=2, line=5),
+            self._make_move(1, 0, 1.0, e=10.5, f=1500, chunk=2, line=5),
+            self._make_move(2, 0, 1.0, e=11.0, f=1500, chunk=2, line=5),
+            self._make_move(3, 0, 1.0, e=11.5, f=1500, chunk=2, line=5),
+        ]
+        moves[0] = GCodeMove(**{**moves[0].__dict__, "abs_e": 10.0})
+        moves[1] = GCodeMove(**{**moves[1].__dict__, "abs_e": 10.5})
+        moves[2] = GCodeMove(**{**moves[2].__dict__, "abs_e": 11.0})
+        moves[3] = GCodeMove(**{**moves[3].__dict__, "abs_e": 11.5})
+
+        result = _merge_collinear_segments(moves, is_relative_extrusion=False)
+        assert len(result) == 2
+        # In absolute mode, merged move keeps final E position (11.5),
+        # NOT the sum (should NOT be 10.5 + 11.0 + 11.5 = 33.0).
+        assert abs(result[-1].e - 11.5) < 1e-6
+        assert abs(result[-1].abs_e - 11.5) < 1e-6

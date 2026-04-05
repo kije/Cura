@@ -520,18 +520,16 @@ def bend_gcode(
         )
 
         # Compute layers_from_top for Z offset.
-        if all_surfaces_mode:
-            # In all_surfaces mode, compute how many layers below the
-            # local surface this move sits, based on its Z vs surface Z.
-            _local_surface_z = height_map.interpolate(ax, ay)
-            if not math.isnan(_local_surface_z):
-                layers_from_top = max(0, round(
-                    (_local_surface_z - move.abs_z) / layer_height
-                ))
-            else:
-                layers_from_top = 0
+        # In "top_only" mode, this is a fixed value based on the layer
+        # number and doesn't change per sub-segment.
+        # In "all_surfaces" mode, it MUST be computed per sub-segment
+        # because the surface height varies spatially — using a single
+        # endpoint value for all sub-segments causes Z discontinuities
+        # on moves that cross areas with varying surface height.
+        if not all_surfaces_mode:
+            layers_from_top = float(max_layer - move.layer_number)
         else:
-            layers_from_top = max_layer - move.layer_number
+            layers_from_top = 0.0  # Will be overridden per sub-segment.
 
         # Bend each sub-segment.
         sub_prev_x = prev_x
@@ -552,6 +550,14 @@ def bend_gcode(
                 bent_z = sz
                 _diag_nan_interp += 1
             else:
+                # In all_surfaces mode, compute layers_from_top per
+                # sub-segment using the LOCAL surface_z at this XY.
+                # Using floating-point values (not rounded integers)
+                # produces smoother Z transitions across moves that
+                # straddle layer boundaries.
+                if all_surfaces_mode:
+                    layers_from_top = max(0.0, (surface_z - sz) / layer_height)
+
                 # Compute target Z: surface minus layers_from_top offsets.
                 target_z = surface_z - layers_from_top * layer_height
 
@@ -876,7 +882,7 @@ def bend_gcode(
     #   - Collinear in 3D: the direction vector is parallel (within
     #     tolerance) to the previous segment's direction
     #   - Same feedrate (F)
-    modified_moves = _merge_collinear_segments(modified_moves)
+    modified_moves = _merge_collinear_segments(modified_moves, is_relative)
 
     # Add region comment markers by inserting comment pseudo-moves.
     # We do this by directly manipulating the chunks after reconstruction.
@@ -907,6 +913,10 @@ def bend_gcode(
     # Only mark chunks that had actual Z-bending (z_delta > 0.001).
     if _chunks_with_bending:
         _insert_region_markers(result, _chunks_with_bending)
+
+    # Final safety validation of the output G-code.
+    _validate_output_gcode(result, max_angle_deg)
+
     logger.info(
         "Non-planar bending complete: %d regions bent, %d reverted, "
         "%d total moves processed.",
@@ -918,7 +928,137 @@ def bend_gcode(
     return result
 
 
-def _merge_collinear_segments(moves: list[GCodeMove]) -> list[GCodeMove]:
+def _validate_output_gcode(
+    gcode_list: list[str],
+    max_angle_deg: float,
+) -> None:
+    """Validate the final output G-code for safety issues.
+
+    Scans the modified G-code for problems that could cause physical
+    damage or failed prints.  Issues are logged as warnings but do NOT
+    modify the output — the caller is responsible for deciding what to
+    do (typically: the earlier pipeline stages should have prevented
+    these issues, so warnings here indicate bugs).
+
+    Checks:
+      - No Z < 0 on any move (bed collision)
+      - No consecutive extrusion moves with nozzle angle > max_angle_deg
+      - E values are monotonically increasing (absolute mode detection)
+
+    Args:
+        gcode_list: The final reconstructed G-code list.
+        max_angle_deg: Maximum allowed nozzle angle.
+    """
+    import re as _re
+    param_re = {
+        "X": _re.compile(r"X([-+]?\d*\.?\d+)", _re.IGNORECASE),
+        "Y": _re.compile(r"Y([-+]?\d*\.?\d+)", _re.IGNORECASE),
+        "Z": _re.compile(r"Z([-+]?\d*\.?\d+)", _re.IGNORECASE),
+        "E": _re.compile(r"E([-+]?\d*\.?\d+)", _re.IGNORECASE),
+    }
+
+    tan_max = math.tan(math.radians(min(max_angle_deg, 89.9)))
+    z_below_zero = 0
+    angle_violations = 0
+    e_backwards = 0
+
+    prev_x, prev_y, prev_z = 0.0, 0.0, 0.0
+    prev_e = 0.0
+    abs_x, abs_y, abs_z = 0.0, 0.0, 0.0
+    is_relative_e = False
+    prev_was_extrusion = False
+
+    for chunk in gcode_list:
+        for raw_line in chunk.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            code_part = line.split(";")[0].strip() if ";" in line and not line.startswith(";") else line
+            upper = code_part.upper()
+
+            if upper.startswith("M83"):
+                is_relative_e = True
+                continue
+            if upper.startswith("M82"):
+                is_relative_e = False
+                continue
+
+            if not (upper.startswith("G0") or upper.startswith("G1")):
+                continue
+
+            # Extract parameters.
+            def _p(key):
+                m = param_re[key].search(code_part)
+                return float(m.group(1)) if m else None
+
+            px, py, pz, pe = _p("X"), _p("Y"), _p("Z"), _p("E")
+
+            if px is not None:
+                abs_x = px
+            if py is not None:
+                abs_y = py
+            if pz is not None:
+                abs_z = pz
+
+            has_extrusion = False
+            if pe is not None:
+                if is_relative_e:
+                    has_extrusion = pe > 0.0
+                    prev_e += pe
+                else:
+                    has_extrusion = pe > prev_e
+                    # Check for backwards E (absolute mode).
+                    if pe < prev_e - 0.001:
+                        e_backwards += 1
+                    prev_e = pe
+
+            # Check Z < 0.
+            if abs_z < -0.001:
+                z_below_zero += 1
+
+            # Check nozzle angle (extrusion moves only).
+            is_extrusion = has_extrusion and not upper.startswith("G0")
+            if is_extrusion and prev_was_extrusion:
+                dx = abs_x - prev_x
+                dy = abs_y - prev_y
+                dz = abs(abs_z - prev_z)
+                planar = math.sqrt(dx * dx + dy * dy)
+                if planar > 0.001 and dz / planar > tan_max + 0.01:
+                    angle_violations += 1
+
+            if is_extrusion:
+                prev_x, prev_y, prev_z = abs_x, abs_y, abs_z
+                prev_was_extrusion = True
+            else:
+                prev_was_extrusion = False
+
+    # Log results.
+    if z_below_zero > 0:
+        logger.warning(
+            "OUTPUT VALIDATION: %d moves with Z < 0 (potential bed collision)",
+            z_below_zero,
+        )
+    if angle_violations > 0:
+        logger.warning(
+            "OUTPUT VALIDATION: %d consecutive extrusion moves exceed "
+            "max nozzle angle (%.1f deg)",
+            angle_violations, max_angle_deg,
+        )
+    if e_backwards > 0:
+        logger.warning(
+            "OUTPUT VALIDATION: %d moves with decreasing absolute E "
+            "(potential extrusion discontinuity)",
+            e_backwards,
+        )
+    if z_below_zero == 0 and angle_violations == 0 and e_backwards == 0:
+        logger.info("OUTPUT VALIDATION: all checks passed")
+
+
+def _merge_collinear_segments(
+    moves: list[GCodeMove],
+    is_relative_extrusion: bool = False,
+) -> list[GCodeMove]:
     """Merge adjacent collinear G1 sub-segments back into single moves.
 
     During bending, original moves are subdivided into short (~1mm)
@@ -933,6 +1073,13 @@ def _merge_collinear_segments(moves: list[GCodeMove]) -> list[GCodeMove]:
       - Both extrusions or both non-extrusions
       - Same feedrate (F), or second has no F (inherits first's)
       - 3D direction vectors are parallel (cross product magnitude < tol)
+
+    Args:
+        moves: The list of moves to merge.
+        is_relative_extrusion: True if M83 (relative E mode).  In
+            relative mode, E values are per-move deltas that must be
+            summed when merging.  In absolute mode, the merged move
+            keeps the final move's E value (the target position).
 
     Returns:
         A new list with collinear runs collapsed.
@@ -1020,13 +1167,24 @@ def _merge_collinear_segments(moves: list[GCodeMove]) -> list[GCodeMove]:
             continue
 
         # Collinear — merge cur into prev by extending prev to cur's endpoint.
-        # Accumulate E if extruding.
-        new_e = prev.e
+        # Handle E based on extrusion mode:
+        #   - Relative (M83): e values are per-move deltas → sum them
+        #   - Absolute (M82): e values are target positions → keep final
         new_abs_e = cur.abs_e
-        if cur.e is not None and prev.e is not None:
-            new_e = prev.e + cur.e  # relative E accumulation
-        elif cur.e is not None:
-            new_e = cur.e
+        if is_relative_extrusion:
+            # Relative mode: accumulate deltas.
+            if cur.e is not None and prev.e is not None:
+                new_e = prev.e + cur.e
+            elif cur.e is not None:
+                new_e = cur.e
+            else:
+                new_e = prev.e
+        else:
+            # Absolute mode: keep the final absolute E position.
+            if cur.e is not None:
+                new_e = cur.e
+            else:
+                new_e = prev.e
 
         merged_move = GCodeMove(
             command="G1",
@@ -1182,6 +1340,14 @@ def _reorder_infill_first(
         if first_non_preamble_type == "FILL":
             continue  # Already in correct order.
 
+        # For absolute extrusion, extract per-move E deltas from the
+        # ORIGINAL order BEFORE reordering.  These deltas represent
+        # the material each move deposits, which doesn't change when
+        # the moves are reordered.
+        original_e_deltas: list[float] = []
+        if not is_relative_extrusion:
+            original_e_deltas = _extract_e_deltas(lines, e_re)
+
         # Reconstruct: preamble + FILL groups + other groups.
         reordered_lines = list(preamble)
         for _, group_lines in fill_groups:
@@ -1189,30 +1355,33 @@ def _reorder_infill_first(
         for _, group_lines in other_groups:
             reordered_lines.extend(group_lines)
 
-        # For absolute extrusion, we need to renumber E values since
-        # the order changed.  For relative extrusion, E values are
-        # per-move deltas and don't need fixing.
+        # For absolute extrusion, renumber E values using the
+        # original deltas applied in the new line order.
         if not is_relative_extrusion:
-            _fix_absolute_e_values(reordered_lines, e_re)
+            _fix_absolute_e_values(reordered_lines, e_re, original_e_deltas)
 
         chunks[ci] = "\n".join(reordered_lines)
         logger.debug("Reordered chunk %d: FILL groups moved before walls/skin", ci)
 
 
-def _fix_absolute_e_values(lines: list[str], e_re) -> None:
-    """Renumber absolute E values after reordering lines.
+def _extract_e_deltas(lines: list[str], e_re) -> list[tuple[int, float, float]]:
+    """Extract per-move E deltas from G-code lines in their current order.
 
-    Scans for E parameters in G0/G1 lines, computes deltas from the
-    original sequence, and reassigns cumulative absolute E values
-    based on the new order.
+    Each G0/G1 line with an E parameter contributes one entry:
+    ``(line_index, e_delta, absolute_e)``.  ``e_delta`` is the
+    difference from the previous E value, representing the material
+    this individual move deposits.
 
     Args:
-        lines: List of G-code lines (modified in place).
+        lines: G-code lines to scan.
         e_re: Compiled regex for extracting E values.
+
+    Returns:
+        List of (line_index, delta, abs_e) tuples.
     """
-    # First pass: extract E deltas.
     prev_e = 0.0
-    e_deltas: list[tuple[int, float]] = []  # (line_index, e_delta)
+    result: list[tuple[int, float, float]] = []
+    first = True
     for idx, line in enumerate(lines):
         stripped = line.strip()
         if not (stripped.startswith("G0") or stripped.startswith("G1")):
@@ -1220,47 +1389,88 @@ def _fix_absolute_e_values(lines: list[str], e_re) -> None:
         m = e_re.search(stripped)
         if m:
             e_val = float(m.group(1))
-            delta = e_val - prev_e
-            e_deltas.append((idx, delta))
-            prev_e = e_val
+            if first:
+                # Store the base E (the E at chunk entry) as first entry's
+                # implicit predecessor.
+                prev_e = e_val
+                result.append((idx, 0.0, e_val))
+                first = False
+            else:
+                result.append((idx, e_val - prev_e, e_val))
+                prev_e = e_val
+    return result
 
-    # Second pass: reassign cumulative E values.
-    cumulative_e = 0.0
-    # Find the starting E from before this chunk (first E delta gives us
-    # the offset).  For simplicity, start from whatever the first E value
-    # was in the ORIGINAL order.  We need the E value just before this
-    # chunk starts.  Since we're modifying in place, we can extract
-    # the first E value from the preamble.
-    first_e_found = False
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if not (stripped.startswith("G0") or stripped.startswith("G1")):
-            continue
-        m = e_re.search(stripped)
-        if m:
-            # First E value in the chunk — this is our starting point.
-            # In the original order, the first E might have been on a
-            # different line.  For safety, start cumulative from 0 and
-            # add all deltas.
-            cumulative_e = float(m.group(1)) - e_deltas[0][1] if e_deltas else 0.0
-            first_e_found = True
-            break
 
-    if not first_e_found or not e_deltas:
+def _fix_absolute_e_values(
+    lines: list[str],
+    e_re,
+    original_e_info: list[tuple[int, float, float]],
+) -> None:
+    """Renumber absolute E values after reordering lines.
+
+    After line reordering, each G0/G1 line still carries its old absolute
+    E value from the original order.  We need to reassign monotonically
+    increasing E values that preserve each move's per-move delta
+    (material deposited).
+
+    The approach:
+    1. Tag each G0/G1+E line in the reordered output with its original
+       absolute E value (which is still embedded in the line text).
+    2. Look up that original E value in the pre-reorder E info to find
+       the per-move delta for that specific line.
+    3. Re-accumulate from the chunk's starting E using each line's
+       delta in the new order.
+
+    Args:
+        lines: Reordered G-code lines (modified in place).
+        e_re: Compiled regex for extracting E values.
+        original_e_info: Output of ``_extract_e_deltas`` from the
+            ORIGINAL line order: (line_idx, delta, abs_e) tuples.
+    """
+    if not original_e_info:
         return
 
-    # Apply deltas in the new order.
-    delta_idx = 0
+    # Build a mapping from original absolute E value → per-move delta.
+    # Since E values are unique per move (monotonically increasing),
+    # this maps each line's embedded E to its extrusion amount.
+    # Use a tolerance-based lookup to handle float formatting.
+    abs_e_to_delta: dict[str, float] = {}
+    for _, delta, abs_e in original_e_info:
+        # Key on the formatted string to match exactly what's in the line.
+        key = f"{abs_e:.5f}"
+        abs_e_to_delta[key] = delta
+
+    # Determine the starting E for this chunk (E before the first move).
+    # The first entry in original_e_info has delta=0.0 and abs_e = the
+    # first E value, which IS the starting position.
+    base_e = original_e_info[0][2]
+
+    # Scan reordered lines, look up each line's delta, and reassign
+    # cumulative E values.
+    cumulative_e = base_e
+    first_move = True
     for line_idx, line in enumerate(lines):
         stripped = line.strip()
         if not (stripped.startswith("G0") or stripped.startswith("G1")):
             continue
         m = e_re.search(stripped)
-        if m and delta_idx < len(e_deltas):
-            _, delta = e_deltas[delta_idx]
+        if not m:
+            continue
+
+        old_e_val = float(m.group(1))
+        old_e_key = f"{old_e_val:.5f}"
+
+        # Look up this line's delta from the original order.
+        delta = abs_e_to_delta.get(old_e_key, 0.0)
+
+        if first_move:
+            # First move after reordering: starts at base_e + its delta.
+            cumulative_e = base_e + delta
+            first_move = False
+        else:
             cumulative_e += delta
-            # Replace the E value in the line.
-            old_e_str = m.group(0)  # "E1234.56789"
-            new_e_str = f"E{cumulative_e:.5f}"
-            lines[line_idx] = line.replace(old_e_str, new_e_str, 1)
-            delta_idx += 1
+
+        # Replace the E value in the line.
+        old_e_str = m.group(0)  # "E1234.56789"
+        new_e_str = f"E{cumulative_e:.5f}"
+        lines[line_idx] = line.replace(old_e_str, new_e_str, 1)

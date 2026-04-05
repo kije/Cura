@@ -16,7 +16,7 @@
             "children":
             {
                 "nonplanar_max_angle": {
-                    "label": "Non-Planar Maximum Angle",
+                    "label": "Maximum Angle",
                     "description": "Maximum surface angle from horizontal that can be printed non-planarly (degrees). Higher values improve surface quality on steeper surfaces but increase collision risk. Limited by nozzle/fan geometry.",
                     "type": "float",
                     "unit": "\u00b0",
@@ -30,8 +30,8 @@
                     "settable_per_meshgroup": false
                 },
                 "nonplanar_surface_mode": {
-                    "label": "Non-Planar Surface Mode",
-                    "description": "Which surfaces to apply non-planar slicing to. 'top_only' bends only the topmost N layers. 'all_surfaces' analyzes the entire model and bends layers near any suitable inclined surface.",
+                    "label": "Surface Mode",
+                    "description": "Which surfaces to apply non-planar slicing to. 'Top Layers Only' bends only the topmost N layers. 'All Suitable Surfaces' analyzes the entire model and bends layers near any suitable inclined surface.",
                     "type": "enum",
                     "options": {
                         "top_only": "Top Layers Only",
@@ -43,21 +43,8 @@
                     "settable_per_extruder": false,
                     "settable_per_meshgroup": false
                 },
-                "nonplanar_layer_count": {
-                    "label": "Non-Planar Layer Count",
-                    "description": "Number of layers below each candidate surface to apply non-planar bending to. Set to 0 for automatic (computes the necessary count from the surface height variation and layer height). More layers produce smoother transitions but increase processing time and collision risk.",
-                    "type": "int",
-                    "default_value": 0,
-                    "minimum_value": "0",
-                    "maximum_value": "20",
-                    "maximum_value_warning": "10",
-                    "enabled": "nonplanar_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
-                },
                 "nonplanar_line_types": {
-                    "label": "Non-Planar Line Types",
+                    "label": "Line Types",
                     "description": "Which G-code line types to bend non-planarly. 'Skin & Walls Only' keeps infill flat and only bends skin and wall extrusions \u2014 this produces more reliable results since infill provides a stable base. 'All Lines' bends everything including infill.",
                     "type": "enum",
                     "options": {
@@ -71,8 +58,8 @@
                     "settable_per_meshgroup": false
                 },
                 "nonplanar_nozzle_clearance": {
-                    "label": "Non-Planar Nozzle Clearance",
-                    "description": "Distance from the nozzle tip to the first obstruction above it (fan shroud, sensor, etc.) in mm. This is used for collision detection. A 1mm safety margin is subtracted internally.",
+                    "label": "Nozzle Clearance",
+                    "description": "Distance from the nozzle tip to the first obstruction above it (fan shroud, sensor, etc.) in mm. Used for collision detection to ensure the printhead won't hit the model.",
                     "type": "float",
                     "unit": "mm",
                     "default_value": 8.0,
@@ -81,40 +68,43 @@
                     "enabled": "nonplanar_enabled",
                     "settable_per_mesh": false,
                     "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
-                },
-                "nonplanar_safety_margin": {
-                    "label": "Non-Planar Safety Margin",
-                    "description": "Additional clearance (mm) subtracted from the nozzle clearance during collision checking. Higher values are more conservative, reducing the risk of printhead collisions at the expense of fewer non-planar regions.",
-                    "type": "float",
-                    "unit": "mm",
-                    "default_value": 0.5,
-                    "minimum_value": "0.0",
-                    "maximum_value": "5.0",
-                    "maximum_value_warning": "2.0",
-                    "enabled": "nonplanar_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
-                },
-                "nonplanar_max_path_deviation": {
-                    "label": "Non-Planar Max Path Deviation",
-                    "description": "Maximum Z deviation (mm) a bent path can have from the toolpath directly below it. Prevents unsupported extrusion. Default is 1x nozzle size \u2014 paths deviating more than this are clamped back.",
-                    "type": "float",
-                    "unit": "mm",
-                    "default_value": 0.4,
-                    "value": "machine_nozzle_size",
-                    "minimum_value": "0.1",
-                    "maximum_value": "2.0",
-                    "maximum_value_warning": "1.0",
-                    "enabled": "nonplanar_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
+                    "settable_per_meshgroup": false,
+                    "children":
+                    {
+                        "nonplanar_safety_margin": {
+                            "label": "Safety Margin",
+                            "description": "Additional clearance (mm) subtracted from the nozzle clearance during collision checking. Higher values are more conservative.",
+                            "type": "float",
+                            "unit": "mm",
+                            "default_value": 0.5,
+                            "minimum_value": "0.0",
+                            "maximum_value": "5.0",
+                            "maximum_value_warning": "2.0",
+                            "enabled": "nonplanar_enabled",
+                            "settable_per_mesh": false,
+                            "settable_per_extruder": false,
+                            "settable_per_meshgroup": false
+                        },
+                        "nonplanar_max_path_deviation": {
+                            "label": "Max Path Deviation",
+                            "description": "Maximum Z deviation (mm) a bent path can have from the toolpath directly below it. Prevents unsupported extrusion. Default is 1x nozzle size.",
+                            "type": "float",
+                            "unit": "mm",
+                            "default_value": 0.4,
+                            "value": "machine_nozzle_size",
+                            "minimum_value": "0.1",
+                            "maximum_value": "2.0",
+                            "maximum_value_warning": "1.0",
+                            "enabled": "nonplanar_enabled",
+                            "settable_per_mesh": false,
+                            "settable_per_extruder": false,
+                            "settable_per_meshgroup": false
+                        }
+                    }
                 },
                 "nonplanar_flow_compensation": {
-                    "label": "Non-Planar Flow Compensation",
-                    "description": "Adjust extrusion rate (E values) to compensate for varying layer thickness on curved surfaces. Recommended to keep enabled for consistent print quality.",
+                    "label": "Flow Compensation",
+                    "description": "Adjust extrusion rate (E values) to compensate for varying layer thickness on curved surfaces. Recommended to keep enabled.",
                     "type": "bool",
                     "default_value": true,
                     "enabled": "nonplanar_enabled",
@@ -124,8 +114,8 @@
                     "children":
                     {
                         "nonplanar_max_flow_multiplier": {
-                            "label": "Non-Planar Max Flow Multiplier",
-                            "description": "Upper bound for extrusion rate scaling on non-planar surfaces. Limits over-extrusion where the effective layer is thicker than nominal. Values above 2.0 risk blob formation.",
+                            "label": "Max Flow Multiplier",
+                            "description": "Upper bound for extrusion rate scaling. Limits over-extrusion where the effective layer is thicker than nominal. Values above 2.0 risk blob formation.",
                             "type": "float",
                             "default_value": 2.0,
                             "minimum_value": "1.0",
@@ -137,8 +127,8 @@
                             "settable_per_meshgroup": false
                         },
                         "nonplanar_min_flow_multiplier": {
-                            "label": "Non-Planar Min Flow Multiplier",
-                            "description": "Lower bound for extrusion rate scaling on non-planar surfaces. Limits under-extrusion where the effective layer is thinner than nominal. Values below 0.3 risk adhesion failure.",
+                            "label": "Min Flow Multiplier",
+                            "description": "Lower bound for extrusion rate scaling. Limits under-extrusion where the effective layer is thinner than nominal. Values below 0.3 risk adhesion failure.",
                             "type": "float",
                             "default_value": 0.5,
                             "minimum_value": "0.1",
@@ -152,7 +142,7 @@
                     }
                 },
                 "nonplanar_feedrate_compensation": {
-                    "label": "Non-Planar Feedrate Compensation",
+                    "label": "Feedrate Compensation",
                     "description": "Adjust feedrate (F values) to account for 3D travel distance on curved surfaces, maintaining consistent volumetric flow rate.",
                     "type": "bool",
                     "default_value": true,
@@ -161,9 +151,35 @@
                     "settable_per_extruder": false,
                     "settable_per_meshgroup": false
                 },
+                "nonplanar_layer_count": {
+                    "label": "Layer Count",
+                    "description": "Number of layers below each candidate surface to bend. Set to 0 for automatic detection from surface height variation. More layers produce smoother transitions but increase processing time.",
+                    "type": "int",
+                    "default_value": 0,
+                    "minimum_value": "0",
+                    "maximum_value": "20",
+                    "maximum_value_warning": "10",
+                    "enabled": "nonplanar_enabled",
+                    "settable_per_mesh": false,
+                    "settable_per_extruder": false,
+                    "settable_per_meshgroup": false
+                },
+                "nonplanar_blend_distance": {
+                    "label": "Blend Distance",
+                    "description": "Width of the smooth transition zone (mm) between planar and non-planar regions. Prevents abrupt layer height changes at boundaries.",
+                    "type": "float",
+                    "unit": "mm",
+                    "default_value": 3.0,
+                    "minimum_value": "0.5",
+                    "maximum_value_warning": "10.0",
+                    "enabled": "nonplanar_enabled",
+                    "settable_per_mesh": false,
+                    "settable_per_extruder": false,
+                    "settable_per_meshgroup": false
+                },
                 "nonplanar_segment_length": {
-                    "label": "Non-Planar Segment Length",
-                    "description": "Maximum length (mm) of G-code segments after subdivision for non-planar bending. Shorter segments follow surface curvature more accurately but produce larger G-code files.",
+                    "label": "Segment Length",
+                    "description": "Maximum length (mm) of G-code segments after subdivision. Shorter segments follow surface curvature more accurately but produce larger G-code files.",
                     "type": "float",
                     "unit": "mm",
                     "default_value": 1.0,
@@ -177,8 +193,8 @@
                     "settable_per_meshgroup": false
                 },
                 "nonplanar_heightmap_resolution": {
-                    "label": "Non-Planar Height Map Resolution",
-                    "description": "Grid cell size (mm) for the surface height map used in analysis and G-code bending. Smaller values give more precise surface following but increase memory usage and analysis time.",
+                    "label": "Height Map Resolution",
+                    "description": "Grid cell size (mm) for the surface height map. Smaller values give more precise surface following but increase memory and analysis time.",
                     "type": "float",
                     "unit": "mm",
                     "default_value": 0.5,
@@ -192,8 +208,8 @@
                     "settable_per_meshgroup": false
                 },
                 "nonplanar_min_region_area": {
-                    "label": "Non-Planar Minimum Region Area",
-                    "description": "Minimum surface area (mm\u00b2) of a candidate region for non-planar slicing. Regions smaller than this are kept planar to avoid unnecessary processing.",
+                    "label": "Minimum Region Area",
+                    "description": "Minimum surface area (mm\u00b2) of a candidate region. Regions smaller than this are kept planar.",
                     "type": "float",
                     "unit": "mm\u00b2",
                     "default_value": 100.0,
@@ -204,8 +220,8 @@
                     "settable_per_meshgroup": false
                 },
                 "nonplanar_min_region_width": {
-                    "label": "Non-Planar Min Region Width",
-                    "description": "Minimum width (mm) of a non-planar region. Regions narrower than this are excluded to prevent isolated raised paths that would print in mid-air without neighboring support. Measured as morphological erosion radius.",
+                    "label": "Min Region Width",
+                    "description": "Minimum width (mm) of a non-planar region. Regions narrower than this are excluded to prevent isolated raised paths.",
                     "type": "float",
                     "unit": "mm",
                     "default_value": 2.0,
@@ -217,22 +233,9 @@
                     "settable_per_extruder": false,
                     "settable_per_meshgroup": false
                 },
-                "nonplanar_blend_distance": {
-                    "label": "Non-Planar Blend Distance",
-                    "description": "Width of the smooth transition zone (mm) between planar and non-planar regions. Prevents abrupt layer height changes at boundaries. Uses smoothstep interpolation for C1 continuity.",
-                    "type": "float",
-                    "unit": "mm",
-                    "default_value": 3.0,
-                    "minimum_value": "0.5",
-                    "maximum_value_warning": "10.0",
-                    "enabled": "nonplanar_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
-                },
                 "nonplanar_min_benefit_angle": {
-                    "label": "Non-Planar Minimum Benefit Angle",
-                    "description": "Minimum surface angle from horizontal (degrees) for non-planar treatment to be worthwhile. Surfaces flatter than this show negligible stair-stepping and are kept planar.",
+                    "label": "Minimum Benefit Angle",
+                    "description": "Minimum surface angle from horizontal (degrees) for non-planar treatment. Surfaces flatter than this show negligible stair-stepping and are kept planar.",
                     "type": "float",
                     "unit": "\u00b0",
                     "default_value": 5.0,

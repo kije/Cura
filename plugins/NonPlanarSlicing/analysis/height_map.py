@@ -154,6 +154,7 @@ def generate_height_map(
     candidate_mask: NDArray[np.bool_],
     *,
     resolution: float = 0.5,
+    surface_mask: NDArray[np.bool_] | None = None,
 ) -> HeightMap:
     """Generate a height map by raycasting onto the mesh.
 
@@ -172,6 +173,13 @@ def generate_height_map(
         (M,) boolean mask indicating candidate faces.
     resolution:
         Grid cell size in mm.
+    surface_mask:
+        Optional (M,) boolean mask for ALL upward-facing surfaces
+        (including non-candidates).  When provided, the grid bounding
+        box and ``z_values`` cover all surface faces, enabling proper
+        collision detection against non-candidate obstacles.  If
+        ``None``, falls back to using ``candidate_mask`` only (the
+        old behaviour).
 
     Returns
     -------
@@ -193,8 +201,27 @@ def generate_height_map(
             f"number of faces ({num_faces})"
         )
 
-    # ---- bounding box of candidate faces ----
+    # Determine which faces contribute to the z_values grid (for
+    # collision detection).  If a broader surface_mask is provided,
+    # use it; otherwise fall back to candidate_mask.
+    if surface_mask is not None:
+        surface_mask = np.asarray(surface_mask, dtype=np.bool_)
+        if surface_mask.shape[0] != num_faces:
+            logger.warning(
+                "surface_mask length (%d) != num_faces (%d); ignoring",
+                surface_mask.shape[0], num_faces,
+            )
+            surface_mask = candidate_mask
+    else:
+        surface_mask = candidate_mask
+
+    # ---- bounding box ----
+    # Use the UNION of surface_mask and candidate_mask for the bounding
+    # box so both collision surfaces and candidate surfaces are covered.
+    bbox_mask = surface_mask | candidate_mask
+    bbox_ids = np.nonzero(bbox_mask)[0]
     cand_ids = np.nonzero(candidate_mask)[0]
+
     if cand_ids.size == 0:
         logger.warning("No candidate faces; returning empty height map")
         return HeightMap(
@@ -204,10 +231,9 @@ def generate_height_map(
             candidate_z_values=np.full((1, 1), np.nan),
         )
 
-    cand_verts = tri_verts[cand_ids]  # (K, 3, 3)
-    cand_flat = cand_verts.reshape(-1, 3)  # (K*3, 3)
-    bbox_min = cand_flat.min(axis=0) - _BBOX_PAD
-    bbox_max = cand_flat.max(axis=0) + _BBOX_PAD
+    bbox_verts = tri_verts[bbox_ids].reshape(-1, 3)
+    bbox_min = bbox_verts.min(axis=0) - _BBOX_PAD
+    bbox_max = bbox_verts.max(axis=0) + _BBOX_PAD
 
     x_min, y_min = float(bbox_min[0]), float(bbox_min[1])
     x_max, y_max = float(bbox_max[0]), float(bbox_max[1])

@@ -1151,16 +1151,27 @@ class NonPlanarSlicingExtension(QObject, Extension):
     # -------------------------------------------------------------------------
 
     def _getActiveAnalysisResult(self) -> Optional[_AnalysisResult]:
-        """Get the analysis result for the active/visible scene nodes."""
+        """Get the analysis result for the active/visible scene nodes.
+
+        When multiple models are on the build plate, returns the result
+        with the largest safe region.  A future improvement would merge
+        height maps from all models, but for now this ensures the most
+        impactful model gets non-planar treatment.
+        """
         self._pruneDeadEntries()
         scene = Application.getInstance().getController().getScene()
+        best_result: Optional[_AnalysisResult] = None
+        best_safe_count = -1
         for node in DepthFirstIterator(scene.getRoot()):
             if not self._isSliceableNode(node):
                 continue
             result = self._getResultForNode(node)
             if result is not None and result.height_map is not None:
-                return result
-        return None
+                safe_count = int(numpy.count_nonzero(result.safe_map)) if result.safe_map is not None else 0
+                if safe_count > best_safe_count:
+                    best_safe_count = safe_count
+                    best_result = result
+        return best_result
 
     def _showAnalysisMessage(self, region_count: int, total_area: float) -> None:
         """Show a message about the analysis results."""
@@ -1352,10 +1363,15 @@ class _AnalysisJob(Job):
             )
 
         # Step 3: Height map generation
+        # Pass the full top-surface mask so the height map grid covers
+        # ALL upward-facing surfaces (not just candidates).  This
+        # ensures collision detection sees non-candidate obstacles
+        # (e.g. vertical walls adjacent to candidate regions).
         t0 = time.time()
         height_map = generate_height_map(
             zup_vertices, indices, candidates.all_candidate_mask,
             resolution=settings["heightmap_resolution"],
+            surface_mask=analysis.is_top_surface,
         )
         Logger.log("d", "  Height map: %dx%d grid in %.2fs",
                    height_map.grid_shape[0], height_map.grid_shape[1],
@@ -1394,6 +1410,29 @@ class _AnalysisJob(Job):
                 # Morphological opening: erode then dilate.
                 eroded = binary_erosion(safe_map, structure=structure)
                 safe_map = binary_dilation(eroded, structure=structure).astype(bool)
+
+                # Remove small disconnected fragments that survived
+                # the opening.  Morphological opening can disconnect
+                # regions through narrow bridges, leaving isolated
+                # patches that would print as unsupported raised paths.
+                try:
+                    from scipy.ndimage import label as ndimage_label
+                    labeled, num_features = ndimage_label(safe_map)
+                    min_component_cells = max(4, int(round(
+                        (min_region_width / resolution) ** 2
+                    )))
+                    fragments_removed = 0
+                    for comp_id in range(1, num_features + 1):
+                        comp_size = int(numpy.count_nonzero(labeled == comp_id))
+                        if comp_size < min_component_cells:
+                            safe_map[labeled == comp_id] = False
+                            fragments_removed += 1
+                    if fragments_removed > 0:
+                        Logger.log("d", "  Removed %d small fragments (<%d cells) after morphological opening",
+                                   fragments_removed, min_component_cells)
+                except ImportError:
+                    pass
+
                 removed = int(numpy.count_nonzero(collision_result.safe_map) - numpy.count_nonzero(safe_map))
                 if removed > 0:
                     Logger.log("d", "  Region erosion: removed %d isolated cells (radius=%d cells, disk)",

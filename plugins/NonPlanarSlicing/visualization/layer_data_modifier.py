@@ -477,15 +477,25 @@ class LayerDataModifier:
             if original_height < surface_z - max_bend_depth:
                 self._rejection_counts["below_depth"] = self._rejection_counts.get("below_depth", 0) + 1
                 return None
-            layers_from_top = max(0, round(
+            layers_from_top = max(0.0,
                 (surface_z - original_height) / self._layer_height
-            ))
+            )
 
         # Target Z: surface minus layer offset.
         target_z = surface_z - layers_from_top * self._layer_height
 
         # Blend between original height and non-planar target.
         bent_z = original_height + blend * (target_z - original_height)
+
+        # Clamp bent_z so the actual layer height (distance from the
+        # conformal layer below) doesn't exceed a safe maximum.
+        # This matches the same clamp in gcode_bender.py to ensure
+        # the preview accurately reflects the actual G-code output.
+        layer_below_z = surface_z - (layers_from_top + 1) * self._layer_height
+        max_actual_lh = self._layer_height + self._max_z_displacement
+        max_bent_z = layer_below_z + max_actual_lh
+        if bent_z > max_bent_z:
+            bent_z = max_bent_z
 
         # Safety: don't go below zero (bed surface).
         if bent_z < 0.0:
