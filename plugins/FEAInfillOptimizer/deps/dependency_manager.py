@@ -68,22 +68,29 @@ class DependencyManager:
         return self._vendor_dir
 
     def get_install_command(self) -> List[str]:
-        """Return the pip install command arguments.
+        """Return the pip install command for missing packages.
 
-        Returns an empty list when running in a PyInstaller-frozen build —
-        dependencies must be pre-bundled at package time and cannot be
-        installed at runtime (C16).
+        In a frozen (PyInstaller) build, uses the system ``pip3`` or ``pip``
+        command to install into the plugin's ``_vendor/`` directory.  This
+        works because the vendor dir is on ``sys.path`` and the installed
+        packages are pure-Python or have compatible wheels.
         """
-        if _is_frozen():
-            Logger.log(
-                "w",
-                "FEA Infill: Running in a frozen (PyInstaller) build. "
-                "Dependencies must be pre-bundled; runtime pip install is not supported."
-            )
-            return []
         missing = self.missing_packages()
         if not missing:
             return []
+
+        if _is_frozen():
+            # In frozen builds, sys.executable is the Cura binary, not Python.
+            # Use system pip3/pip to install to the vendor dir.
+            import shutil
+            pip_cmd = shutil.which("pip3") or shutil.which("pip")
+            if pip_cmd is None:
+                Logger.log("e", "FEA Infill: Cannot find pip3 or pip on PATH. "
+                           "Install missing packages manually: pip3 install --target '%s' %s",
+                           self._vendor_dir, " ".join(missing))
+                return []
+            return [pip_cmd, "install", "--target", self._vendor_dir, "--upgrade"] + missing
+
         return [
             sys.executable, "-m", "pip", "install",
             "--target", self._vendor_dir,

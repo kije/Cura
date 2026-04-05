@@ -97,6 +97,8 @@ class FEAInfillExtension(QObject, Extension):
             self._dep_manager = DependencyManager(plugin_path)
             self._recheckDeps()
 
+    _recheck_count = 0
+
     def _recheckDeps(self) -> None:
         """Re-evaluate dependency availability and update the flag."""
         if self._dep_manager is None:
@@ -106,11 +108,16 @@ class FEAInfillExtension(QObject, Extension):
         Logger.log("d", "FEA Infill: Dependency check: %s → available=%s", check, self._deps_available)
         self.depsAvailableChanged.emit()
 
-        # If not all available at startup, schedule a retry after 2 seconds
-        # (some packages may not be importable until Python paths are fully set up)
-        if not self._deps_available:
+        # Retry up to 3 times at startup (some paths may not be ready yet)
+        if not self._deps_available and self._recheck_count < 3:
+            self._recheck_count += 1
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(2000, self._recheckDeps)
+        elif not self._deps_available:
+            missing = [k for k, v in check.items() if not v]
+            Logger.log("w", "FEA Infill: Missing packages after retries: %s. "
+                       "These must be installed manually into Cura's Python environment "
+                       "or bundled in the plugin's _vendor/ directory.", missing)
 
         # Connect to signals for BC persistence in 3MF project files.
         app = CuraApplication.getInstance()
@@ -533,13 +540,14 @@ class FEAInfillExtension(QObject, Extension):
             node_id = self._active_node_key
 
         if not self._deps_available:
+            missing = self._dep_manager.missing_packages() if self._dep_manager else ["gmsh"]
             Message(
                 i18n_catalog.i18nc("@info:status",
-                                   "Required Python libraries (trimesh, gmsh, scipy) are not installed.\n\n"
-                                   "To install: scroll up in the Analysis Setup panel and click "
-                                   "'Install Dependencies', then restart Cura.\n\n"
-                                   "Alternatively, install manually:\n"
-                                   "pip install trimesh gmsh scipy"),
+                                   "Missing: {packages}\n\n"
+                                   "Click 'Install Dependencies' in the Analysis Setup panel, "
+                                   "then restart Cura.\n\n"
+                                   "Or install manually in Terminal:\n"
+                                   "pip3 install {packages}").format(packages=" ".join(missing)),
                 title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer — Dependencies Missing"),
                 message_type=Message.MessageType.WARNING,
                 lifetime=0
