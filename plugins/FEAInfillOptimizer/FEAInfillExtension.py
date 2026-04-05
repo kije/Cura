@@ -521,10 +521,17 @@ class FEAInfillExtension(QObject, Extension):
         if not self._deps_available:
             Message(
                 i18n_catalog.i18nc("@info:status",
-                                   "Please install dependencies first."),
-                title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
-                message_type=Message.MessageType.WARNING
+                                   "Required Python libraries (trimesh, gmsh, scipy) are not installed.\n\n"
+                                   "To install: scroll up in the Analysis Setup panel and click "
+                                   "'Install Dependencies', then restart Cura.\n\n"
+                                   "Alternatively, install manually:\n"
+                                   "pip install trimesh gmsh scipy"),
+                title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer — Dependencies Missing"),
+                message_type=Message.MessageType.WARNING,
+                lifetime=0
             ).show()
+            self._phase = "optimize"
+            self.phaseChanged.emit()
             return
 
         node = self._getNodeById(node_id)

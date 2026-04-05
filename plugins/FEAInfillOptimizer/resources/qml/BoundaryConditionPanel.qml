@@ -970,85 +970,88 @@ Item
                     }
 
                     // Advanced section (collapsible)
-                    Rectangle
+                    ColumnLayout
                     {
                         Layout.fillWidth: true
-                        height: advancedHeader.implicitHeight + UM.Theme.getSize("default_margin").height / 2
-                        color: "transparent"
-                        border.color: UM.Theme.getColor("lining")
-                        border.width: UM.Theme.getSize("default_lining").width
-                        radius: UM.Theme.getSize("default_radius").width
+                        spacing: 0
 
                         property bool expanded: false
 
-                        RowLayout
+                        // Header bar (always visible, clickable)
+                        Rectangle
                         {
-                            id: advancedHeader
-                            anchors
+                            Layout.fillWidth: true
+                            height: advancedHeaderRow.implicitHeight + UM.Theme.getSize("default_margin").height / 2
+                            color: "transparent"
+                            border.color: UM.Theme.getColor("lining")
+                            border.width: UM.Theme.getSize("default_lining").width
+                            radius: UM.Theme.getSize("default_radius").width
+
+                            RowLayout
                             {
-                                left: parent.left; right: parent.right
-                                verticalCenter: parent.verticalCenter
-                                margins: UM.Theme.getSize("default_margin").width / 2
+                                id: advancedHeaderRow
+                                anchors
+                                {
+                                    left: parent.left; right: parent.right
+                                    verticalCenter: parent.verticalCenter
+                                    margins: UM.Theme.getSize("default_margin").width / 2
+                                }
+
+                                UM.Label
+                                {
+                                    Layout.fillWidth: true
+                                    text: catalog.i18nc("@label", "Advanced Settings")
+                                    font: UM.Theme.getFont("small")
+                                    color: UM.Theme.getColor("text_medium")
+                                }
+
+                                UM.ColorImage
+                                {
+                                    source: parent.parent.parent.expanded ? UM.Theme.getIcon("ChevronSingleUp") : UM.Theme.getIcon("ChevronSingleDown")
+                                    color: UM.Theme.getColor("text_medium")
+                                    width: UM.Theme.getSize("small_button_icon").width
+                                    height: width
+                                }
                             }
 
-                            UM.Label
+                            MouseArea
                             {
-                                Layout.fillWidth: true
-                                text: catalog.i18nc("@label", "Advanced Settings")
-                                font: UM.Theme.getFont("small")
-                                color: UM.Theme.getColor("text_medium")
-                            }
-
-                            UM.ColorImage
-                            {
-                                source: parent.parent.expanded ? UM.Theme.getIcon("ChevronSingleUp") : UM.Theme.getIcon("ChevronSingleDown")
-                                color: UM.Theme.getColor("text_medium")
-                                width: UM.Theme.getSize("small_button_icon").width
-                                height: width
+                                anchors.fill: parent
+                                onClicked: parent.parent.expanded = !parent.parent.expanded
                             }
                         }
 
-                        MouseArea
+                        // Expandable content (participates in ColumnLayout)
+                        GridLayout
                         {
-                            anchors.fill: parent
-                            onClicked: parent.expanded = !parent.expanded
-                        }
-
-                        // Advanced settings sub-panel
-                        ColumnLayout
-                        {
+                            Layout.fillWidth: true
                             visible: parent.expanded
-                            anchors { left: parent.left; right: parent.right; top: advancedHeader.bottom }
-                            anchors.margins: UM.Theme.getSize("default_margin").width / 2
-                            spacing: UM.Theme.getSize("default_margin").height / 2
+                            Layout.leftMargin: UM.Theme.getSize("default_margin").width / 2
+                            Layout.rightMargin: UM.Theme.getSize("default_margin").width / 2
+                            Layout.topMargin: UM.Theme.getSize("default_margin").height / 2
+                            columns: 2
+                            columnSpacing: UM.Theme.getSize("default_margin").width
+                            rowSpacing: UM.Theme.getSize("default_margin").height / 4
 
-                            GridLayout
-                            {
-                                Layout.fillWidth: true
-                                columns: 2
-                                columnSpacing: UM.Theme.getSize("default_margin").width
-                                rowSpacing: UM.Theme.getSize("default_margin").height / 4
+                            UM.Label { text: catalog.i18nc("@label", "Min infill (%)"); font: UM.Theme.getFont("small") }
+                            SpinBox { from: 5; to: 90; value: 10; stepSize: 5; Layout.fillWidth: true
+                                onValueModified: UM.Controller.setProperty("MinDensity", value) }
 
-                                UM.Label { text: catalog.i18nc("@label", "Min infill (%)"); font: UM.Theme.getFont("small") }
-                                SpinBox { from: 5; to: 90; value: 10; stepSize: 5; Layout.fillWidth: true
-                                    onValueModified: UM.Controller.setProperty("MinDensity", value) }
+                            UM.Label { text: catalog.i18nc("@label", "Max infill (%)"); font: UM.Theme.getFont("small") }
+                            SpinBox { from: 10; to: 100; value: 80; stepSize: 5; Layout.fillWidth: true
+                                onValueModified: UM.Controller.setProperty("MaxDensity", value) }
 
-                                UM.Label { text: catalog.i18nc("@label", "Max infill (%)"); font: UM.Theme.getFont("small") }
-                                SpinBox { from: 10; to: 100; value: 80; stepSize: 5; Layout.fillWidth: true
-                                    onValueModified: UM.Controller.setProperty("MaxDensity", value) }
+                            UM.Label { text: catalog.i18nc("@label", "Density steps"); font: UM.Theme.getFont("small") }
+                            SpinBox { from: 2; to: 20; value: 5; stepSize: 1; Layout.fillWidth: true
+                                onValueModified: UM.Controller.setProperty("NumZones", value) }
 
-                                UM.Label { text: catalog.i18nc("@label", "Density steps"); font: UM.Theme.getFont("small") }
-                                SpinBox { from: 2; to: 20; value: 5; stepSize: 1; Layout.fillWidth: true
-                                    onValueModified: UM.Controller.setProperty("NumZones", value) }
+                            UM.Label { text: catalog.i18nc("@label", "Analysis passes"); font: UM.Theme.getFont("small") }
+                            SpinBox { from: 1; to: 10; value: 5; stepSize: 1; Layout.fillWidth: true
+                                onValueModified: UM.Controller.setProperty("MaxIterations", value) }
 
-                                UM.Label { text: catalog.i18nc("@label", "Analysis passes"); font: UM.Theme.getFont("small") }
-                                SpinBox { from: 1; to: 10; value: 5; stepSize: 1; Layout.fillWidth: true
-                                    onValueModified: UM.Controller.setProperty("MaxIterations", value) }
-
-                                UM.Label { text: catalog.i18nc("@label", "Layer bonding (%)"); font: UM.Theme.getFont("small") }
-                                SpinBox { from: 10; to: 100; value: 50; stepSize: 5; Layout.fillWidth: true
-                                    onValueModified: UM.Controller.setProperty("BondingCoeff", value) }
-                            }
+                            UM.Label { text: catalog.i18nc("@label", "Layer bonding (%)"); font: UM.Theme.getFont("small") }
+                            SpinBox { from: 10; to: 100; value: 50; stepSize: 5; Layout.fillWidth: true
+                                onValueModified: UM.Controller.setProperty("BondingCoeff", value) }
                         }
                     }
 
@@ -1056,7 +1059,7 @@ Item
                     Rectangle
                     {
                         Layout.fillWidth: true
-                        visible: toolProperties.getValue("DepsAvailable") !== true && toolProperties.getValue("DepsAvailable") !== "true"
+                        visible: !toolProperties.getValue("DepsAvailable")
                         height: visible ? depsLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
                         color: "#442222"
                         radius: UM.Theme.getSize("default_radius").width
@@ -1090,7 +1093,7 @@ Item
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Run Analysis")
-                        enabled: toolProperties.getValue("DepsAvailable") === true || toolProperties.getValue("DepsAvailable") === "true"
+                        enabled: !!toolProperties.getValue("DepsAvailable")
                         onClicked: UM.Controller.setProperty("RunAnalysis", true)
                     }
 
