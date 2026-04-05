@@ -45,13 +45,16 @@ class DependencyManager:
 
         Uses actual import (not just find_spec) because PyInstaller-frozen
         builds may not have proper specs for bundled packages.
+        Catches all exceptions (not just ImportError) since some packages
+        may fail during import with RuntimeError or OSError.
         """
         result = {}
         for display_name, import_name in REQUIRED_PACKAGES.items():
             try:
                 importlib.import_module(import_name)
                 result[display_name] = True
-            except ImportError:
+            except Exception as e:
+                Logger.log("w", "FEA Infill: Package '%s' not available: %s", import_name, str(e))
                 result[display_name] = False
         return result
 

@@ -95,10 +95,22 @@ class FEAInfillExtension(QObject, Extension):
         plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
         if plugin_path:
             self._dep_manager = DependencyManager(plugin_path)
-            check = self._dep_manager.check_all()
-            self._deps_available = all(check.values())
-            Logger.log("d", "FEA Infill: Dependency check: %s → available=%s", check, self._deps_available)
-            self.depsAvailableChanged.emit()
+            self._recheckDeps()
+
+    def _recheckDeps(self) -> None:
+        """Re-evaluate dependency availability and update the flag."""
+        if self._dep_manager is None:
+            return
+        check = self._dep_manager.check_all()
+        self._deps_available = all(check.values())
+        Logger.log("d", "FEA Infill: Dependency check: %s → available=%s", check, self._deps_available)
+        self.depsAvailableChanged.emit()
+
+        # If not all available at startup, schedule a retry after 2 seconds
+        # (some packages may not be importable until Python paths are fully set up)
+        if not self._deps_available:
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(2000, self._recheckDeps)
 
         # Connect to signals for BC persistence in 3MF project files.
         app = CuraApplication.getInstance()

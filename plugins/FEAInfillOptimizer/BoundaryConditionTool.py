@@ -125,6 +125,7 @@ class BoundaryConditionTool(Tool):
             extension.progressChanged.connect(self.propertyChanged.emit)
             extension.resultsChanged.connect(self.propertyChanged.emit)
             extension.analysisStatusChanged.connect(self.propertyChanged.emit)
+            extension.depsAvailableChanged.connect(self.propertyChanged.emit)
 
         self.setExposedProperties(
             "Mode", "ForceX", "ForceY", "ForceZ", "ForceMagnitude",
