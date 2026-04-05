@@ -74,8 +74,8 @@ Column
                         Layout.preferredHeight: UM.Theme.getSize("small_button").height
                         toolItem: UM.ColorImage
                         {
-                            source: layerVisible ? UM.Theme.getIcon("View") : UM.Theme.getIcon("ViewDisabled", "low")
-                            color: UM.Theme.getColor("icon")
+                            source: layerVisible ? UM.Theme.getIcon("Eye") : UM.Theme.getIcon("Eye")
+                            color: layerVisible ? UM.Theme.getColor("icon") : UM.Theme.getColor("text_inactive")
                         }
                         onClicked:
                         {

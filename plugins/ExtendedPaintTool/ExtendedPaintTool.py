@@ -121,7 +121,7 @@ class ExtendedPaintTool(Tool):
         )
 
         self._controller.activeViewChanged.connect(self._updateIgnoreUnselectedObjects)
-        self._controller.activeToolChanged.connect(self._updateState)
+        self._controller.activeToolChanged.connect(self._onActiveToolChanged)
         self._controller.activeStageChanged.connect(self._updateActiveView)
 
         self._camera: Optional[Camera] = None
@@ -784,8 +784,17 @@ class ExtendedPaintTool(Tool):
         self._updateActiveView()
         self._updateState()
 
+    def _onActiveToolChanged(self) -> None:
+        self._updateActiveView()
+        self._updateState()
+
     def _updateActiveView(self) -> None:
         if self._state == ExtendedPaintTool.Paint.State.NOT_SUPPORTED:
+            return
+
+        # Only manage the view when this tool is the active tool, to avoid
+        # conflicts with the built-in PaintTool which uses the same pattern.
+        if self._controller.getActiveTool() != self:
             return
 
         has_painted_object = self._view.hasPaintedObject()
@@ -811,15 +820,21 @@ class ExtendedPaintTool(Tool):
         if new_state != self._state:
             self._state = new_state
             self.propertyChanged.emit()
+            if new_state == ExtendedPaintTool.Paint.State.READY:
+                self._updateActiveView()
 
     def _onPrepareTextureFinished(self, job: Job):
         if job == self._prepare_texture_job:
             self._prepare_texture_job = None
             self._state = ExtendedPaintTool.Paint.State.READY
             self.propertyChanged.emit()
+            self._updateActiveView()
             self._updateScene()
 
     def _updateIgnoreUnselectedObjects(self):
-        ignore_unselected_objects = self._controller.getActiveView().name == "ExtendedPaintTool"
+        if self._controller.getActiveTool() != self:
+            return
+        active_view = self._controller.getActiveView()
+        ignore_unselected_objects = active_view is not None and active_view is self._view
         CuraApplication.getInstance().getRenderer().getRenderPass("selection").setIgnoreUnselectedObjects(ignore_unselected_objects)
         CuraApplication.getInstance().getRenderer().getRenderPass("selection_faces").setIgnoreUnselectedObjects(ignore_unselected_objects)
