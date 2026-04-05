@@ -314,8 +314,10 @@ class BoundaryConditionTool(Tool):
 
     def setQuickGravityStart(self, value) -> None:
         """Enter 'pick bottom face' mode for gravity setup."""
+        Logger.log("d", "FEA: setQuickGravityStart called with value=%s (type=%s)", value, type(value).__name__)
         if value:
             self._quick_setup_mode = "gravity_pick_bottom"
+            Logger.log("d", "FEA: Quick setup mode set to '%s'", self._quick_setup_mode)
             self.propertyChanged.emit()
 
     def getQuickCantileverStart(self) -> bool:
