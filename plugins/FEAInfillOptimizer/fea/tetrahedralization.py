@@ -106,11 +106,31 @@ def _run_gmsh(
             gmsh.initialize(interruptible=False)
             gmsh.option.setNumber("General.Verbosity", 1)
 
-            # Use OCC kernel to import STL and create a volume.
-            Logger.log("d", "FEA tet: importing STL via OCC...")
-            shapes = gmsh.model.occ.importShapes(stl_path)
-            Logger.log("d", "FEA tet: imported %d shapes", len(shapes))
-            gmsh.model.occ.synchronize()
+            # Import the STL surface mesh
+            Logger.log("d", "FEA tet: merging STL...")
+            gmsh.merge(stl_path)
+
+            # Create a volume from the imported surface using classifySurfaces.
+            # Set a timeout-like approach: run in a simpler mode first.
+            Logger.log("d", "FEA tet: classifying surfaces...")
+            angle = 40.0
+            try:
+                gmsh.model.mesh.classifySurfaces(
+                    np.deg2rad(angle), True, True, np.deg2rad(180.0)
+                )
+                Logger.log("d", "FEA tet: creating geometry...")
+                gmsh.model.mesh.createGeometry()
+
+                surfaces = gmsh.model.getEntities(2)
+                Logger.log("d", "FEA tet: %d surfaces found, creating volume...", len(surfaces))
+                if surfaces:
+                    sl = gmsh.model.geo.addSurfaceLoop([s[1] for s in surfaces])
+                    gmsh.model.geo.addVolume([sl])
+                    gmsh.model.geo.synchronize()
+            except Exception as e:
+                Logger.log("w", "FEA tet: classifySurfaces failed (%s), trying direct 3D mesh...", str(e))
+                # Fallback: just try to mesh directly — gmsh can sometimes
+                # generate a 3D mesh from a surface mesh without explicit volume
 
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", char_length)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", char_length * 0.1)
