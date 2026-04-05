@@ -95,12 +95,16 @@ class FEAInfillExtension(QObject, Extension):
         # Connect to signals for BC persistence in 3MF project files.
         app = CuraApplication.getInstance()
 
-        # Restore BCs when a workspace (3MF project) is loaded.
-        # fileLoaded only fires for individual model imports (STL, OBJ) —
-        # workspaceLoaded fires when a .3mf project is opened.
+        # Restore BCs when files are loaded.  We connect to multiple signals
+        # because the timing differs between STL imports and workspace loads.
         app.fileLoaded.connect(self._restoreBCsFromScene)
+        app.fileCompleted.connect(self._restoreBCsFromScene)
         if hasattr(app, "workspaceLoaded"):
             app.workspaceLoaded.connect(self._restoreBCsFromScene)
+
+        # Also listen for scene changes — nodes may get metadata restored
+        # asynchronously during workspace loading.
+        app.getController().getScene().sceneChanged.connect(self._onSceneNodeMayHaveBCMetadata)
 
         # Sync BC data to node.metadata before save.  writeStarted fires
         # right before the 3MF writer serialises nodes, so our metadata
@@ -131,6 +135,38 @@ class FEAInfillExtension(QObject, Extension):
             except Exception:
                 Logger.logException("w", "FEA Infill: Failed to save BCs for node '%s'",
                                     node.getName())
+
+    def _onSceneNodeMayHaveBCMetadata(self, node) -> None:
+        """Check a single node for BC metadata and restore if found.
+
+        Connected to sceneChanged — fires for each node as it's added/modified.
+        This catches nodes that get their metadata restored asynchronously
+        during workspace loading (after workspaceLoaded has already fired).
+        """
+        if node is None or not isinstance(node, CuraSceneNode):
+            return
+        try:
+            if not hasattr(node, "metadata"):
+                return
+            if self._BC_METADATA_KEY not in node.metadata:
+                return
+            # Already has BC decorator — skip
+            if node.callDecoration("getBoundaryConditions") is not None:
+                return
+            import json
+            from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
+            raw = node.metadata[self._BC_METADATA_KEY]
+            json_str = raw.value if hasattr(raw, "value") else str(raw)
+            bc_data = json.loads(json_str)
+            decorator = FEABoundaryConditionDecorator()
+            decorator.fromDict(bc_data)
+            node.addDecorator(decorator)
+            Logger.log("d", "FEA Infill: Restored BCs for node '%s' via sceneChanged "
+                       "(%d fixed, %d forces, %d torques)",
+                       node.getName(), decorator.getFixedFaceCount(),
+                       decorator.getForceGroupCount(), decorator.getTorqueGroupCount())
+        except Exception:
+            pass  # Silently ignore — this fires very frequently
 
     def _restoreBCsFromScene(self, *args) -> None:
         """Restore BC decorators from node.metadata after loading.
