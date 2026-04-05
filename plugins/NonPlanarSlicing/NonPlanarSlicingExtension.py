@@ -1416,7 +1416,7 @@ class _AnalysisJob(Job):
                 # regions through narrow bridges, leaving isolated
                 # patches that would print as unsupported raised paths.
                 try:
-                    from scipy.ndimage import label as ndimage_label
+                    from scipy.ndimage import label as ndimage_label  # type: ignore[import-untyped]
                     labeled, num_features = ndimage_label(safe_map)
                     min_component_cells = max(4, int(round(
                         (min_region_width / resolution) ** 2
@@ -1431,7 +1431,8 @@ class _AnalysisJob(Job):
                         Logger.log("d", "  Removed %d small fragments (<%d cells) after morphological opening",
                                    fragments_removed, min_component_cells)
                 except ImportError:
-                    pass
+                    Logger.log("w", "scipy.ndimage.label not available — "
+                               "small fragments may remain in safe_map")
 
                 removed = int(numpy.count_nonzero(collision_result.safe_map) - numpy.count_nonzero(safe_map))
                 if removed > 0:

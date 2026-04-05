@@ -79,8 +79,8 @@ class LayerDataModifier:
         max_path_deviation: float = 0.0,
     ) -> None:
         self._height_map = height_map
-        self._safe_map = numpy.asarray(safe_map, dtype=bool)
-        self._blend_map = numpy.asarray(blend_map, dtype=numpy.float64)
+        self._safe_map = numpy.asarray(safe_map, dtype=bool) if safe_map is not None else None
+        self._blend_map = numpy.asarray(blend_map, dtype=numpy.float64) if blend_map is not None else None
         self._layer_height = float(layer_height)
         self._nonplanar_layer_count = int(nonplanar_layer_count)
         self._total_layers = int(total_layers)
@@ -438,6 +438,9 @@ class LayerDataModifier:
 
         Returns the new height in mm, or None if outside non-planar region.
         """
+        if self._safe_map is None or self._blend_map is None:
+            return None
+
         if not self._height_map.is_valid(slicing_x, slicing_y):
             self._rejection_counts["not_valid"] = self._rejection_counts.get("not_valid", 0) + 1
             return None

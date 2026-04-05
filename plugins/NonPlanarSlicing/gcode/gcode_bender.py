@@ -519,17 +519,15 @@ def bend_gcode(
             segment_length,
         )
 
-        # Compute layers_from_top for Z offset.
-        # In "top_only" mode, this is a fixed value based on the layer
-        # number and doesn't change per sub-segment.
-        # In "all_surfaces" mode, it MUST be computed per sub-segment
-        # because the surface height varies spatially — using a single
-        # endpoint value for all sub-segments causes Z discontinuities
-        # on moves that cross areas with varying surface height.
-        if not all_surfaces_mode:
-            layers_from_top = float(max_layer - move.layer_number)
-        else:
-            layers_from_top = 0.0  # Will be overridden per sub-segment.
+        # layers_from_top is computed per sub-segment inside the loop
+        # below (using local surface_z at each segment's XY).  This
+        # prevents Z discontinuities on moves that cross areas with
+        # varying surface height.
+        #
+        # In "top_only" mode, layers_from_top is typically driven by
+        # layer number, but we still refine it per-segment using the
+        # local surface to get smooth floating-point offsets.
+        layers_from_top = 0.0  # Will be overridden per sub-segment.
 
         # Bend each sub-segment.
         sub_prev_x = prev_x
@@ -550,13 +548,16 @@ def bend_gcode(
                 bent_z = sz
                 _diag_nan_interp += 1
             else:
-                # In all_surfaces mode, compute layers_from_top per
-                # sub-segment using the LOCAL surface_z at this XY.
-                # Using floating-point values (not rounded integers)
-                # produces smoother Z transitions across moves that
-                # straddle layer boundaries.
-                if all_surfaces_mode:
-                    layers_from_top = max(0.0, (surface_z - sz) / layer_height)
+                # Compute layers_from_top per sub-segment using the
+                # LOCAL surface_z at this XY position.  Using floating-
+                # point values (not rounded integers) produces smoother
+                # Z transitions across moves that straddle layer
+                # boundaries.  This applies in BOTH modes:
+                # - all_surfaces: essential for correctness since
+                #   surface height varies spatially
+                # - top_only: refines the layer-number-based offset
+                #   with local surface data for smoother contours
+                layers_from_top = max(0.0, (surface_z - sz) / layer_height)
 
                 # Compute target Z: surface minus layers_from_top offsets.
                 target_z = surface_z - layers_from_top * layer_height
@@ -569,6 +570,9 @@ def bend_gcode(
 
                 # Clamp bent_z so the actual layer height (distance from
                 # the conformal layer below) doesn't exceed a safe maximum.
+                # IMPORTANT: This same clamping logic MUST be replicated
+                # in layer_data_modifier.py:_compute_bent_z() so the
+                # preview matches the actual G-code output.
                 # Without this, the nozzle can be multiple layer-heights
                 # above the material below, printing into empty air.
                 #
@@ -1344,9 +1348,10 @@ def _reorder_infill_first(
         # ORIGINAL order BEFORE reordering.  These deltas represent
         # the material each move deposits, which doesn't change when
         # the moves are reordered.
-        original_e_deltas: list[float] = []
+        original_line_deltas: dict[int, float] = {}
+        original_base_e: float = 0.0
         if not is_relative_extrusion:
-            original_e_deltas = _extract_e_deltas(lines, e_re)
+            original_base_e, original_line_deltas = _extract_e_deltas(lines, e_re)
 
         # Reconstruct: preamble + FILL groups + other groups.
         reordered_lines = list(preamble)
@@ -1357,30 +1362,36 @@ def _reorder_infill_first(
 
         # For absolute extrusion, renumber E values using the
         # original deltas applied in the new line order.
-        if not is_relative_extrusion:
-            _fix_absolute_e_values(reordered_lines, e_re, original_e_deltas)
+        if not is_relative_extrusion and original_line_deltas:
+            _fix_absolute_e_values(reordered_lines, e_re, original_base_e, original_line_deltas, lines)
 
         chunks[ci] = "\n".join(reordered_lines)
         logger.debug("Reordered chunk %d: FILL groups moved before walls/skin", ci)
 
 
-def _extract_e_deltas(lines: list[str], e_re) -> list[tuple[int, float, float]]:
-    """Extract per-move E deltas from G-code lines in their current order.
+def _extract_e_deltas(
+    lines: list[str],
+    e_re,
+) -> tuple[float, dict[int, float]]:
+    """Extract per-move E deltas from G-code lines, keyed by line index.
 
-    Each G0/G1 line with an E parameter contributes one entry:
-    ``(line_index, e_delta, absolute_e)``.  ``e_delta`` is the
-    difference from the previous E value, representing the material
-    this individual move deposits.
+    Scans the lines for G0/G1 moves with E parameters and computes the
+    delta (material deposited) for each move.  The delta is the
+    difference between consecutive absolute E values.
 
-    Args:
-        lines: G-code lines to scan.
-        e_re: Compiled regex for extracting E values.
+    Returns a tuple of:
+    - ``base_e``: The absolute E value of the first move (the chunk's
+      starting E position).
+    - ``line_deltas``: Dict mapping each line index → its E delta.
+      The first move always has delta 0.0 (its E IS the base).
 
-    Returns:
-        List of (line_index, delta, abs_e) tuples.
+    Using line indices as keys (instead of formatted E strings) avoids
+    float formatting collisions where different E values could round
+    to the same string representation.
     """
     prev_e = 0.0
-    result: list[tuple[int, float, float]] = []
+    base_e = 0.0
+    line_deltas: dict[int, float] = {}
     first = True
     for idx, line in enumerate(lines):
         stripped = line.strip()
@@ -1390,65 +1401,59 @@ def _extract_e_deltas(lines: list[str], e_re) -> list[tuple[int, float, float]]:
         if m:
             e_val = float(m.group(1))
             if first:
-                # Store the base E (the E at chunk entry) as first entry's
-                # implicit predecessor.
+                base_e = e_val
+                line_deltas[idx] = 0.0
                 prev_e = e_val
-                result.append((idx, 0.0, e_val))
                 first = False
             else:
-                result.append((idx, e_val - prev_e, e_val))
+                line_deltas[idx] = e_val - prev_e
                 prev_e = e_val
-    return result
+    return base_e, line_deltas
 
 
 def _fix_absolute_e_values(
     lines: list[str],
     e_re,
-    original_e_info: list[tuple[int, float, float]],
+    base_e: float,
+    original_line_deltas: dict[int, float],
+    original_lines: list[str],
 ) -> None:
     """Renumber absolute E values after reordering lines.
 
-    After line reordering, each G0/G1 line still carries its old absolute
-    E value from the original order.  We need to reassign monotonically
-    increasing E values that preserve each move's per-move delta
-    (material deposited).
+    After line reordering, each G0/G1 line still carries its old
+    absolute E value from the original order.  This function reassigns
+    monotonically increasing E values that preserve each move's
+    per-move delta (material deposited).
 
-    The approach:
-    1. Tag each G0/G1+E line in the reordered output with its original
-       absolute E value (which is still embedded in the line text).
-    2. Look up that original E value in the pre-reorder E info to find
-       the per-move delta for that specific line.
-    3. Re-accumulate from the chunk's starting E using each line's
-       delta in the new order.
+    The approach uses **line content identity** to map each reordered
+    line back to its original-order delta.  Since lines are not
+    modified during reordering (only their order changes), we can
+    match them by content to find their original line index and thus
+    their original delta.
 
     Args:
         lines: Reordered G-code lines (modified in place).
         e_re: Compiled regex for extracting E values.
-        original_e_info: Output of ``_extract_e_deltas`` from the
-            ORIGINAL line order: (line_idx, delta, abs_e) tuples.
+        base_e: The absolute E at the start of the chunk (from the
+            first move in the ORIGINAL order).
+        original_line_deltas: Dict mapping original line index → E
+            delta, from ``_extract_e_deltas``.
+        original_lines: The lines in their ORIGINAL order (before
+            reordering), used for content matching.
     """
-    if not original_e_info:
+    if not original_line_deltas:
         return
 
-    # Build a mapping from original absolute E value → per-move delta.
-    # Since E values are unique per move (monotonically increasing),
-    # this maps each line's embedded E to its extrusion amount.
-    # Use a tolerance-based lookup to handle float formatting.
-    abs_e_to_delta: dict[str, float] = {}
-    for _, delta, abs_e in original_e_info:
-        # Key on the formatted string to match exactly what's in the line.
-        key = f"{abs_e:.5f}"
-        abs_e_to_delta[key] = delta
+    # Build a mapping from line content → original line index.
+    # This survives reordering because line text is unchanged.
+    # Use stripped content as key to handle whitespace variations.
+    content_to_orig_idx: dict[str, int] = {}
+    for orig_idx in original_line_deltas:
+        if orig_idx < len(original_lines):
+            content_to_orig_idx[original_lines[orig_idx].strip()] = orig_idx
 
-    # Determine the starting E for this chunk (E before the first move).
-    # The first entry in original_e_info has delta=0.0 and abs_e = the
-    # first E value, which IS the starting position.
-    base_e = original_e_info[0][2]
-
-    # Scan reordered lines, look up each line's delta, and reassign
-    # cumulative E values.
+    # Scan reordered lines and reassign cumulative E values.
     cumulative_e = base_e
-    first_move = True
     for line_idx, line in enumerate(lines):
         stripped = line.strip()
         if not (stripped.startswith("G0") or stripped.startswith("G1")):
@@ -1457,18 +1462,15 @@ def _fix_absolute_e_values(
         if not m:
             continue
 
-        old_e_val = float(m.group(1))
-        old_e_key = f"{old_e_val:.5f}"
-
-        # Look up this line's delta from the original order.
-        delta = abs_e_to_delta.get(old_e_key, 0.0)
-
-        if first_move:
-            # First move after reordering: starts at base_e + its delta.
-            cumulative_e = base_e + delta
-            first_move = False
+        # Find this line's original delta via content matching.
+        orig_idx = content_to_orig_idx.get(stripped)
+        if orig_idx is not None:
+            delta = original_line_deltas.get(orig_idx, 0.0)
         else:
-            cumulative_e += delta
+            # Fallback: compute delta from the embedded E value.
+            delta = 0.0
+
+        cumulative_e += delta
 
         # Replace the E value in the line.
         old_e_str = m.group(0)  # "E1234.56789"

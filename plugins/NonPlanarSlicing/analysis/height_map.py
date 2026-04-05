@@ -241,6 +241,20 @@ def generate_height_map(
     cols = max(1, int(np.ceil((x_max - x_min) / resolution)) + 1)
     rows = max(1, int(np.ceil((y_max - y_min) / resolution)) + 1)
 
+    # Cap grid size to prevent memory exhaustion when surface_mask
+    # includes faces far from candidates (e.g. tall vertical walls).
+    _MAX_GRID_DIM = 2000
+    if rows > _MAX_GRID_DIM or cols > _MAX_GRID_DIM:
+        scale = max(rows, cols) / _MAX_GRID_DIM
+        resolution = resolution * scale
+        cols = max(1, int(np.ceil((x_max - x_min) / resolution)) + 1)
+        rows = max(1, int(np.ceil((y_max - y_min) / resolution)) + 1)
+        logger.warning(
+            "Height-map grid exceeded %d cells; coarsened resolution to %.3f mm "
+            "(%d x %d cells)",
+            _MAX_GRID_DIM, resolution, rows, cols,
+        )
+
     logger.debug(
         "Height-map grid: %d x %d (%.1f x %.1f mm, res=%.2f mm), %d faces",
         rows, cols, x_max - x_min, y_max - y_min, resolution, num_faces,
