@@ -95,7 +95,9 @@ class FEAInfillExtension(QObject, Extension):
         plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
         if plugin_path:
             self._dep_manager = DependencyManager(plugin_path)
-            self._deps_available = self._dep_manager.all_available()
+            check = self._dep_manager.check_all()
+            self._deps_available = all(check.values())
+            Logger.log("d", "FEA Infill: Dependency check: %s → available=%s", check, self._deps_available)
             self.depsAvailableChanged.emit()
 
         # Connect to signals for BC persistence in 3MF project files.

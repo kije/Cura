@@ -41,10 +41,18 @@ class DependencyManager:
             sys.path.insert(0, self._vendor_dir)
 
     def check_all(self) -> Dict[str, bool]:
-        """Check which required packages are importable."""
+        """Check which required packages are importable.
+
+        Uses actual import (not just find_spec) because PyInstaller-frozen
+        builds may not have proper specs for bundled packages.
+        """
         result = {}
         for display_name, import_name in REQUIRED_PACKAGES.items():
-            result[display_name] = importlib.util.find_spec(import_name) is not None
+            try:
+                importlib.import_module(import_name)
+                result[display_name] = True
+            except ImportError:
+                result[display_name] = False
         return result
 
     def all_available(self) -> bool:
