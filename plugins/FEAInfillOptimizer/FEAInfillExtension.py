@@ -228,10 +228,11 @@ class FEAInfillExtension(QObject, Extension):
         """
         from UM.Scene.Selection import Selection
         selected = Selection.getSelectedObject(0)
-        if selected is not None:
-            self._active_node_key = str(id(selected))
-            # Ensure the node is in cache for later runAnalysis lookup
-            self._node_cache[self._active_node_key] = selected
+        if selected is None:
+            Logger.log("w", "FEA Infill: No model selected, cannot enter optimize phase")
+            return
+        self._active_node_key = str(id(selected))
+        self._node_cache[self._active_node_key] = selected
         self._phase = "optimize"
         self.phaseChanged.emit()
 
@@ -243,9 +244,9 @@ class FEAInfillExtension(QObject, Extension):
 
     @pyqtSlot()
     def cancelAnalysis(self) -> None:
-        """Cancel any running analysis and return to DEFINE phase."""
+        """Cancel any running analysis and return to OPTIMIZE phase."""
         self._cancel_requested = True
-        self._phase = "define"
+        self._phase = "optimize"
         self._analysis_status = "idle"
         self._progress = 0.0
         self.phaseChanged.emit()
@@ -529,6 +530,8 @@ class FEAInfillExtension(QObject, Extension):
         node = self._getNodeById(node_id)
         if node is None:
             Logger.log("e", "FEA Infill: Target node not found")
+            self._phase = "error"
+            self.phaseChanged.emit()
             return
 
         bc_decorator = node.callDecoration("getBoundaryConditions")

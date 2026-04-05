@@ -1031,23 +1031,54 @@ Item
 
                                 UM.Label { text: catalog.i18nc("@label", "Min infill (%)"); font: UM.Theme.getFont("small") }
                                 SpinBox { from: 5; to: 90; value: 10; stepSize: 5; Layout.fillWidth: true
-                                    onValueModified: if (typeof feaExtension !== "undefined") feaExtension.minDensity = value }
+                                    onValueModified: UM.Controller.setProperty("MinDensity", value) }
 
                                 UM.Label { text: catalog.i18nc("@label", "Max infill (%)"); font: UM.Theme.getFont("small") }
                                 SpinBox { from: 10; to: 100; value: 80; stepSize: 5; Layout.fillWidth: true
-                                    onValueModified: if (typeof feaExtension !== "undefined") feaExtension.maxDensity = value }
+                                    onValueModified: UM.Controller.setProperty("MaxDensity", value) }
 
                                 UM.Label { text: catalog.i18nc("@label", "Density steps"); font: UM.Theme.getFont("small") }
                                 SpinBox { from: 2; to: 20; value: 5; stepSize: 1; Layout.fillWidth: true
-                                    onValueModified: if (typeof feaExtension !== "undefined") feaExtension.numZones = value }
+                                    onValueModified: UM.Controller.setProperty("NumZones", value) }
 
                                 UM.Label { text: catalog.i18nc("@label", "Analysis passes"); font: UM.Theme.getFont("small") }
                                 SpinBox { from: 1; to: 10; value: 5; stepSize: 1; Layout.fillWidth: true
-                                    onValueModified: if (typeof feaExtension !== "undefined") feaExtension.maxIterations = value }
+                                    onValueModified: UM.Controller.setProperty("MaxIterations", value) }
 
                                 UM.Label { text: catalog.i18nc("@label", "Layer bonding (%)"); font: UM.Theme.getFont("small") }
                                 SpinBox { from: 10; to: 100; value: 50; stepSize: 5; Layout.fillWidth: true
-                                    onValueModified: if (typeof feaExtension !== "undefined") feaExtension.bondingCoeff = value }
+                                    onValueModified: UM.Controller.setProperty("BondingCoeff", value) }
+                            }
+                        }
+                    }
+
+                    // Dependency warning
+                    Rectangle
+                    {
+                        Layout.fillWidth: true
+                        visible: toolProperties.getValue("DepsAvailable") !== true && toolProperties.getValue("DepsAvailable") !== "true"
+                        height: visible ? depsLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
+                        color: "#442222"
+                        radius: UM.Theme.getSize("default_radius").width
+
+                        ColumnLayout
+                        {
+                            id: depsLabel
+                            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width }
+
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                text: catalog.i18nc("@info:warning", "Required libraries not installed. Click Install, then restart Cura.")
+                                color: "#ff6666"
+                                wrapMode: Text.WordWrap
+                                font: UM.Theme.getFont("small")
+                            }
+
+                            Cura.SecondaryButton
+                            {
+                                text: catalog.i18nc("@action:button", "Install Dependencies")
+                                onClicked: UM.Controller.setProperty("InstallDependencies", true)
                             }
                         }
                     }
@@ -1059,6 +1090,7 @@ Item
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Run Analysis")
+                        enabled: toolProperties.getValue("DepsAvailable") === true || toolProperties.getValue("DepsAvailable") === "true"
                         onClicked: UM.Controller.setProperty("RunAnalysis", true)
                     }
 

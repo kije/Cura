@@ -146,6 +146,8 @@ class BoundaryConditionTool(Tool):
             "MaxStress", "MinStress", "SafetyFactorResult",
             "ConvergenceIterations", "SafetyVerdict", "HasResults",
             "ActiveNodeName",
+            "MinDensity", "MaxDensity", "NumZones", "MaxIterations", "BondingCoeff",
+            "DepsAvailable", "InstallDependencies",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -291,6 +293,9 @@ class BoundaryConditionTool(Tool):
 
     def getQuickSetupMode(self) -> str:
         return self._quick_setup_mode
+
+    def setQuickSetupMode(self, value: str) -> None:
+        pass  # Read-only from QML; written by quick-setup actions
 
     def getQuickHoleDiameter(self) -> float:
         return self._quick_setup_hole_diameter
@@ -591,6 +596,63 @@ class BoundaryConditionTool(Tool):
 
     def setActiveNodeName(self, value) -> None:
         pass
+
+    # ── Advanced settings (routed to extension) ──────────────────────────
+
+    def getMinDensity(self) -> float:
+        return self._extension._min_density if self._extension else 10.0
+
+    def setMinDensity(self, value) -> None:
+        if self._extension:
+            self._extension._min_density = float(value)
+        self.propertyChanged.emit()
+
+    def getMaxDensity(self) -> float:
+        return self._extension._max_density if self._extension else 80.0
+
+    def setMaxDensity(self, value) -> None:
+        if self._extension:
+            self._extension._max_density = float(value)
+        self.propertyChanged.emit()
+
+    def getNumZones(self) -> int:
+        return self._extension._num_zones if self._extension else 6
+
+    def setNumZones(self, value) -> None:
+        if self._extension:
+            self._extension._num_zones = int(value)
+        self.propertyChanged.emit()
+
+    def getMaxIterations(self) -> int:
+        return self._extension._max_iterations if self._extension else 5
+
+    def setMaxIterations(self, value) -> None:
+        if self._extension:
+            self._extension._max_iterations = int(value)
+        self.propertyChanged.emit()
+
+    def getBondingCoeff(self) -> float:
+        return self._extension._bonding_coeff if self._extension else 50.0
+
+    def setBondingCoeff(self, value) -> None:
+        if self._extension:
+            self._extension._bonding_coeff = float(value)
+        self.propertyChanged.emit()
+
+    # ── Dependency management ──────────────────────────────────────────────
+
+    def getDepsAvailable(self) -> bool:
+        return self._extension._deps_available if self._extension else False
+
+    def setDepsAvailable(self, value) -> None:
+        pass
+
+    def getInstallDependencies(self) -> bool:
+        return False
+
+    def setInstallDependencies(self, value) -> None:
+        if value and self._extension:
+            self._extension.installDependencies()
 
     # ── List model properties ───────────────────────────────────────────────
 
