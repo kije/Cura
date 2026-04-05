@@ -1217,6 +1217,92 @@ Item
                         font: UM.Theme.getFont("large_bold")
                     }
 
+                    // Mesh quality indicator
+                    Rectangle
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel.hasResults
+                        height: visible ? meshQualityRow.implicitHeight + UM.Theme.getSize("default_margin").height / 2 : 0
+                        radius: UM.Theme.getSize("default_radius").width
+                        color: {
+                            var q = toolProperties.getValue("MeshQuality") ?? ""
+                            if (q === "high") return "#1a3a1a"
+                            if (q === "medium") return "#3a3a1a"
+                            if (q === "low") return "#3a1a1a"
+                            return "transparent"
+                        }
+
+                        RowLayout
+                        {
+                            id: meshQualityRow
+                            anchors
+                            {
+                                left: parent.left; right: parent.right
+                                verticalCenter: parent.verticalCenter
+                                margins: UM.Theme.getSize("default_margin").width / 2
+                            }
+                            spacing: UM.Theme.getSize("default_margin").width / 2
+
+                            UM.Label
+                            {
+                                text: {
+                                    var q = toolProperties.getValue("MeshQuality") ?? ""
+                                    if (q === "high") return "●"
+                                    if (q === "medium") return "●"
+                                    if (q === "low") return "●"
+                                    return ""
+                                }
+                                color: {
+                                    var q = toolProperties.getValue("MeshQuality") ?? ""
+                                    if (q === "high") return "#44cc44"
+                                    if (q === "medium") return "#cccc44"
+                                    if (q === "low") return "#cc4444"
+                                    return "#888888"
+                                }
+                                font.pointSize: 14
+                            }
+
+                            ColumnLayout
+                            {
+                                Layout.fillWidth: true
+                                spacing: 0
+
+                                UM.Label
+                                {
+                                    text: {
+                                        var q = toolProperties.getValue("MeshQuality") ?? ""
+                                        if (q === "high") return catalog.i18nc("@info", "High confidence — Gmsh tetrahedralization")
+                                        if (q === "medium") return catalog.i18nc("@info", "Medium confidence — fallback mesh method")
+                                        if (q === "low") return catalog.i18nc("@info", "Low confidence — approximate mesh, increase safety margin")
+                                        return ""
+                                    }
+                                    font: UM.Theme.getFont("small")
+                                    color: "#dddddd"
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+
+                                UM.Label
+                                {
+                                    visible: {
+                                        var w = toolProperties.getValue("MeshWarnings") ?? "[]"
+                                        var arr = JSON.parse(w)
+                                        return arr.length > 0
+                                    }
+                                    text: {
+                                        var w = toolProperties.getValue("MeshWarnings") ?? "[]"
+                                        var arr = JSON.parse(w)
+                                        return arr.join("\n")
+                                    }
+                                    font: UM.Theme.getFont("small")
+                                    color: "#bbaa66"
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+                    }
+
                     // Safety verdict chip
                     Rectangle
                     {

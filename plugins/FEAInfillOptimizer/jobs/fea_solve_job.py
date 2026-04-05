@@ -165,6 +165,9 @@ class FEASolveJob(Job):
                     "stress_field": stress_field,
                     "density_field": density_field,
                     "tet_mesh": tet_mesh,
+                    "mesh_quality": tet_mesh.mesh_quality,
+                    "mesh_method": tet_mesh.mesh_method,
+                    "mesh_warnings": tet_mesh.warnings,
                 }
             )
 

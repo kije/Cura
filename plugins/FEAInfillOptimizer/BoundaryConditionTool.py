@@ -149,7 +149,7 @@ class BoundaryConditionTool(Tool):
             "AnalysisProgress", "AnalysisStage",
             "MaxStress", "MinStress", "SafetyFactorResult",
             "ConvergenceIterations", "SafetyVerdict", "HasResults",
-            "ActiveNodeName",
+            "ActiveNodeName", "MeshQuality", "MeshWarnings",
             "MinDensity", "MaxDensity", "NumZones", "MaxIterations", "BondingCoeff",
             "DepsAvailable", "InstallDependencies",
         )
@@ -602,6 +602,25 @@ class BoundaryConditionTool(Tool):
         return ""
 
     def setActiveNodeName(self, value) -> None:
+        pass
+
+    def getMeshQuality(self) -> str:
+        """Return mesh quality level: 'high', 'medium', 'low', or '' if no results."""
+        if self._extension and self._extension._results:
+            return self._extension._results.get("mesh_quality", "")
+        return ""
+
+    def setMeshQuality(self, value) -> None:
+        pass
+
+    def getMeshWarnings(self) -> str:
+        """Return JSON-encoded list of mesh quality warnings."""
+        if self._extension and self._extension._results:
+            warnings = self._extension._results.get("mesh_warnings", [])
+            return json.dumps(warnings) if warnings else "[]"
+        return "[]"
+
+    def setMeshWarnings(self, value) -> None:
         pass
 
     # ── Advanced settings (routed to extension) ──────────────────────────

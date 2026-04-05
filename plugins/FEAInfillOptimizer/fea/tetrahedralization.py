@@ -42,6 +42,9 @@ class TetMesh:
     nodes: np.ndarray
     elements: np.ndarray
     surface_node_map: Dict[int, int] = field(default_factory=dict)
+    mesh_quality: str = "high"  # "high" (gmsh), "medium" (scipy+raycast), "low" (scipy+bbox)
+    mesh_method: str = ""       # human-readable description of method used
+    warnings: list = field(default_factory=list)  # list of warning strings
 
 
 def tetrahedralize(surface_mesh: "trimesh.Trimesh", element_size: float) -> TetMesh:
@@ -175,7 +178,11 @@ def _run_gmsh(stl_path: str, char_length: float, surface_mesh) -> TetMesh:
 
     Logger.log("d", "FEA tet: %d surface nodes mapped", len(surface_node_map))
 
-    return TetMesh(nodes=nodes, elements=elements, surface_node_map=surface_node_map)
+    return TetMesh(
+        nodes=nodes, elements=elements, surface_node_map=surface_node_map,
+        mesh_quality="high",
+        mesh_method="Gmsh Delaunay tetrahedralization",
+    )
 
 
 def _tetrahedralize_scipy(surface_mesh, char_length: float) -> TetMesh:
@@ -184,6 +191,7 @@ def _tetrahedralize_scipy(surface_mesh, char_length: float) -> TetMesh:
 
     surface_verts = np.array(surface_mesh.vertices, dtype=np.float64)
     n_surface = len(surface_verts)
+    warnings = ["Gmsh unavailable — using scipy Delaunay (reduced mesh quality near sharp features)"]
 
     # Generate interior points
     Logger.log("d", "FEA tet (scipy): generating interior points...")
@@ -202,17 +210,32 @@ def _tetrahedralize_scipy(surface_mesh, char_length: float) -> TetMesh:
     elements = all_tets[inside]
     Logger.log("d", "FEA tet (scipy): %d/%d tets inside mesh", len(elements), len(all_tets))
 
+    # Determine quality based on containment method used
+    containment_quality = _last_containment_method
+    if containment_quality == "bbox":
+        quality = "low"
+        warnings.append("Point containment used bounding-box approximation — "
+                        "some elements may be outside the model surface")
+    elif containment_quality == "raycast":
+        quality = "medium"
+    else:
+        quality = "medium"  # scipy fallback is always at most medium
+
     if len(elements) == 0:
         raise RuntimeError("No interior tetrahedra found. Mesh may not be watertight.")
 
     surface_node_map = {i: i for i in range(n_surface)}
 
-    Logger.log("d", "FEA tet (scipy): %d nodes, %d tets", len(all_points), len(elements))
+    Logger.log("d", "FEA tet (scipy): %d nodes, %d tets, quality=%s",
+               len(all_points), len(elements), quality)
 
     return TetMesh(
         nodes=all_points,
         elements=np.array(elements, dtype=np.int64),
         surface_node_map=surface_node_map,
+        mesh_quality=quality,
+        mesh_method="Scipy Delaunay + %s containment" % containment_quality,
+        warnings=warnings,
     )
 
 
@@ -244,47 +267,51 @@ def _generate_interior_points(surface_mesh, char_length: float) -> np.ndarray:
     return interior
 
 
+# Module-level tracker for which containment method was last used
+_last_containment_method = "unknown"
+
+
 def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
     """Test which points are inside a closed surface mesh.
 
-    Tries trimesh.contains() first, falls back to a simple winding-number
-    approximation based on signed solid angle.
+    Tries multiple methods in order of quality. Sets _last_containment_method
+    so callers can report which method was used.
     """
-    # Try trimesh's built-in contains
+    global _last_containment_method
+
+    # Method 1: trimesh.contains() — best quality
     try:
         result = mesh.contains(points)
-        if result.any():  # Sanity check — if ALL false, likely broken
+        if result.any():
+            _last_containment_method = "trimesh"
+            Logger.log("d", "FEA tet: containment via trimesh.contains()")
             return result
     except Exception:
         pass
 
-    # Fallback: use trimesh ray casting if available
-    try:
-        from trimesh.ray import ray_pyembree
-        # If embree is available, trimesh.contains should have worked
-    except ImportError:
-        pass
-
+    # Method 2: ray-triangle intersection — good quality
     try:
         from trimesh.ray.ray_triangle import RayMeshIntersector
         intersector = RayMeshIntersector(mesh)
-        # Cast rays along +X axis and count intersections
-        # Odd count = inside, even count = outside
         directions = np.tile([1.0, 0.0, 0.0], (len(points), 1))
         hits = intersector.intersects_location(points, directions, multiple_hits=True)
-        # Count hits per ray
         hit_counts = np.zeros(len(points), dtype=int)
         if len(hits[0]) > 0:
-            ray_indices = hits[1]  # which ray each hit belongs to
+            ray_indices = hits[1]
             for idx in ray_indices:
                 hit_counts[idx] += 1
-        return (hit_counts % 2) == 1
-    except Exception:
-        pass
+        result = (hit_counts % 2) == 1
+        if result.any():
+            _last_containment_method = "raycast"
+            Logger.log("d", "FEA tet: containment via ray casting (%d/%d inside)",
+                       result.sum(), len(result))
+            return result
+    except Exception as e:
+        Logger.log("w", "FEA tet: ray casting failed: %s", str(e))
 
-    # Last resort: simple bounding-box filter (keeps ~50% more points than needed
-    # but produces valid tets, just with some external ones)
+    # Method 3: bounding box — low quality fallback
     Logger.log("w", "FEA tet: all containment methods failed, using bounding box filter")
+    _last_containment_method = "bbox"
     bbox_min = mesh.bounds[0]
     bbox_max = mesh.bounds[1]
     margin = (bbox_max - bbox_min) * 0.05
