@@ -125,6 +125,7 @@ class BoundaryConditionTool(Tool):
             "QuickGravityStart", "QuickMountHoles", "QuickCantileverStart",
             "QuickSetupMode", "QuickHoleDiameter",
             "TorqueMagnitude", "ConfirmTorqueGroup",
+            "TorqueListModel", "DeleteTorqueGroup",
             "ActiveSupportIndex", "ActiveForceIndex",
             "SupportListModel", "ForceListModel",
             "SelectionMode",
@@ -446,6 +447,38 @@ class BoundaryConditionTool(Tool):
                 "faces": len(fg.face_indices),
             })
         return json.dumps(result)
+
+    def getTorqueListModel(self) -> str:
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return "[]"
+        bc = selected.callDecoration("getBoundaryConditions")
+        if bc is None or not hasattr(bc, "getTorqueGroups"):
+            return "[]"
+        groups = bc.getTorqueGroups()
+        result = []
+        for i, tg in enumerate(groups):
+            result.append({
+                "index": i,
+                "label": f"Torque {i + 1}: {tg.torque_magnitude:.1f}Nm ({len(tg.face_indices)} faces)",
+            })
+        return json.dumps(result)
+
+    def getDeleteTorqueGroup(self) -> bool:
+        return False
+
+    def setDeleteTorqueGroup(self, value) -> None:
+        index = int(value) if value is not True else -1
+        if index < 0:
+            return
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return
+        bc = selected.callDecoration("getBoundaryConditions")
+        if bc is not None and hasattr(bc, "removeTorqueGroup"):
+            bc.removeTorqueGroup(index)
+            self.propertyChanged.emit()
+            self._update_highlights()
 
     # ── Active index properties ─────────────────────────────────────────────
 

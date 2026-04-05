@@ -31,72 +31,63 @@ UM.Dialog
         anchors.fill: parent
 
         UM.I18nCatalog { id: catalog; name: "cura" }
-        ListModel { id: sceneNodeListModel }
 
-        // Retry timer — fires 200ms after dialog opens if node list is
-        // still empty (covers race between QML init and manager binding).
+        // Scene nodes as a plain JS array [{name, nodeId}, ...]
+        property var nodeList: []
+        // The selected node ID string
+        property string selectedNodeId: ""
+
         Timer
         {
             id: retryTimer
-            interval: 200
+            interval: 250
             repeat: false
             onTriggered: contentItem.refreshNodeList()
         }
 
         function refreshNodeList()
         {
-            sceneNodeListModel.clear()
             if (!manager)
             {
-                console.log("FEA: refreshNodeList — manager not bound yet, retrying in 200ms")
                 retryTimer.restart()
                 return
             }
 
             var nodes = manager.getSceneNodes()
-            if (!nodes || nodes.length === undefined) return
+            if (!nodes) { retryTimer.restart(); return }
 
-            console.log("FEA: refreshNodeList got " + nodes.length + " nodes")
-
+            var names = []
+            var ids = []
             for (var i = 0; i < nodes.length; i++)
             {
-                var name = nodes[i].name || "Unknown"
-                var nid = nodes[i].id || ""
-                console.log("FEA: node " + i + ": name=" + name + " id=" + nid)
-                sceneNodeListModel.append({"name": name, "nodeId": nid})
+                names.push(nodes[i].name || "Unknown")
+                ids.push(nodes[i].id || "")
             }
+            nodeList = names
+            contentItem._nodeIds = ids
 
-            console.log("FEA: ListModel count=" + sceneNodeListModel.count)
-
-            // If a node was pre-selected (from BC tool's "Confirm and Optimize"),
-            // find and select it in the ComboBox.
-            var preKey = manager.preselectedNodeKey
-            console.log("FEA: preselectedNodeKey=" + preKey)
-            if (preKey && preKey !== "")
+            // Pre-select
+            var preKey = manager.preselectedNodeKey || ""
+            var matched = false
+            for (var j = 0; j < ids.length; j++)
             {
-                for (var j = 0; j < sceneNodeListModel.count; j++)
+                if (ids[j] === preKey)
                 {
-                    if (sceneNodeListModel.get(j).nodeId === preKey)
-                    {
-                        console.log("FEA: matched preKey at index " + j)
-                        nodeSelector.currentIndex = j
-                        return
-                    }
+                    nodeSelector.currentIndex = j
+                    selectedNodeId = preKey
+                    matched = true
+                    break
                 }
-                console.log("FEA: preKey not found in model")
             }
-
-            // Default: select first item if any
-            if (sceneNodeListModel.count > 0)
+            if (!matched && names.length > 0)
             {
                 nodeSelector.currentIndex = 0
-            }
-            else if (!retryTimer.running)
-            {
-                // Still empty — schedule a retry
-                retryTimer.restart()
+                selectedNodeId = ids[0] || ""
             }
         }
+
+        // Internal: parallel array of node IDs (same order as nodeList)
+        property var _nodeIds: []
 
         ScrollView
         {
@@ -169,21 +160,24 @@ UM.Dialog
 
             UM.Label
             {
-                visible: sceneNodeListModel.count === 0
+                visible: contentItem.nodeList.length === 0
                 Layout.fillWidth: true
                 text: catalog.i18nc("@info", "No models loaded. Load a model first, then re-open this dialog.")
                 color: UM.Theme.getColor("text_medium")
                 wrapMode: Text.WordWrap
             }
 
-            Cura.ComboBox
+            ComboBox
             {
                 id: nodeSelector
                 Layout.fillWidth: true
-                visible: sceneNodeListModel.count > 0
-                textRole: "name"
-                valueRole: "nodeId"
-                model: sceneNodeListModel
+                visible: contentItem.nodeList.length > 0
+                model: contentItem.nodeList
+                onCurrentIndexChanged:
+                {
+                    if (currentIndex >= 0 && currentIndex < contentItem._nodeIds.length)
+                        contentItem.selectedNodeId = contentItem._nodeIds[currentIndex]
+                }
             }
 
             // ── Material preset ─────────────────────────────────────────────
@@ -255,8 +249,8 @@ UM.Dialog
                         verticalCenter: parent.verticalCenter
                         margins: UM.Theme.getSize("default_margin").width
                     }
-                    text: (manager !== undefined && nodeSelector.currentValue !== undefined)
-                        ? manager.getBCSummary(nodeSelector.currentValue)
+                    text: (manager !== undefined && contentItem.selectedNodeId !== "")
+                        ? manager.getBCSummary(contentItem.selectedNodeId)
                         : catalog.i18nc("@info", "No model selected.")
                     wrapMode: Text.WordWrap
                     color: UM.Theme.getColor("text")
@@ -267,7 +261,7 @@ UM.Dialog
             {
                 Layout.fillWidth: true
                 text: catalog.i18nc("@action:button", "Open BC Tool to Define Loads")
-                visible: manager !== undefined && nodeSelector.currentValue !== undefined
+                visible: manager !== undefined && contentItem.selectedNodeId !== ""
                 onClicked:
                 {
                     UM.Controller.setActiveTool("FEAInfillOptimizer")
@@ -366,11 +360,11 @@ UM.Dialog
                 text: catalog.i18nc("@action:button", "Run FEA Analysis")
                 enabled: manager !== undefined
                     && manager.depsAvailable
-                    && nodeSelector.currentValue !== undefined
+                    && contentItem.selectedNodeId !== ""
                     && manager.analysisStatus !== "running"
                 onClicked:
                 {
-                    if (!manager || nodeSelector.currentValue === undefined) return
+                    if (!manager || contentItem.selectedNodeId === "") return
                     manager.materialName = materialSelector.currentValue
                     manager.minDensity = minDensitySpinBox.value
                     manager.maxDensity = maxDensitySpinBox.value
@@ -378,7 +372,7 @@ UM.Dialog
                     manager.maxIterations = maxIterSpinBox.value
                     manager.safetyFactor = safetyFactorSpinBox.value / 10.0
                     manager.bondingCoeff = bondingSpinBox.value
-                    manager.runAnalysis(nodeSelector.currentValue)
+                    manager.runAnalysis(contentItem.selectedNodeId)
                 }
             }
 
@@ -556,8 +550,8 @@ UM.Dialog
                     text: catalog.i18nc("@action:button", "Apply Optimized Infill to Print")
                     onClicked:
                     {
-                        if (manager && nodeSelector.currentValue !== undefined)
-                            manager.applyModifierMeshes(nodeSelector.currentValue)
+                        if (manager && contentItem.selectedNodeId !== "")
+                            manager.applyModifierMeshes(contentItem.selectedNodeId)
                     }
                 }
 
@@ -570,13 +564,13 @@ UM.Dialog
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Show Stress Map")
-                        onClicked: { if (manager && nodeSelector.currentValue !== undefined) manager.showStressOverlay(nodeSelector.currentValue) }
+                        onClicked: { if (manager && contentItem.selectedNodeId !== "") manager.showStressOverlay(contentItem.selectedNodeId) }
                     }
                     Cura.SecondaryButton
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Clear Results")
-                        onClicked: { if (manager && nodeSelector.currentValue !== undefined) manager.clearResults(nodeSelector.currentValue) }
+                        onClicked: { if (manager && contentItem.selectedNodeId !== "") manager.clearResults(contentItem.selectedNodeId) }
                     }
                 }
             }

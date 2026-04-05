@@ -25,6 +25,7 @@ Item
     readonly property int    activeForceIdx:   toolProperties.getValue("ActiveForceIndex")   ?? -1
     readonly property var    supportListModel: JSON.parse(toolProperties.getValue("SupportListModel") ?? "[]")
     readonly property var    forceListModel:   JSON.parse(toolProperties.getValue("ForceListModel")   ?? "[]")
+    readonly property var    torqueListModel:  JSON.parse(toolProperties.getValue("TorqueListModel")  ?? "[]")
 
     implicitWidth: 280 * screenScaleFactor
     implicitHeight: 600 * screenScaleFactor
@@ -417,6 +418,73 @@ Item
             }
         }
 
+        // ── Torques list ─────────────────────────────────────────────────
+        UM.Label
+        {
+            text: catalog.i18nc("@label", "Torques")
+            font: UM.Theme.getFont("medium_bold")
+        }
+
+        Column
+        {
+            Layout.fillWidth: true
+            spacing: 2
+
+            Repeater
+            {
+                model: bcPanel.torqueListModel
+
+                Rectangle
+                {
+                    width: columnLayout.width
+                    height: torqueRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
+                    color: UM.Theme.getColor("main_background")
+                    border.color: UM.Theme.getColor("lining")
+                    border.width: UM.Theme.getSize("default_lining").width
+                    radius: UM.Theme.getSize("default_radius").width
+
+                    RowLayout
+                    {
+                        anchors.fill: parent
+                        anchors.margins: UM.Theme.getSize("default_margin").width / 2
+
+                        UM.Label
+                        {
+                            id: torqueRowLabel
+                            Layout.fillWidth: true
+                            text: modelData.label
+                            color: UM.Theme.getColor("text")
+                            elide: Text.ElideRight
+                        }
+
+                        UM.ColorImage
+                        {
+                            source: UM.Theme.getIcon("Cancel")
+                            color: UM.Theme.getColor("text_medium")
+                            width: UM.Theme.getSize("small_button_icon").width
+                            height: width
+
+                            MouseArea
+                            {
+                                anchors.fill: parent
+                                onClicked: UM.Controller.setProperty("DeleteTorqueGroup", modelData.index)
+                            }
+                        }
+                    }
+                }
+            }
+
+            UM.Label
+            {
+                visible: bcPanel.torqueListModel.length === 0
+                width: columnLayout.width
+                text: catalog.i18nc("@info", "No torques defined. Switch to Torque mode, select faces, then confirm.")
+                wrapMode: Text.WordWrap
+                font: UM.Theme.getFont("small")
+                color: UM.Theme.getColor("text_inactive")
+            }
+        }
+
         // ── Force settings (force + rotate mode) ──────────────────────────
         ColumnLayout
         {
@@ -677,7 +745,7 @@ Item
         {
             Layout.fillWidth: true
             text: catalog.i18nc("@action:button", "Confirm and Optimize")
-            enabled: bcPanel.supportListModel.length > 0 || bcPanel.forceListModel.length > 0
+            enabled: bcPanel.supportListModel.length > 0 || bcPanel.forceListModel.length > 0 || bcPanel.torqueListModel.length > 0
             onClicked: UM.Controller.setProperty("OpenOptimizeDialog", true)
         }
 
