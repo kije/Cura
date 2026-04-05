@@ -44,6 +44,7 @@ class FEAInfillExtension(QObject, Extension):
     sceneNodesChanged = pyqtSignal()
     settingsChanged = pyqtSignal()
     preselectedNodeChanged = pyqtSignal()
+    phaseChanged = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         QObject.__init__(self, parent)
@@ -65,11 +66,16 @@ class FEAInfillExtension(QObject, Extension):
         # Pre-selected node for dialog opening from tool
         self._preselected_node_key = ""
 
+        # Inline phase management: define → optimize → running → review / error
+        self._phase = "define"
+        self._active_node_key = ""
+
         # Analysis state
         self._analysis_status = "idle"  # idle, running, complete, error
         self._progress = 0.0
         self._analysis_stage = ""
         self._results: Optional[Dict[str, Any]] = None
+        self._cancel_requested = False
 
         # Settings
         self._material_name = "PLA"
@@ -203,56 +209,71 @@ class FEAInfillExtension(QObject, Extension):
                 Logger.logException("w", "FEA Infill: Failed to restore BCs for node '%s'",
                                     node.getName())
 
-    # -- Dialog --
+    # -- Phase management --
+
+    @pyqtProperty(str, notify=phaseChanged)
+    def phase(self) -> str:
+        return self._phase
+
+    @pyqtProperty(str, notify=phaseChanged)
+    def activeNodeKey(self) -> str:
+        return self._active_node_key
+
+    @pyqtSlot()
+    def enterOptimizePhase(self) -> None:
+        """Transition from DEFINE to OPTIMIZE phase.
+
+        Called by the BoundaryConditionTool's 'Confirm and Optimize' button.
+        Captures the currently selected node and advances the phase.
+        """
+        from UM.Scene.Selection import Selection
+        selected = Selection.getSelectedObject(0)
+        if selected is not None:
+            self._active_node_key = str(id(selected))
+            # Ensure the node is in cache for later runAnalysis lookup
+            self._node_cache[self._active_node_key] = selected
+        self._phase = "optimize"
+        self.phaseChanged.emit()
+
+    @pyqtSlot()
+    def goBackToDefine(self) -> None:
+        """Return to the DEFINE phase without clearing BCs."""
+        self._phase = "define"
+        self.phaseChanged.emit()
+
+    @pyqtSlot()
+    def cancelAnalysis(self) -> None:
+        """Cancel any running analysis and return to DEFINE phase."""
+        self._cancel_requested = True
+        self._phase = "define"
+        self._analysis_status = "idle"
+        self._progress = 0.0
+        self.phaseChanged.emit()
+        self.analysisStatusChanged.emit()
+        self.progressChanged.emit()
+
+    # -- Legacy dialog support (Extensions menu entry) --
 
     def showDialog(self) -> None:
-        self._ensureDialog()
-        if self._dialog:
-            self._dialog.show()
+        """Extensions menu entry: activate the BC tool and enter optimize phase."""
+        from cura.CuraApplication import CuraApplication as _App
+        controller = _App.getInstance().getController()
+        controller.setActiveTool("FEAInfillOptimizer")
+        # Only advance phase if we already have BCs defined; otherwise stay in define
+        from UM.Scene.Selection import Selection
+        selected = Selection.getSelectedObject(0)
+        if selected is not None:
+            bc = selected.callDecoration("getBoundaryConditions")
+            if bc is not None and bc.hasAnyBC():
+                self.enterOptimizePhase()
 
     def showDialogForNode(self, node_key: str) -> None:
-        """Open the dialog with a specific model pre-selected.
-
-        Called from the BoundaryConditionTool's "Confirm and Optimize"
-        button so the user transitions seamlessly from BC definition
-        to analysis.
-        """
-        # Set the pre-selected node key BEFORE creating/showing the dialog,
-        # so that when onVisibleChanged fires and calls refreshNodeList(),
-        # the preselectedNodeKey property is already set.
-        self._preselected_node_key = node_key
-        self.preselectedNodeChanged.emit()
-
-        # Populate cache so getSceneNodes() returns fresh data
-        nodes = self.getSceneNodes()
-        Logger.log("d", "FEA Infill: showDialogForNode key=%s, found %d nodes: %s",
-                   node_key, len(nodes),
-                   ", ".join(f"{n['name']}={n['id']}" for n in nodes))
-
-        self._ensureDialog()
-        if self._dialog:
-            self._dialog.show()
-        else:
-            Logger.log("e", "FEA Infill: Dialog is None, cannot show")
-
-    def _ensureDialog(self) -> None:
-        # Cache the dialog — only create once. Recreating on every call causes
-        # the `manager` context property to not yet be bound when
-        # onVisibleChanged fires immediately after .show(), resulting in
-        # refreshNodeList() returning early with an empty model.
-        # Only retry creation if the previous attempt returned None (QML error).
-        if self._dialog is not None:
-            return
-        plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
-        if not plugin_path:
-            Logger.log("e", "FEA Infill: Could not find plugin path")
-            return
-        qml_path = os.path.join(plugin_path, "resources", "qml", "FEAInfillDialog.qml")
-        self._dialog = CuraApplication.getInstance().createQmlComponent(
-            qml_path, {"manager": self}
-        )
-        if self._dialog is None:
-            Logger.log("e", "FEA Infill: Failed to create dialog QML component from %s", qml_path)
+        """Legacy: called by tool; now delegates to inline phase flow."""
+        self._active_node_key = node_key
+        # Populate cache so runAnalysis can resolve the node
+        self.getSceneNodes()
+        self._phase = "optimize"
+        self.phaseChanged.emit()
 
     # -- Dependency management --
 
@@ -486,9 +507,16 @@ class FEAInfillExtension(QObject, Extension):
 
     # -- FEA Actions --
 
+    @pyqtSlot()
     @pyqtSlot(str)
-    def runAnalysis(self, node_id: str) -> None:
-        """Triggered from QML 'Run FEA Analysis' button."""
+    def runAnalysis(self, node_id: str = "") -> None:
+        """Triggered from QML 'Run Analysis' button.
+
+        Uses _active_node_key when no node_id is provided (inline flow).
+        """
+        if not node_id:
+            node_id = self._active_node_key
+
         if not self._deps_available:
             Message(
                 i18n_catalog.i18nc("@info:status",
@@ -513,8 +541,11 @@ class FEAInfillExtension(QObject, Extension):
             ).show()
             return
 
+        self._cancel_requested = False
+        self._phase = "running"
         self._analysis_status = "running"
         self._progress = 0.0
+        self.phaseChanged.emit()
         self.analysisStatusChanged.emit()
         self.progressChanged.emit()
 
@@ -560,20 +591,37 @@ class FEAInfillExtension(QObject, Extension):
     def _onFEAFinished(self, job) -> None:
         result = job.getResult()
         def _apply() -> None:
+            if self._cancel_requested:
+                return
             if result is None or isinstance(result, Exception):
                 self._analysis_status = "error"
+                self._phase = "error"
                 self._results = None
                 Logger.log("e", "FEA Infill: Analysis failed: %s", str(result))
             else:
                 self._analysis_status = "complete"
+                self._phase = "review"
                 self._results = result
+                # Auto-show stress overlay on success
+                node = self._getNodeById(self._active_node_key)
+                if node is not None:
+                    try:
+                        from .visualization.stress_overlay import StressOverlayManager
+                        StressOverlayManager.toggle_overlay(node, self._results)
+                    except Exception:
+                        Logger.logException("w", "FEA Infill: Auto stress overlay failed")
+            self.phaseChanged.emit()
             self.analysisStatusChanged.emit()
             self.resultsChanged.emit()
         CuraApplication.getInstance().callLater(_apply)
 
+    @pyqtSlot()
     @pyqtSlot(str)
-    def applyModifierMeshes(self, node_id: str) -> None:
+    def applyModifierMeshes(self, node_id: str = "") -> None:
         """Create infill modifier meshes from the FEA results."""
+        if not node_id:
+            node_id = self._active_node_key
+
         if self._results is None:
             return
 
@@ -603,9 +651,12 @@ class FEAInfillExtension(QObject, Extension):
                 message_type=Message.MessageType.ERROR
             ).show()
 
+    @pyqtSlot()
     @pyqtSlot(str)
-    def showStressOverlay(self, node_id: str) -> None:
+    def showStressOverlay(self, node_id: str = "") -> None:
         """Toggle stress visualization overlay on the model."""
+        if not node_id:
+            node_id = self._active_node_key
         if self._results is None:
             return
         node = self._getNodeById(node_id)
@@ -615,12 +666,18 @@ class FEAInfillExtension(QObject, Extension):
         from .visualization.stress_overlay import StressOverlayManager
         StressOverlayManager.toggle_overlay(node, self._results)
 
+    @pyqtSlot()
+    @pyqtSlot()
     @pyqtSlot(str)
-    def clearResults(self, node_id: str) -> None:
+    def clearResults(self, node_id: str = "") -> None:
         """Remove FEA results and any modifier meshes/overlays."""
+        if not node_id:
+            node_id = self._active_node_key
         self._results = None
         self._analysis_status = "idle"
+        self._phase = "define"
         self._progress = 0.0
+        self.phaseChanged.emit()
         self.analysisStatusChanged.emit()
         self.progressChanged.emit()
         self.resultsChanged.emit()

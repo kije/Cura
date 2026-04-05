@@ -116,6 +116,13 @@ class BoundaryConditionTool(Tool):
         # Refresh highlights when the user selects a different model
         Selection.selectionChanged.connect(self._update_highlights)
 
+        # Relay extension signals → tool's propertyChanged so QML bindings refresh
+        if extension is not None:
+            extension.phaseChanged.connect(self.propertyChanged.emit)
+            extension.progressChanged.connect(self.propertyChanged.emit)
+            extension.resultsChanged.connect(self.propertyChanged.emit)
+            extension.analysisStatusChanged.connect(self.propertyChanged.emit)
+
         self.setExposedProperties(
             "Mode", "ForceX", "ForceY", "ForceZ", "ForceMagnitude",
             "CurrentSelectionCount", "SelectionSummary",
@@ -130,6 +137,15 @@ class BoundaryConditionTool(Tool):
             "SupportListModel", "ForceListModel",
             "SelectionMode",
             "DeleteActiveSupport", "DeleteActiveForce",
+            # Inline phase flow
+            "Phase",
+            "RunAnalysis", "CancelAnalysis", "GoBackToDefine",
+            "ApplyModifierMeshes", "ShowStressOverlay", "ClearResults",
+            "MaterialName", "SafetyFactor", "MeshResolution",
+            "AnalysisProgress", "AnalysisStage",
+            "MaxStress", "MinStress", "SafetyFactorResult",
+            "ConvergenceIterations", "SafetyVerdict", "HasResults",
+            "ActiveNodeName",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -407,13 +423,174 @@ class BoundaryConditionTool(Tool):
 
     def setOpenOptimizeDialog(self, value) -> None:
         if value and self._extension:
-            # Get the currently selected node's cache key
-            selected = Selection.getSelectedObject(0)
-            if selected is not None:
-                node_key = str(id(selected))
-                self._extension.showDialogForNode(node_key)
-            else:
-                self._extension.showDialog()
+            self._extension.enterOptimizePhase()
+
+    # ── Inline phase flow properties ────────────────────────────────────────
+
+    def getPhase(self) -> str:
+        if self._extension:
+            return self._extension.phase
+        return "define"
+
+    def setPhase(self, value: str) -> None:
+        pass  # read-only; changes come via extension slots
+
+    def getRunAnalysis(self) -> bool:
+        return False
+
+    def setRunAnalysis(self, value) -> None:
+        if value and self._extension:
+            self._extension.runAnalysis()
+            self.propertyChanged.emit()
+
+    def getCancelAnalysis(self) -> bool:
+        return False
+
+    def setCancelAnalysis(self, value) -> None:
+        if value and self._extension:
+            self._extension.cancelAnalysis()
+            self.propertyChanged.emit()
+
+    def getGoBackToDefine(self) -> bool:
+        return False
+
+    def setGoBackToDefine(self, value) -> None:
+        if value and self._extension:
+            self._extension.goBackToDefine()
+            self.propertyChanged.emit()
+
+    def getApplyModifierMeshes(self) -> bool:
+        return False
+
+    def setApplyModifierMeshes(self, value) -> None:
+        if value and self._extension:
+            self._extension.applyModifierMeshes()
+            self.propertyChanged.emit()
+
+    def getShowStressOverlay(self) -> bool:
+        return False
+
+    def setShowStressOverlay(self, value) -> None:
+        if value and self._extension:
+            self._extension.showStressOverlay()
+            self.propertyChanged.emit()
+
+    def getClearResults(self) -> bool:
+        return False
+
+    def setClearResults(self, value) -> None:
+        if value and self._extension:
+            self._extension.clearResults()
+            self.propertyChanged.emit()
+
+    def getMaterialName(self) -> str:
+        if self._extension:
+            return self._extension.materialName
+        return "PLA"
+
+    def setMaterialName(self, value: str) -> None:
+        if self._extension:
+            self._extension.materialName = str(value)
+        self.propertyChanged.emit()
+
+    def getSafetyFactor(self) -> float:
+        if self._extension:
+            return self._extension.safetyFactor
+        return 2.0
+
+    def setSafetyFactor(self, value) -> None:
+        if self._extension:
+            self._extension.safetyFactor = float(value)
+        self.propertyChanged.emit()
+
+    def getMeshResolution(self) -> str:
+        if self._extension:
+            return self._extension._mesh_resolution
+        return "medium"
+
+    def setMeshResolution(self, value: str) -> None:
+        if self._extension:
+            self._extension._mesh_resolution = str(value)
+        self.propertyChanged.emit()
+
+    def getAnalysisProgress(self) -> float:
+        if self._extension:
+            return self._extension.progress
+        return 0.0
+
+    def setAnalysisProgress(self, value) -> None:
+        pass  # read-only
+
+    def getAnalysisStage(self) -> str:
+        if self._extension:
+            return self._extension.analysisStage
+        return ""
+
+    def setAnalysisStage(self, value) -> None:
+        pass  # read-only
+
+    def getMaxStress(self) -> float:
+        if self._extension:
+            return self._extension.maxStress
+        return 0.0
+
+    def setMaxStress(self, value) -> None:
+        pass
+
+    def getMinStress(self) -> float:
+        if self._extension:
+            return self._extension.minStress
+        return 0.0
+
+    def setMinStress(self, value) -> None:
+        pass
+
+    def getSafetyFactorResult(self) -> float:
+        """The computed safety factor from analysis results (distinct from the input setting)."""
+        if self._extension and self._extension._results:
+            return self._extension._results.get("safety_factor", 0.0)
+        return 0.0
+
+    def setSafetyFactorResult(self, value) -> None:
+        pass
+
+    def getConvergenceIterations(self) -> int:
+        if self._extension:
+            return self._extension.convergenceIterations
+        return 0
+
+    def setConvergenceIterations(self, value) -> None:
+        pass
+
+    def getSafetyVerdict(self) -> str:
+        if self._extension:
+            return self._extension.safetyVerdict
+        return ""
+
+    def setSafetyVerdict(self, value) -> None:
+        pass
+
+    def getHasResults(self) -> bool:
+        if self._extension:
+            return self._extension.hasResults
+        return False
+
+    def setHasResults(self, value) -> None:
+        pass
+
+    def getActiveNodeName(self) -> str:
+        """Return the display name of the active node for the RUNNING/REVIEW phases."""
+        if self._extension:
+            node = self._extension._node_cache.get(self._extension.activeNodeKey)
+            if node is not None:
+                return node.getName()
+        selected = Selection.getSelectedObject(0)
+        if selected is not None:
+            return selected.getName()
+        return ""
+
+    def setActiveNodeName(self, value) -> None:
+        pass
 
     # ── List model properties ───────────────────────────────────────────────
 
