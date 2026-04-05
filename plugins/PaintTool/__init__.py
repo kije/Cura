@@ -3,8 +3,6 @@
 
 from . import PaintTool
 from . import PaintView
-from .DrawingTool import DrawingMode
-from .PaintLayer import BlendMode
 
 from PyQt6.QtQml import qmlRegisterUncreatableType
 
@@ -30,8 +28,6 @@ def getMetaData():
 def register(app):
     qmlRegisterUncreatableType(PaintTool.PaintTool.Brush, "Cura", 1, 0, "This is an enumeration class", "PaintToolBrush")
     qmlRegisterUncreatableType(PaintTool.PaintTool.Paint, "Cura", 1, 0, "This is an enumeration class", "PaintToolState")
-    qmlRegisterUncreatableType(DrawingMode, "Cura", 1, 0, "This is an enumeration class", "PaintToolDrawingMode")
-    qmlRegisterUncreatableType(BlendMode, "Cura", 1, 0, "This is an enumeration class", "PaintToolBlendMode")
     view = PaintView.PaintView()
     return {
         "tool": PaintTool.PaintTool(view),

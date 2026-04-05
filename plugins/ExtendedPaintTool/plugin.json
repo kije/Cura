@@ -1,0 +1,8 @@
+{
+    "name": "Extended Paint Tools",
+    "author": "UltiMaker",
+    "version": "1.0.0",
+    "description": "Professional 3D painting tools with precision drawing instruments, layers, symmetry, and stroke stabilization.",
+    "api": 8,
+    "i18n-catalog": "cura"
+}

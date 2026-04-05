@@ -28,12 +28,13 @@ from cura.Scene.SliceableObjectDecorator import SliceableObjectDecorator
 from .PaintStrokeCommand import PaintStrokeCommand
 from .PaintClearCommand import PaintClearCommand
 from .MultiMaterialExtruderConverter import MultiMaterialExtruderConverter
+from .PaintLayer import PaintLayerStack
 
 catalog = i18nCatalog("cura")
 
 
-class PaintView(CuraView):
-    """View for model-painting."""
+class ExtendedPaintView(CuraView):
+    """View for model-painting with layer support."""
 
     class PaintType:
         def __init__(self, display_color: Color, value: int):
@@ -51,6 +52,9 @@ class PaintView(CuraView):
         self._current_paint_type = ""
         self._paint_modes: Dict[str, Dict[str, "PaintView.PaintType"]] = {}
         self._paint_undo_stacks: WeakKeyDictionary[SceneNode, Dict[str, QUndoStack]] = WeakKeyDictionary()
+
+        # Layer system
+        self._layer_stacks: WeakKeyDictionary[SceneNode, Dict[str, PaintLayerStack]] = WeakKeyDictionary()
 
         application = CuraApplication.getInstance()
         application.engineCreatedSignal.connect(self._makePaintModes)
@@ -105,6 +109,57 @@ class PaintView(CuraView):
     def _onCurrentPaintedObjectMesDataChanged(self, object: SceneNode) -> None:
         if object == self._painted_object:
             self.currentPaintedObjectMeshDataChanged.emit()
+
+    # --- Layer stack management ---
+
+    def getLayerStack(self) -> Optional[PaintLayerStack]:
+        """Get the layer stack for the current object and paint type."""
+        if self._painted_object is None:
+            return None
+        if self._painted_object not in self._layer_stacks:
+            return None
+        return self._layer_stacks[self._painted_object].get(self._current_paint_type)
+
+    def _ensureLayerStack(self) -> Optional[PaintLayerStack]:
+        """Ensure a layer stack exists for the current object/paint type, creating if needed."""
+        if self._painted_object is None or self._paint_texture is None:
+            return None
+
+        if self._painted_object not in self._layer_stacks:
+            self._layer_stacks[self._painted_object] = {}
+
+        if self._current_paint_type not in self._layer_stacks[self._painted_object]:
+            w = self._paint_texture.getWidth()
+            h = self._paint_texture.getHeight()
+            stack = PaintLayerStack(w, h)
+            stack.layersChanged.connect(self._onLayerStackChanged)
+            self._layer_stacks[self._painted_object][self._current_paint_type] = stack
+
+        return self._layer_stacks[self._painted_object][self._current_paint_type]
+
+    def _onLayerStackChanged(self) -> None:
+        """Called when layer stack changes — recomposite and update display."""
+        self._updateDisplayTexture()
+
+    def _updateDisplayTexture(self) -> None:
+        """Flatten the layer stack and update the paint texture for display."""
+        stack = self.getLayerStack()
+        if stack is None or self._paint_texture is None:
+            return
+
+        flattened = stack.flatten()
+        paint_image = self._paint_texture.getImage()
+        if paint_image is None:
+            return
+
+        # Copy the flattened image into the paint texture for rendering
+        painter = QPainter(paint_image)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.drawImage(0, 0, flattened)
+        painter.end()
+        self._paint_texture.updateImagePart(paint_image.rect())
+
+    # --- Undo/Redo ---
 
     def canUndo(self):
         stack = self._getUndoStack()
@@ -186,7 +241,7 @@ class PaintView(CuraView):
 
     def _checkSetup(self):
         if not self._paint_shader:
-            shader_filename = os.path.join(PluginRegistry.getInstance().getPluginPath("PaintTool"), "paint.shader")
+            shader_filename = os.path.join(PluginRegistry.getInstance().getPluginPath("ExtendedPaintTool"), "paint.shader")
             self._paint_shader = OpenGL.getInstance().createShaderProgram(shader_filename)
 
     def setCursorStroke(self, cursor_path: QPainterPath, brush_color: str):
@@ -252,6 +307,21 @@ class PaintView(CuraView):
                                       self._current_bits_ranges,
                                       merge_with_previous,
                                       self._getSliceableObjectDecorator()))
+
+        # If we have a layer stack, also paint to the active layer's texture
+        layer_stack = self.getLayerStack()
+        if layer_stack is not None:
+            active_layer = layer_stack.getActiveLayer()
+            if active_layer is not None and not active_layer.locked:
+                # Paint directly to the layer texture as well
+                layer_stroke = PaintStrokeCommand(active_layer.texture,
+                                                  stroke_path,
+                                                  set_value,
+                                                  self._current_bits_ranges,
+                                                  merge_with_previous,
+                                                  None)
+                layer_stroke.redo()
+                layer_stack.invalidateCache()
 
     def _getSliceableObjectDecorator(self) -> Optional[SliceableObjectDecorator]:
         if self._painted_object is None or self._current_paint_type != "extruder":
@@ -393,6 +463,11 @@ class PaintView(CuraView):
 
         self._paint_shader.setUniformValue("u_bitsRangesStart", self._current_bits_ranges[0])
         self._paint_shader.setUniformValue("u_bitsRangesEnd", self._current_bits_ranges[1])
+
+        # Set isolated mode uniform for shader dimming
+        layer_stack = self.getLayerStack()
+        isolated = layer_stack.isolatedMode if layer_stack else False
+        self._paint_shader.setUniformValue("u_isolatedMode", 1 if isolated else 0)
 
         if self._current_bits_ranges[0] != self._current_bits_ranges[1]:
             colors = [paint_type_obj.display_color for paint_type_obj in self._paint_modes[self._current_paint_type].values()]

@@ -6,12 +6,11 @@ from enum import IntEnum
 import numpy
 from PyQt6.QtCore import Qt, QObject, pyqtEnum, QPointF
 from PyQt6.QtGui import QImage, QPainter, QPen, QBrush, QPolygonF, QPainterPath
-from PyQt6.QtWidgets import QApplication
-from typing import cast, Optional, Tuple, List, Dict, Set
+from typing import cast, Optional, Tuple, List
 import pyUvula as uvula
 
 from UM.Application import Application
-from UM.Event import Event, MouseEvent, KeyEvent
+from UM.Event import Event, MouseEvent
 from UM.Job import Job
 from UM.Logger import Logger
 from UM.Math.AxisAlignedBox2D import AxisAlignedBox2D
@@ -29,14 +28,10 @@ from cura.PickingPass import PickingPass
 from UM.View.SelectionPass import SelectionPass
 from .PaintView import PaintView
 from .PrepareTextureJob import PrepareTextureJob
-from .DrawingTool import (
-    DrawingMode, DrawingTool, DrawingToolResult,
-    FreehandTool, LineTool, RectangleTool, CircleTool, PolygonTool, FillTool,
-)
 
 
 class PaintTool(Tool):
-    """Provides the tool to paint meshes with professional drawing tools."""
+    """Provides the tool to paint meshes."""
 
     class Brush(QObject):
         @pyqtEnum
@@ -79,46 +74,12 @@ class PaintTool(Tool):
 
         self._last_world_coords: Optional[numpy.ndarray] = None
 
-        # Drawing tool system
-        self._freehand_tool = FreehandTool()
-        self._line_tool = LineTool()
-        self._rectangle_tool = RectangleTool()
-        self._circle_tool = CircleTool()
-        self._polygon_tool = PolygonTool()
-        self._fill_tool = FillTool()
-
-        self._drawing_tools: Dict[int, DrawingTool] = {
-            DrawingMode.Mode.FREEHAND: self._freehand_tool,
-            DrawingMode.Mode.LINE: self._line_tool,
-            DrawingMode.Mode.RECTANGLE: self._rectangle_tool,
-            DrawingMode.Mode.CIRCLE: self._circle_tool,
-            DrawingMode.Mode.POLYGON: self._polygon_tool,
-            DrawingMode.Mode.FILL: self._fill_tool,
-        }
-        self._drawing_mode: DrawingMode.Mode = DrawingMode.Mode.FREEHAND
-        self._active_drawing_tool: DrawingTool = self._freehand_tool
-
-        # Symmetry painting
-        self._symmetry_x: bool = False
-        self._symmetry_y: bool = False
-        self._symmetry_z: bool = False
-
-        # Stroke stabilization
-        self._stabilize: bool = False
-        self._stabilize_strength: int = 5
-
         legacy_opengl = OpenGLContext.isLegacyOpenGL()
         self._state: PaintTool.Paint.State = PaintTool.Paint.State.NOT_SUPPORTED if legacy_opengl else\
                                                                                 PaintTool.Paint.State.MULTIPLE_SELECTION
         self._prepare_texture_job: Optional[PrepareTextureJob] = None
 
-        self.setExposedProperties(
-            "PaintType", "BrushSize", "BrushColor", "BrushShape", "BrushExtruder",
-            "State", "CanUndo", "CanRedo",
-            "DrawingMode", "SymmetryX", "SymmetryY", "SymmetryZ",
-            "Stabilize", "StabilizeStrength",
-            "LayerStack",
-        )
+        self.setExposedProperties("PaintType", "BrushSize", "BrushColor", "BrushShape", "BrushExtruder", "State", "CanUndo", "CanRedo")
 
         self._controller.activeViewChanged.connect(self._updateIgnoreUnselectedObjects)
         self._controller.activeToolChanged.connect(self._updateState)
@@ -129,87 +90,6 @@ class PaintTool(Tool):
         self._cam_norm: numpy.ndarray = numpy.array([0.0, 0.0, 1.0])
         self._cam_axis_q: numpy.ndarray = numpy.array([1.0, 0.0, 0.0])
         self._cam_axis_r: numpy.ndarray = numpy.array([0.0, -1.0, 0.0])
-
-    # --- Drawing Mode ---
-
-    def getDrawingMode(self) -> int:
-        return self._drawing_mode
-
-    def setDrawingMode(self, mode: int) -> None:
-        mode = DrawingMode.Mode(mode)
-        if mode != self._drawing_mode:
-            # Cancel any in-progress drawing on the old tool
-            self._active_drawing_tool.cancel()
-            self._drawing_mode = mode
-            self._active_drawing_tool = self._drawing_tools[mode]
-            self._syncBrushParamsToTool()
-            self.propertyChanged.emit()
-
-    def _syncBrushParamsToTool(self) -> None:
-        """Sync brush size/shape to the active drawing tool if it supports them."""
-        tool = self._active_drawing_tool
-        if hasattr(tool, 'set_brush_params'):
-            tool.set_brush_params(self._brush_size, self._brush_shape)
-        if isinstance(tool, FreehandTool):
-            tool.set_stabilize(self._stabilize, self._stabilize_strength)
-
-    # --- Symmetry ---
-
-    def getSymmetryX(self) -> bool:
-        return self._symmetry_x
-
-    def setSymmetryX(self, enabled: bool) -> None:
-        if enabled != self._symmetry_x:
-            self._symmetry_x = enabled
-            self.propertyChanged.emit()
-
-    def getSymmetryY(self) -> bool:
-        return self._symmetry_y
-
-    def setSymmetryY(self, enabled: bool) -> None:
-        if enabled != self._symmetry_y:
-            self._symmetry_y = enabled
-            self.propertyChanged.emit()
-
-    def getSymmetryZ(self) -> bool:
-        return self._symmetry_z
-
-    def setSymmetryZ(self, enabled: bool) -> None:
-        if enabled != self._symmetry_z:
-            self._symmetry_z = enabled
-            self.propertyChanged.emit()
-
-    # --- Stabilization ---
-
-    def getStabilize(self) -> bool:
-        return self._stabilize
-
-    def setStabilize(self, enabled: bool) -> None:
-        if enabled != self._stabilize:
-            self._stabilize = enabled
-            if isinstance(self._active_drawing_tool, FreehandTool):
-                self._active_drawing_tool.set_stabilize(enabled, self._stabilize_strength)
-            self.propertyChanged.emit()
-
-    def getStabilizeStrength(self) -> int:
-        return self._stabilize_strength
-
-    def setStabilizeStrength(self, strength: int) -> None:
-        strength = int(strength)
-        if strength != self._stabilize_strength:
-            self._stabilize_strength = strength
-            if isinstance(self._active_drawing_tool, FreehandTool):
-                self._active_drawing_tool.set_stabilize(self._stabilize, strength)
-            self.propertyChanged.emit()
-
-    # --- Layer Stack ---
-
-    def getLayerStack(self):
-        """Get the layer stack for the current painted object and paint type.
-        Exposed to QML for the LayerPanel."""
-        return self._view.getLayerStack()
-
-    # --- Camera ---
 
     def _updateCamera(self, *args) -> None:
         if self._camera is None:
@@ -224,8 +104,6 @@ class PaintTool(Tool):
         self._cam_axis_q /= numpy.linalg.norm(self._cam_axis_q)
         self._cam_axis_r = numpy.cross(self._cam_axis_q, self._cam_norm)
         self._cam_axis_r /= numpy.linalg.norm(self._cam_axis_r)
-
-    # --- Brush ---
 
     def _createBrushPen(self) -> QPen:
         pen = QPen()
@@ -271,7 +149,6 @@ class PaintTool(Tool):
         if brush_size_int != self._brush_size:
             self._brush_size = brush_size_int
             self._brush_pen = self._createBrushPen()
-            self._syncBrushParamsToTool()
             self.propertyChanged.emit()
 
     def getBrushColor(self) -> str:
@@ -297,7 +174,6 @@ class PaintTool(Tool):
         if brush_shape != self._brush_shape:
             self._brush_shape = brush_shape
             self._brush_pen = self._createBrushPen()
-            self._syncBrushParamsToTool()
             self.propertyChanged.emit()
 
     def getCanUndo(self) -> bool:
@@ -404,158 +280,6 @@ class PaintTool(Tool):
                             face_id)
         return [Polygon(points) for points in res]
 
-    def _getUvAreasForViewportPolygon(self, viewport_polygon: Polygon, face_id: int) -> List[Polygon]:
-        """Project a viewport-space polygon to UV space using pyUvula."""
-        viewport_polygon.toType(numpy.float32)
-
-        mesh_indices = self._mesh_transformed_cache.getIndices()
-        if mesh_indices is None:
-            mesh_indices = numpy.array([], dtype=numpy.int32)
-
-        res = uvula.project(viewport_polygon.getPoints(),
-                            self._mesh_transformed_cache.getVertices(),
-                            mesh_indices,
-                            self._node_cache.getMeshData().getUVCoordinates(),
-                            self._node_cache.getMeshData().getFacesConnections(),
-                            self._view.getUvTexDimensions()[0],
-                            self._view.getUvTexDimensions()[1],
-                            self._camera.getProjectToViewMatrix().getData(),
-                            self._camera.isPerspective(),
-                            self._camera.getViewportWidth(),
-                            self._camera.getViewportHeight(),
-                            self._cam_norm,
-                            face_id)
-        return [Polygon(points) for points in res]
-
-    def _getViewportPos(self, world_coords: numpy.ndarray) -> numpy.ndarray:
-        """Project 3D world coords to 2D viewport coordinates."""
-        return numpy.array([*self._camera.projectToViewport(Vector(*world_coords))], dtype=numpy.float32)
-
-    def _reflectWorldCoords(self, world_coords: numpy.ndarray) -> List[numpy.ndarray]:
-        """Generate mirrored copies of world coordinates based on enabled symmetry axes.
-
-        Returns a list of reflected coordinate sets (not including the original).
-        """
-        if not (self._symmetry_x or self._symmetry_y or self._symmetry_z):
-            return []
-
-        painted_object = self._view.getPaintedObject()
-        if painted_object is None:
-            return []
-
-        center = painted_object.getBoundingBox().center.getData()
-
-        axes = []
-        if self._symmetry_x:
-            axes.append(0)
-        if self._symmetry_y:
-            axes.append(1)
-        if self._symmetry_z:
-            axes.append(2)
-
-        # Generate all combinations of axis reflections
-        reflections = []
-        for i in range(1, 1 << len(axes)):
-            reflected = world_coords.copy()
-            for bit, axis in enumerate(axes):
-                if i & (1 << bit):
-                    reflected[axis] = 2 * center[axis] - reflected[axis]
-            reflections.append(reflected)
-
-        return reflections
-
-    def _processDrawingToolResult(self, result: DrawingToolResult, face_id: int,
-                                   brush_color: str, painted_object: SceneNode) -> bool:
-        """Process a DrawingToolResult from a drawing tool, converting to UV and painting."""
-        if result is None:
-            return False
-
-        event_caught = False
-        try:
-            if result.is_uv_space:
-                # Fill tool: UV polygons provided directly
-                if result.polygons and not result.is_preview:
-                    stroke_path = self._createStrokePath(result.polygons)
-                    self._view.addStroke(result.polygons, brush_color, result.merge_with_previous)
-                    event_caught = True
-                return event_caught
-
-            # For tools that provide world coordinates for UV projection
-            if hasattr(result, '_world_coords_start') and hasattr(result, '_world_coords_end'):
-                world_start = result._world_coords_start
-                world_end = result._world_coords_end
-                result_face_id = getattr(result, '_face_id', face_id)
-
-                # Handle special polygon generation for geometric tools
-                if hasattr(result, '_line_tool'):
-                    line_tool = result._line_tool
-                    vp_start = self._getViewportPos(world_start)
-                    vp_end = self._getViewportPos(world_end)
-                    if getattr(result, '_snap', False):
-                        vp_end = LineTool._snap_angle(vp_start, vp_end)
-                    viewport_poly = line_tool._make_line_polygon(vp_start, vp_end)
-                    uv_areas = self._getUvAreasForViewportPolygon(viewport_poly, result_face_id)
-                elif hasattr(result, '_constrain') and isinstance(self._active_drawing_tool, RectangleTool):
-                    vp_start = self._getViewportPos(world_start)
-                    vp_end = self._getViewportPos(world_end)
-                    viewport_poly = RectangleTool._make_rect_polygon(vp_start, vp_end, result._constrain)
-                    uv_areas = self._getUvAreasForViewportPolygon(viewport_poly, result_face_id)
-                elif hasattr(result, '_constrain') and isinstance(self._active_drawing_tool, CircleTool):
-                    vp_start = self._getViewportPos(world_start)
-                    vp_end = self._getViewportPos(world_end)
-                    viewport_poly = CircleTool._make_circle_polygon(vp_start, vp_end, result._constrain)
-                    uv_areas = self._getUvAreasForViewportPolygon(viewport_poly, result_face_id)
-                else:
-                    # Freehand or default: use existing stroke polygon pipeline
-                    uv_areas = self._getUvAreasForStroke(world_start, world_end, result_face_id)
-
-                if not uv_areas:
-                    return False
-
-                # Apply symmetry: generate mirrored strokes
-                all_uv_areas = list(uv_areas)
-                if not result.is_preview and (self._symmetry_x or self._symmetry_y or self._symmetry_z):
-                    for reflected_start in self._reflectWorldCoords(world_start):
-                        reflected_end = reflected_start + (world_end - world_start)
-                        for refl_end in self._reflectWorldCoords(world_end):
-                            reflected_end = refl_end
-                            break
-                        try:
-                            mirror_uv = self._getUvAreasForStroke(reflected_start, reflected_end, result_face_id)
-                            all_uv_areas.extend(mirror_uv)
-                        except:
-                            pass  # Mirrored position may be off-mesh
-
-                if result.is_preview:
-                    cursor_path = self._createStrokePath(uv_areas)
-                    self._view.setCursorStroke(cursor_path, brush_color)
-                else:
-                    self._view.addStroke(all_uv_areas, brush_color, result.merge_with_previous)
-                    event_caught = True
-
-            elif hasattr(result, '_polygon_vertices_world'):
-                # Polygon tool: vertices in world space
-                vertices_world = result._polygon_vertices_world
-                result_face_id = getattr(result, '_face_id', face_id)
-
-                if len(vertices_world) >= 3:
-                    vp_points = numpy.array([self._getViewportPos(v) for v in vertices_world])
-                    viewport_poly = Polygon(vp_points)
-                    uv_areas = self._getUvAreasForViewportPolygon(viewport_poly, result_face_id)
-
-                    if uv_areas:
-                        if result.is_preview:
-                            cursor_path = self._createStrokePath(uv_areas)
-                            self._view.setCursorStroke(cursor_path, brush_color)
-                        else:
-                            self._view.addStroke(uv_areas, brush_color, False)
-                            event_caught = True
-
-        except:
-            Logger.logException("e", "Error processing drawing tool result")
-
-        return event_caught
-
     def event(self, event: Event) -> bool:
         """Handle mouse and keyboard events.
 
@@ -574,7 +298,6 @@ class PaintTool(Tool):
             return True
 
         if event.type == Event.ToolDeactivateEvent:
-            self._active_drawing_tool.cancel()
             return True
 
         if self._state != PaintTool.Paint.State.READY:
@@ -583,45 +306,9 @@ class PaintTool(Tool):
         if self._controller.getActiveView() is not self._view:
             return False
 
-        # Handle keyboard events
-        if event.type == Event.KeyPressEvent:
-            key_evt = cast(KeyEvent, event)
-            if key_evt.key == Qt.Key.Key_Escape:
-                if self._active_drawing_tool.is_active():
-                    self._active_drawing_tool.cancel()
-                    self._view.clearCursorStroke()
-                    self._updateScene(painted_object)
-                    return True
-            return False
-
         if event.type == Event.MouseReleaseEvent and self._controller.getToolsEnabled():
-            mouse_evt = cast(MouseEvent, event)
-            if MouseEvent.LeftButton not in mouse_evt.buttons:
+            if MouseEvent.LeftButton not in cast(MouseEvent, event).buttons:
                 return False
-
-            # For release-based tools (rectangle, circle), we need hit testing
-            if isinstance(self._active_drawing_tool, (RectangleTool, CircleTool)):
-                if not self._active_drawing_tool.is_active():
-                    self._mouse_held = False
-                    self._last_world_coords = None
-                    return True
-
-                # Get face/world data for release event
-                if self._faces_selection_pass and self._picking_pass and self._mesh_transformed_cache:
-                    face_id = self._faces_selection_pass.getFaceIdAtPosition(mouse_evt.x, mouse_evt.y)
-                    if face_id >= 0 and face_id < self._mesh_transformed_cache.getFaceCount():
-                        world_coords = self._picking_pass.getPickedPosition(mouse_evt.x, mouse_evt.y).getData()
-                        viewport_pos = self._getViewportPos(world_coords)
-                        modifiers = QApplication.keyboardModifiers()
-                        result = self._active_drawing_tool.handle_release(world_coords, face_id, viewport_pos, modifiers)
-                        brush_color = self._brush_color if self.getPaintType() != "extruder" else str(self._brush_extruder)
-                        event_caught = self._processDrawingToolResult(result, face_id, brush_color, painted_object)
-                        self._view.clearCursorStroke()
-                        self._updateScene(painted_object, update_node=event_caught)
-                        self._mouse_held = False
-                        self._last_world_coords = None
-                        return True
-
             self._mouse_held = False
             self._last_world_coords = None
             return True
@@ -667,76 +354,36 @@ class PaintTool(Tool):
             face_id = self._faces_selection_pass.getFaceIdAtPosition(mouse_evt.x, mouse_evt.y)
             if face_id < 0 or face_id >= self._mesh_transformed_cache.getFaceCount():
                 if self._view.clearCursorStroke():
-                    self._updateScene(painted_object, update_node=self._mouse_held)
+                    self._updateScene(painted_object, update_node = self._mouse_held)
                     return True
                 return False
 
             world_coords_vec = self._picking_pass.getPickedPosition(mouse_evt.x, mouse_evt.y)
             world_coords = world_coords_vec.getData()
-            viewport_pos = self._getViewportPos(world_coords)
-            modifiers = QApplication.keyboardModifiers()
-
             if self._last_world_coords is None:
                 self._last_world_coords = world_coords
 
-            # Update fill tool context if needed
-            if isinstance(self._active_drawing_tool, FillTool):
-                self._fill_tool.set_mesh_context(
-                    self._node_cache.getMeshData(),
-                    self._view._paint_texture,
-                    self._view._current_bits_ranges,
-                )
-
-            brush_color = self._brush_color if self.getPaintType() != "extruder" else str(self._brush_extruder)
-            event_caught = False
-
+            event_caught = False # Propagate mouse event if only moving the cursor, not to block e.g. rotation
             try:
-                if self._drawing_mode == DrawingMode.Mode.FREEHAND:
-                    # Freehand: use original optimized path with cursor preview
-                    uv_areas_cursor = self._getUvAreasForStroke(world_coords, world_coords, face_id)
-                    if len(uv_areas_cursor) > 0:
-                        cursor_path = self._createStrokePath(uv_areas_cursor)
-                        self._view.setCursorStroke(cursor_path, brush_color)
-                    else:
-                        self._view.clearCursorStroke()
-
-                    if is_pressed:
-                        self._freehand_tool.handle_press(world_coords, face_id, viewport_pos, modifiers)
-                    elif is_moved and self._mouse_held:
-                        result = self._freehand_tool.handle_move(world_coords, face_id, viewport_pos, modifiers)
-                        if result and hasattr(result, '_world_coords_start'):
-                            uv_areas = self._getUvAreasForStroke(result._world_coords_start, result._world_coords_end, face_id)
-                            if len(uv_areas) > 0:
-                                # Apply symmetry
-                                all_uv_areas = list(uv_areas)
-                                if self._symmetry_x or self._symmetry_y or self._symmetry_z:
-                                    for reflected_start in self._reflectWorldCoords(result._world_coords_start):
-                                        try:
-                                            reflected_end = reflected_start + (result._world_coords_end - result._world_coords_start)
-                                            mirror_uv = self._getUvAreasForStroke(reflected_start, reflected_end, face_id)
-                                            all_uv_areas.extend(mirror_uv)
-                                        except:
-                                            pass
-                                event_caught = True
-                                self._view.addStroke(all_uv_areas, brush_color, result.merge_with_previous)
+                brush_color = self._brush_color if self.getPaintType() != "extruder" else str(self._brush_extruder)
+                uv_areas_cursor = self._getUvAreasForStroke(world_coords, world_coords, face_id)
+                if len(uv_areas_cursor) > 0:
+                    cursor_path = self._createStrokePath(uv_areas_cursor)
+                    self._view.setCursorStroke(cursor_path, brush_color)
                 else:
-                    # Non-freehand tools: route through drawing tool state machine
-                    if is_pressed:
-                        result = self._active_drawing_tool.handle_press(world_coords, face_id, viewport_pos, modifiers)
-                        event_caught = self._processDrawingToolResult(result, face_id, brush_color, painted_object)
-                        # For multi-click tools, catch the event to prevent camera rotation
-                        if self._active_drawing_tool.is_active():
-                            event_caught = True
-                    elif is_moved:
-                        result = self._active_drawing_tool.handle_move(world_coords, face_id, viewport_pos, modifiers)
-                        self._processDrawingToolResult(result, face_id, brush_color, painted_object)
-                        if self._active_drawing_tool.is_active():
-                            event_caught = True
+                    self._view.clearCursorStroke()
+
+                if self._mouse_held:
+                    uv_areas = self._getUvAreasForStroke(self._last_world_coords, world_coords, face_id)
+                    if len(uv_areas) == 0:
+                        return False
+                    event_caught = True
+                    self._view.addStroke(uv_areas, brush_color, is_moved)
             except:
                 Logger.logException("e", "Error when adding paint stroke")
 
             self._last_world_coords = world_coords
-            self._updateScene(painted_object, update_node=event_caught)
+            self._updateScene(painted_object, update_node = event_caught)
             return event_caught
 
         return False
