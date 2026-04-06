@@ -189,17 +189,49 @@ class StressOverlayManager:
         )
 
         # Build overlay MeshData with colours
-        # Use a tiny uniform scale-up (1.001×) from the center to prevent
-        # Z-fighting instead of normal offset (which only works on one side)
-        center = surface_verts.mean(axis=0)
-        offset_verts = center + (surface_verts - center) * 1.002  # 0.2% scale-up
-        offset_verts = offset_verts.astype(numpy.float32)
+        # Offset vertices slightly along face normals to prevent Z-fighting.
+        # Compute per-face normals, then average to per-vertex normals.
+        surface_indices = source_mesh.getIndices()
+        offset_verts = surface_verts.copy().astype(numpy.float32)
+
+        # Compute per-vertex normals for offset
+        if surface_indices is not None:
+            indices_arr = numpy.asarray(surface_indices, dtype=numpy.int32)
+            v0 = surface_verts[indices_arr[:, 0]]
+            v1 = surface_verts[indices_arr[:, 1]]
+            v2 = surface_verts[indices_arr[:, 2]]
+            face_normals = numpy.cross(v1 - v0, v2 - v0)
+            norms = numpy.linalg.norm(face_normals, axis=1, keepdims=True)
+            norms[norms < 1e-10] = 1.0
+            face_normals /= norms
+
+            # Accumulate face normals to vertices
+            vert_normals = numpy.zeros_like(surface_verts)
+            for i in range(3):
+                numpy.add.at(vert_normals, indices_arr[:, i], face_normals)
+            vn_norms = numpy.linalg.norm(vert_normals, axis=1, keepdims=True)
+            vn_norms[vn_norms < 1e-10] = 1.0
+            vert_normals /= vn_norms
+
+            # Offset along normals (outward) — 0.15mm
+            offset_verts += (vert_normals * 0.15).astype(numpy.float32)
+        else:
+            # Flat vertex layout: offset per-triangle
+            n_tris = len(surface_verts) // 3
+            for t in range(n_tris):
+                v0 = surface_verts[t*3]
+                v1 = surface_verts[t*3+1]
+                v2 = surface_verts[t*3+2]
+                n = numpy.cross(v1 - v0, v2 - v0)
+                nl = numpy.linalg.norm(n)
+                if nl > 1e-10:
+                    n /= nl
+                    offset_verts[t*3:t*3+3] += (n * 0.15).astype(numpy.float32)
 
         builder = MeshBuilder()
         builder.setVertices(offset_verts)
         builder.setColors(colors)
 
-        surface_indices = source_mesh.getIndices()
         if surface_indices is not None:
             builder.setIndices(numpy.asarray(surface_indices, dtype=numpy.int32))
 
