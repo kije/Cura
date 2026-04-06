@@ -242,36 +242,23 @@ class IterativeFEASolver:
             if fixed_nodes_ef is not None and len(fixed_nodes_ef) > 0:
                 simu.add_dirichlet(fixed_nodes_ef, [0, 0, 0], ["x", "y", "z"])
 
-            # Apply Neumann BCs (area-weighted force distribution)
+            # Apply Neumann BCs (force distribution)
             for force_nodes, force_vec, area_weights in force_groups_ef:
                 if len(force_nodes) > 0:
-                    # EasyFEA's add_neumann applies uniform force per node.
-                    # For area-weighted distribution, we apply per-node forces
-                    # proportional to tributary area.
                     fx_total = float(force_vec.x)
                     fy_total = float(force_vec.y)
                     fz_total = float(force_vec.z)
 
-                    if area_weights is not None and len(area_weights) == len(force_nodes):
-                        # Apply force to each node individually with its weight
-                        for ni, w in zip(force_nodes, area_weights):
-                            simu.add_neumann(
-                                np.array([ni]),
-                                [fx_total * w, fy_total * w, fz_total * w],
-                                ["x", "y", "z"]
-                            )
-                    else:
-                        # Equal distribution fallback — pass total force, EasyFEA
-                        # internally divides by len(nodes) in __Bc_pointLoad
-                        simu.add_neumann(
-                            force_nodes,
-                            [fx_total, fy_total, fz_total],
-                            ["x", "y", "z"]
-                        )
+                    # Pass total force — EasyFEA divides by len(nodes) internally
+                    simu.add_neumann(
+                        force_nodes,
+                        [fx_total, fy_total, fz_total],
+                        ["x", "y", "z"]
+                    )
 
             simu.Solve()
 
-            # Extract von Mises stress per element
+            # Extract von Mises stress
             svm = simu.Result("Svm")
             max_disp = float(np.max(np.abs(simu.displacement))) if simu.displacement is not None else 0.0
             Logger.log("d", "FEA EasyFEA: max displacement=%.6f mm", max_disp)
@@ -280,13 +267,23 @@ class IterativeFEASolver:
                 Logger.log("w", "FEA EasyFEA: Svm returned None or empty!")
                 stress = np.zeros(n_elems, dtype=np.float64)
             else:
-                stress = np.asarray(svm, dtype=np.float64)
-                Logger.log("d", "FEA EasyFEA: Svm shape=%s, min=%.4f, max=%.4f, mean=%.4f MPa",
-                           stress.shape, float(stress.min()), float(stress.max()), float(stress.mean()))
-                if len(stress) != n_elems:
-                    Logger.log("w", "FEA EasyFEA: Svm length %d != n_elems %d, averaging",
-                               len(stress), n_elems)
-                    stress = np.full(n_elems, float(np.mean(stress)), dtype=np.float64)
+                svm_arr = np.asarray(svm, dtype=np.float64)
+                Logger.log("d", "FEA EasyFEA: Svm shape=%s (nodes=%d, elems=%d), min=%.4f, max=%.4f MPa",
+                           svm_arr.shape, mesh.Nn, n_elems, float(svm_arr.min()), float(svm_arr.max()))
+
+                if len(svm_arr) == n_elems:
+                    # Per-element stress — use directly
+                    stress = svm_arr
+                elif len(svm_arr) == mesh.Nn:
+                    # Per-node stress — average to elements
+                    # Each element's stress = mean of its 4 node stresses
+                    connect = mesh.groupElem.connect  # (n_elems, 4) connectivity
+                    stress = np.mean(svm_arr[connect], axis=1)
+                    Logger.log("d", "FEA EasyFEA: mapped %d nodal stresses to %d element stresses",
+                               len(svm_arr), len(stress))
+                else:
+                    Logger.log("w", "FEA EasyFEA: unexpected Svm length %d", len(svm_arr))
+                    stress = np.full(n_elems, float(np.mean(svm_arr)), dtype=np.float64)
 
             # Map stress → density candidate
             density_candidate = stress_to_density(
