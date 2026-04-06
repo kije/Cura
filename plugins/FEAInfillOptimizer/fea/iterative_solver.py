@@ -171,6 +171,7 @@ class IterativeFEASolver:
         surface_mesh: Any,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Fixed-point iteration using EasyFEA as the FEA kernel."""
+        import threading as _threading
         import time as _time
 
         min_rho = float(config.get("min_density", 0.10))
@@ -214,16 +215,40 @@ class IterativeFEASolver:
         max_change = float("inf")
         iteration = 0
 
+        # Timeout in seconds for a single simu.Solve() call.  If it does not
+        # return within this budget the iteration loop is aborted with an error
+        # log rather than hanging the process indefinitely.
+        _SOLVE_TIMEOUT = 60.0
+
+        # Track the previous Simulations.Elastic instance so we can remove it
+        # from the mesh observer list before creating the next one.
+        #
+        # ROOT CAUSE of the hang: _Simu.__init__ calls mesh._Add_observer(self)
+        # and model._Add_observer(self), registering every new Elastic instance
+        # as a listener on the shared `mesh` object.  Without explicit removal,
+        # each iteration *appends* a stale observer.  By iteration 2-4 the
+        # mesh carries 2-4 live observer references, and any Need_Update()
+        # notification (triggered during stiffness-matrix assembly in Solve())
+        # fans out to all of them.  The cascade of redundant matrix rebuilds
+        # grows exponentially and the process appears to hang indefinitely.
+        # This is intermittent because CPython's GC sometimes collects the
+        # stale simu objects in time (ref cycle through material observer list),
+        # allowing the solver to complete before the fan-out reaches a
+        # pathological size.
+        _prev_simu: Optional[Any] = None
+
         for iteration in range(max_iter):
             _iter_t = _time.monotonic()
 
-            # Effective isotropic-equivalent properties from density field
+            # --- Step 1: homogenize ----------------------------------------
+            _t0 = _time.monotonic()
             rho_mean = float(np.mean(density))
             scale = rho_mean ** n_exp
 
             E_avg = E_xy * scale
             E_t_avg = E_xy * bonding_coeff * scale
-            # Shear: G = E / (2(1+ν)) for isotropic layer, scaled by bonding for transverse
+            # Shear: G = E / (2(1+ν)) for isotropic layer, scaled by bonding
+            # for transverse direction.
             G_avg = E_avg / (2.0 * (1.0 + nu))
             nu_t = nu * (bonding_coeff ** 0.5)
 
@@ -235,30 +260,98 @@ class IterativeFEASolver:
                 vl=nu,
                 vt=nu_t,
             )
+            Logger.log("d", "FEA EasyFEA iter %d step 1 homogenize: %.3fs",
+                       iteration + 1, _time.monotonic() - _t0)
+
+            # --- Step 2: build simulation (observer-safe) -------------------
+            # Remove the previous simu from the mesh/model observer lists
+            # BEFORE creating the new one to prevent observer accumulation.
+            _t0 = _time.monotonic()
+            if _prev_simu is not None:
+                try:
+                    mesh._Remove_observer(_prev_simu)
+                except Exception:
+                    pass
+                try:
+                    _prev_simu.model._Remove_observer(_prev_simu)
+                except Exception:
+                    pass
+            _prev_simu = None  # drop ref so GC can reclaim it
 
             simu = Simulations.Elastic(mesh, mat)
+            Logger.log("d", "FEA EasyFEA iter %d step 2 build simu: %.3fs",
+                       iteration + 1, _time.monotonic() - _t0)
 
+            # --- Step 3: apply BCs -----------------------------------------
+            _t0 = _time.monotonic()
             # Apply Dirichlet BCs (zero displacement)
             if fixed_nodes_ef is not None and len(fixed_nodes_ef) > 0:
                 simu.add_dirichlet(fixed_nodes_ef, [0, 0, 0], ["x", "y", "z"])
 
-            # Apply Neumann BCs (force distribution)
+            # Apply Neumann BCs (area-weighted force distribution)
             for force_nodes, force_vec, area_weights in force_groups_ef:
                 if len(force_nodes) > 0:
                     fx_total = float(force_vec.x)
                     fy_total = float(force_vec.y)
                     fz_total = float(force_vec.z)
 
-                    # Pass total force — EasyFEA divides by len(nodes) internally
-                    simu.add_neumann(
-                        force_nodes,
-                        [fx_total, fy_total, fz_total],
-                        ["x", "y", "z"]
-                    )
+                    if area_weights is not None and len(area_weights) == len(force_nodes):
+                        # Per-node area-weighted distribution
+                        for ni, w in zip(force_nodes, area_weights):
+                            simu.add_neumann(
+                                np.array([ni]),
+                                [fx_total * w, fy_total * w, fz_total * w],
+                                ["x", "y", "z"]
+                            )
+                    else:
+                        # Equal distribution — pass total force, EasyFEA
+                        # divides by len(nodes) internally
+                        simu.add_neumann(
+                            force_nodes,
+                            [fx_total, fy_total, fz_total],
+                            ["x", "y", "z"]
+                        )
+            Logger.log("d", "FEA EasyFEA iter %d step 3 apply BCs: %.3fs",
+                       iteration + 1, _time.monotonic() - _t0)
 
-            simu.Solve()
+            # --- Step 4: solve (with 60s timeout) ---------------------------
+            # simu.Solve() calls into scipy/superLU/pardiso linear algebra.
+            # Run it on a daemon thread so we can detect a hang and abort
+            # cleanly rather than freezing the Cura process forever.
+            _t0 = _time.monotonic()
+            _solve_exc: List[Optional[Exception]] = [None]
 
-            # Extract von Mises stress
+            def _solve_worker():
+                try:
+                    simu.Solve()
+                except Exception as _exc:
+                    _solve_exc[0] = _exc
+
+            _solve_thread = _threading.Thread(target=_solve_worker, daemon=True)
+            _solve_thread.start()
+            _solve_thread.join(timeout=_SOLVE_TIMEOUT)
+
+            if _solve_thread.is_alive():
+                Logger.log("e",
+                    "FEA EasyFEA iter %d: Solve() did not finish within %.0fs "
+                    "— aborting iteration loop.  Check that boundary conditions "
+                    "fully constrain rigid-body motion (the stiffness matrix "
+                    "may be singular).",
+                    iteration + 1, _SOLVE_TIMEOUT)
+                _prev_simu = simu  # still deregister on exit
+                break
+
+            if _solve_exc[0] is not None:
+                raise _solve_exc[0]
+
+            Logger.log("d", "FEA EasyFEA iter %d step 4 Solve(): %.3fs",
+                       iteration + 1, _time.monotonic() - _t0)
+
+            # Keep a ref so we can deregister it at the top of the next iter.
+            _prev_simu = simu
+
+            # --- Step 5: extract stress -------------------------------------
+            _t0 = _time.monotonic()
             svm = simu.Result("Svm")
             max_disp = float(np.max(np.abs(simu.displacement))) if simu.displacement is not None else 0.0
             Logger.log("d", "FEA EasyFEA: max displacement=%.6f mm", max_disp)
@@ -284,7 +377,10 @@ class IterativeFEASolver:
                 else:
                     Logger.log("w", "FEA EasyFEA: unexpected Svm length %d", len(svm_arr))
                     stress = np.full(n_elems, float(np.mean(svm_arr)), dtype=np.float64)
+            Logger.log("d", "FEA EasyFEA iter %d step 5 extract stress: %.3fs",
+                       iteration + 1, _time.monotonic() - _t0)
 
+            # --- Step 6: density update -------------------------------------
             # Map stress → density candidate
             density_candidate = stress_to_density(
                 stress,
@@ -302,7 +398,7 @@ class IterativeFEASolver:
             max_change = float(np.max(np.abs(density_new - density)))
             density = density_new
 
-            Logger.log("d", "FEA EasyFEA iter %d: max_change=%.4f, rho_mean=%.3f (%.1fs)",
+            Logger.log("d", "FEA EasyFEA iter %d: max_change=%.4f, rho_mean=%.3f (total %.1fs)",
                        iteration + 1, max_change, float(np.mean(density)),
                        _time.monotonic() - _iter_t)
 
@@ -312,6 +408,17 @@ class IterativeFEASolver:
             if max_change < _CONVERGENCE_TOL:
                 converged = True
                 break
+
+        # Deregister the final simu so the mesh does not retain a stale ref.
+        if _prev_simu is not None:
+            try:
+                mesh._Remove_observer(_prev_simu)
+            except Exception:
+                pass
+            try:
+                _prev_simu.model._Remove_observer(_prev_simu)
+            except Exception:
+                pass
 
         info: Dict[str, Any] = {
             "iterations": iteration + 1,
