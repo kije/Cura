@@ -229,12 +229,12 @@ class StressOverlayManager:
                 if not self.getMeshData():
                     return True
                 if self._shader is None:
-                    # Use the default shader which supports per-vertex colors
                     self._shader = OpenGL.getInstance().createShaderProgram(
-                        Resources.getPath(Resources.Shaders, "default.shader")
+                        Resources.getPath(Resources.Shaders, "transparent_object.shader")
                     )
                     if self._shader is None:
                         return True
+                    self._shader.setUniformValue("u_opacity", 0.45)
 
                 renderer.queueNode(
                     self,

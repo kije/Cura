@@ -242,14 +242,32 @@ class IterativeFEASolver:
             if fixed_nodes_ef is not None and len(fixed_nodes_ef) > 0:
                 simu.add_dirichlet(fixed_nodes_ef, [0, 0, 0], ["x", "y", "z"])
 
-            # Apply Neumann BCs (distributed forces)
-            for force_nodes, force_vec in force_groups_ef:
+            # Apply Neumann BCs (area-weighted force distribution)
+            for force_nodes, force_vec, area_weights in force_groups_ef:
                 if len(force_nodes) > 0:
-                    n_fn = len(force_nodes)
-                    fx = float(force_vec.x) / n_fn
-                    fy = float(force_vec.y) / n_fn
-                    fz = float(force_vec.z) / n_fn
-                    simu.add_neumann(force_nodes, [fx, fy, fz], ["x", "y", "z"])
+                    # EasyFEA's add_neumann applies uniform force per node.
+                    # For area-weighted distribution, we apply per-node forces
+                    # proportional to tributary area.
+                    fx_total = float(force_vec.x)
+                    fy_total = float(force_vec.y)
+                    fz_total = float(force_vec.z)
+
+                    if area_weights is not None and len(area_weights) == len(force_nodes):
+                        # Apply force to each node individually with its weight
+                        for ni, w in zip(force_nodes, area_weights):
+                            simu.add_neumann(
+                                np.array([ni]),
+                                [fx_total * w, fy_total * w, fz_total * w],
+                                ["x", "y", "z"]
+                            )
+                    else:
+                        # Equal distribution fallback — pass total force, EasyFEA
+                        # internally divides by len(nodes) in __Bc_pointLoad
+                        simu.add_neumann(
+                            force_nodes,
+                            [fx_total, fy_total, fz_total],
+                            ["x", "y", "z"]
+                        )
 
             simu.Solve()
 
@@ -439,21 +457,22 @@ def _easyfea_fixed_nodes(bc: Any, mesh: Any, surface_mesh: Any) -> Optional[np.n
 
 def _easyfea_force_groups(
     bc: Any, mesh: Any, surface_mesh: Any
-) -> List[Tuple[np.ndarray, Any]]:
-    """Map force groups to (EasyFEA node array, force UM.Vector) pairs.
+) -> List[Tuple[np.ndarray, Any, Optional[np.ndarray]]]:
+    """Map force groups to (EasyFEA node array, force vector, area_weights) tuples.
 
-    Uses KDTree proximity matching instead of AABB.
+    Uses KDTree proximity matching. Returns per-node tributary area weights
+    so forces are distributed proportional to the area each node represents,
+    not equally.
     """
-    result: List[Tuple[np.ndarray, Any]] = []
+    result: List[Tuple[np.ndarray, Any, Optional[np.ndarray]]] = []
     if surface_mesh is None:
         return result
 
     mesh_coords = mesh.coord  # (N, 3)
 
     for force_group in bc.getForceGroups():
-        sv_indices = _face_indices_to_vertex_indices(
-            [int(fi) for fi in force_group.face_indices], surface_mesh
-        )
+        face_indices = [int(fi) for fi in force_group.face_indices]
+        sv_indices = _face_indices_to_vertex_indices(face_indices, surface_mesh)
         if not sv_indices:
             continue
 
@@ -461,16 +480,48 @@ def _easyfea_force_groups(
 
         from scipy.spatial import KDTree
         force_tree = KDTree(force_positions)
-        dists, _ = force_tree.query(mesh_coords)
+        dists, nearest = force_tree.query(mesh_coords)
 
         tolerance = 0.5
         close_mask = dists < tolerance
         force_nodes = np.where(close_mask)[0]
 
-        if len(force_nodes) > 0:
-            Logger.log("d", "FEA BC: force group %d face vertices → %d mesh nodes",
-                       len(force_positions), len(force_nodes))
-            result.append((force_nodes, force_group.force))
+        if len(force_nodes) == 0:
+            continue
+
+        # Compute tributary area weights per surface vertex
+        # Each triangle contributes 1/3 of its area to each of its vertices
+        vertex_areas = np.zeros(len(surface_mesh.vertices), dtype=np.float64)
+        verts = np.array(surface_mesh.vertices, dtype=np.float64)
+        faces = np.array(surface_mesh.faces, dtype=np.int32)
+        for fi in face_indices:
+            if fi >= len(faces):
+                continue
+            tri = faces[fi]
+            v0, v1, v2 = verts[tri[0]], verts[tri[1]], verts[tri[2]]
+            area = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0))
+            for vi in tri:
+                vertex_areas[vi] += area / 3.0
+
+        # Map tributary areas from surface vertices to mesh nodes
+        # Each mesh node inherits the area of its nearest surface vertex
+        sv_indices_arr = np.array(sv_indices, dtype=np.int32)
+        node_weights = np.zeros(len(force_nodes), dtype=np.float64)
+        for i, ni in enumerate(force_nodes):
+            nearest_sv = nearest[ni]
+            if nearest_sv < len(sv_indices_arr):
+                sv_idx = sv_indices_arr[nearest_sv]
+                node_weights[i] = vertex_areas[sv_idx]
+
+        total_weight = node_weights.sum()
+        if total_weight > 0:
+            node_weights /= total_weight  # normalize to sum=1
+        else:
+            node_weights = np.ones(len(force_nodes)) / len(force_nodes)  # equal fallback
+
+        Logger.log("d", "FEA BC: force group %d faces → %d mesh nodes (area-weighted)",
+                   len(face_indices), len(force_nodes))
+        result.append((force_nodes, force_group.force, node_weights))
 
     return result
 
