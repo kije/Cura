@@ -913,7 +913,8 @@ class BoundaryConditionTool(Tool):
                     self._force_y = fg.force.y
                     self._force_z = fg.force.z
                     self._sync_magnitude_from_components()
-                    # Show rotation handle at this force group's centroid
+                    # Enter rotate mode so the force direction gizmo is usable
+                    self._mode = MODE_ROTATE
                     self._rotating_group_index = self._active_force_index
                     mesh_data = selected.getMeshData()
                     if mesh_data is not None:
