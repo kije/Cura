@@ -189,10 +189,13 @@ class StressOverlayManager:
         )
 
         # Build overlay MeshData with colours
-        builder = MeshBuilder()
+        # Use a tiny uniform scale-up (1.001×) from the center to prevent
+        # Z-fighting instead of normal offset (which only works on one side)
+        center = surface_verts.mean(axis=0)
+        offset_verts = center + (surface_verts - center) * 1.002  # 0.2% scale-up
+        offset_verts = offset_verts.astype(numpy.float32)
 
-        # Offset vertices slightly along normals to prevent Z-fighting
-        offset_verts = surface_verts.copy().astype(numpy.float32)
+        builder = MeshBuilder()
         builder.setVertices(offset_verts)
         builder.setColors(colors)
 
@@ -201,13 +204,6 @@ class StressOverlayManager:
             builder.setIndices(numpy.asarray(surface_indices, dtype=numpy.int32))
 
         builder.calculateNormals()
-
-        # Apply normal offset for Z-fighting prevention
-        normals = builder.getNormals()
-        if normals is not None and len(normals) == len(offset_verts):
-            offset_verts += normals * 0.15  # 0.15mm offset
-            builder.setVertices(offset_verts)
-
         overlay_mesh = builder.build()
         Logger.log("d", "FEA overlay: built mesh with %d verts, %d colors",
                    len(offset_verts), len(colors))
