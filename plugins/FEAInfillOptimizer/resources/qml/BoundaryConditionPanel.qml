@@ -23,9 +23,12 @@ Item
     readonly property string selectionMode:    toolProperties.getValue("SelectionMode")    ?? "single"
     readonly property int    activeSupportIdx: toolProperties.getValue("ActiveSupportIndex") ?? -1
     readonly property int    activeForceIdx:   toolProperties.getValue("ActiveForceIndex")   ?? -1
-    readonly property var    supportListModel: JSON.parse(toolProperties.getValue("SupportListModel") ?? "[]")
-    readonly property var    forceListModel:   JSON.parse(toolProperties.getValue("ForceListModel")   ?? "[]")
-    readonly property var    torqueListModel:  JSON.parse(toolProperties.getValue("TorqueListModel")  ?? "[]")
+    property string _supportJson: toolProperties.getValue("SupportListModel") ?? "[]"
+    property string _forceJson:   toolProperties.getValue("ForceListModel")   ?? "[]"
+    property string _torqueJson:  toolProperties.getValue("TorqueListModel")  ?? "[]"
+    readonly property var    supportListModel: JSON.parse(_supportJson)
+    readonly property var    forceListModel:   JSON.parse(_forceJson)
+    readonly property var    torqueListModel:  JSON.parse(_torqueJson)
 
     // Phase and optimization properties
     readonly property string currentPhase:     toolProperties.getValue("Phase")            ?? "define"
@@ -39,6 +42,7 @@ Item
     readonly property real   safetyFactorResult: Number(toolProperties.getValue("SafetyFactorResult") ?? 0)
     readonly property int    convergenceIter:  Number(toolProperties.getValue("ConvergenceIterations") ?? 0)
     readonly property string safetyVerdict:    toolProperties.getValue("SafetyVerdict")    ?? ""
+    readonly property bool   stressOverlayVisible: toolProperties.getValue("StressOverlayVisible") === true || toolProperties.getValue("StressOverlayVisible") === "true"
 
     implicitWidth: 280 * screenScaleFactor
     implicitHeight: 600 * screenScaleFactor
@@ -64,7 +68,7 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "define"
-                implicitHeight: visible ? defineColumn.implicitHeight : 0
+                Layout.preferredHeight: visible ? defineColumn.implicitHeight : 0
 
                 ColumnLayout
                 {
@@ -81,9 +85,9 @@ Item
                     Rectangle
                     {
                         Layout.fillWidth: true
-                        visible: bcPanel.supportListModel.length === 0 && bcPanel.forceListModel.length === 0
+                        visible: bcPanel.supportListModel.length === 0 && bcPanel.forceListModel.length === 0 && bcPanel.torqueListModel.length === 0
                         height: visible ? stepGuide.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
-                        color: "#1a2a3a"
+                        color: UM.Theme.getColor("detail_background")
                         radius: UM.Theme.getSize("default_radius").width
 
                         UM.Label
@@ -96,7 +100,7 @@ Item
                                 margins: UM.Theme.getSize("default_margin").width
                             }
                             wrapMode: Text.WordWrap
-                            color: "#aaccee"
+                            color: UM.Theme.getColor("text")
                             font: UM.Theme.getFont("small")
                             text: catalog.i18nc("@info",
                                 "Quick start:\n" +
@@ -105,6 +109,75 @@ Item
                                 "3. Set the load amount and click 'Confirm Load'\n" +
                                 "4. Click 'Confirm and Optimize' to run analysis")
                         }
+                    }
+
+                    // ── Quick setup ───────────────────────────────────────
+                    UM.Label
+                    {
+                        text: catalog.i18nc("@label", "Quick Setup")
+                        font: UM.Theme.getFont("medium_bold")
+                    }
+
+                    Rectangle
+                    {
+                        Layout.fillWidth: true
+                        visible: (toolProperties.getValue("QuickSetupMode") ?? "") !== ""
+                        height: visible ? quickModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        color: Qt.rgba(UM.Theme.getColor("success").r, UM.Theme.getColor("success").g, UM.Theme.getColor("success").b, 0.15)
+                        radius: UM.Theme.getSize("default_radius").width
+
+                        UM.Label
+                        {
+                            id: quickModeLabel
+                            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width }
+                            wrapMode: Text.WordWrap
+                            color: UM.Theme.getColor("text")
+                            font: UM.Theme.getFont("small")
+                            text: {
+                                var mode = toolProperties.getValue("QuickSetupMode") ?? ""
+                                if (mode === "gravity_pick_bottom") return catalog.i18nc("@info", "Click the bottom face of your part (the face resting on the build plate or surface).")
+                                if (mode === "cantilever_pick_fixed") return catalog.i18nc("@info", "Click the face where the part is fixed/clamped (the end that doesn't move).")
+                                return ""
+                            }
+                        }
+                    }
+
+                    Cura.SecondaryButton
+                    {
+                        Layout.fillWidth: true
+                        text: catalog.i18nc("@action:button", "Gravity: Click Bottom Face")
+                        onClicked: UM.Controller.setProperty("QuickGravityStart", true)
+                    }
+
+                    Cura.SecondaryButton
+                    {
+                        Layout.fillWidth: true
+                        text: catalog.i18nc("@action:button", "Cantilever: Click Fixed End")
+                        onClicked: UM.Controller.setProperty("QuickCantileverStart", true)
+                    }
+
+                    RowLayout
+                    {
+                        Layout.fillWidth: true
+                        spacing: UM.Theme.getSize("default_margin").width / 2
+
+                        Cura.SecondaryButton
+                        {
+                            Layout.fillWidth: true
+                            text: catalog.i18nc("@action:button", "Fix Bolt Holes")
+                            onClicked: UM.Controller.setProperty("QuickMountHoles", true)
+                        }
+                        SpinBox
+                        {
+                            id: holeDiameterSpinBox
+                            // Internal integer ×100 → display as mm with 2 decimals
+                            // e.g. value 625 → "6.25 mm"
+                            from: 50; to: 5000; value: 800; stepSize: 25
+                            onValueModified: UM.Controller.setProperty("QuickHoleDiameter", value / 100.0)
+                            textFromValue: function(v) { return (v / 100.0).toFixed(2) }
+                            valueFromText: function(t) { return Math.round(parseFloat(t) * 100) }
+                        }
+                        UM.Label { text: "mm"; font: UM.Theme.getFont("small") }
                     }
 
                     // ── Mode selector ─────────────────────────────────────
@@ -193,31 +266,13 @@ Item
                     }
 
                     // Hover preview toggle
-                    RowLayout
+                    CheckBox
                     {
+                        id: hoverToggle
+                        text: catalog.i18nc("@option", "Highlight face on hover")
+                        checked: toolProperties.getValue("HoverPreviewEnabled") !== false
                         Layout.fillWidth: true
-                        spacing: UM.Theme.getSize("default_margin").width / 2
-
-                        CheckBox
-                        {
-                            id: hoverToggle
-                            checked: toolProperties.getValue("HoverPreviewEnabled") !== false
-                            onClicked: UM.Controller.setProperty("HoverPreviewEnabled", checked)
-                        }
-
-                        UM.Label
-                        {
-                            text: catalog.i18nc("@option", "Highlight face on hover")
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_medium")
-                            Layout.fillWidth: true
-
-                            MouseArea
-                            {
-                                anchors.fill: parent
-                                onClicked: { hoverToggle.checked = !hoverToggle.checked; UM.Controller.setProperty("HoverPreviewEnabled", hoverToggle.checked) }
-                            }
-                        }
+                        onClicked: UM.Controller.setProperty("HoverPreviewEnabled", checked)
                     }
 
                     // ── Rotate mode indicator ─────────────────────────────
@@ -226,7 +281,7 @@ Item
                         Layout.fillWidth: true
                         visible: bcPanel.currentMode === "rotate"
                         height: visible ? rotateModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
-                        color: "#222244"
+                        color: Qt.rgba(UM.Theme.getColor("primary").r, UM.Theme.getColor("primary").g, UM.Theme.getColor("primary").b, 0.15)
                         radius: UM.Theme.getSize("default_radius").width
 
                         UM.Label
@@ -240,7 +295,7 @@ Item
                                 margins: UM.Theme.getSize("default_margin").width
                             }
                             wrapMode: Text.WordWrap
-                            color: "#aaaaff"
+                            color: UM.Theme.getColor("text")
                             text: catalog.i18nc("@info", "Drag the rings to adjust direction. Click 'Support / Mount' or 'Apply Load' to exit.")
                         }
                     }
@@ -569,7 +624,7 @@ Item
                         Layout.fillWidth: true
                         visible: defineColumn.isForceEditMode || defineColumn.isTorqueEditMode
                         height: visible ? editBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
-                        color: "#3a2a0a"
+                        color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.2)
                         radius: UM.Theme.getSize("default_radius").width
 
                         RowLayout
@@ -592,14 +647,14 @@ Item
                                         return catalog.i18nc("@info", "Editing Torque %1").arg(defineColumn.editingTorqueIndex + 1)
                                     return ""
                                 }
-                                color: "#ffcc44"
+                                color: UM.Theme.getColor("warning")
                                 font: UM.Theme.getFont("small_bold")
                             }
 
                             UM.ColorImage
                             {
                                 source: UM.Theme.getIcon("Cancel")
-                                color: "#ffcc44"
+                                color: UM.Theme.getColor("warning")
                                 width: UM.Theme.getSize("small_button_icon").width
                                 height: width
                                 MouseArea
@@ -638,8 +693,10 @@ Item
                             {
                                 id: magnitudeField
                                 Layout.fillWidth: true
-                                text: (toolProperties.getValue("ForceMagnitude") ?? 100).toFixed(1)
                                 validator: DoubleValidator { bottom: 0; decimals: 1 }
+                                property real _backendMagnitude: Number(toolProperties.getValue("ForceMagnitude") ?? 100)
+                                onBackendMagnitudeChanged: { if (!activeFocus) text = _backendMagnitude.toFixed(1) }
+                                Component.onCompleted: text = _backendMagnitude.toFixed(1)
                                 onEditingFinished:
                                     UM.Controller.setProperty("ForceMagnitude", parseFloat(text) || 100.0)
                             }
@@ -677,7 +734,7 @@ Item
                                 Layout.fillWidth: true
                                 text: bcPanel.forceX.toFixed(1)
                                 readOnly: bcPanel.currentMode === "rotate"
-                                font.pointSize: 9
+                                font.pointSize: UM.Theme.getFont("small").pointSize
                                 validator: DoubleValidator { decimals: 1 }
                                 onEditingFinished:
                                     UM.Controller.setProperty("ForceX", parseFloat(text) || 0.0)
@@ -690,7 +747,7 @@ Item
                                 Layout.fillWidth: true
                                 text: bcPanel.forceY.toFixed(1)
                                 readOnly: bcPanel.currentMode === "rotate"
-                                font.pointSize: 9
+                                font.pointSize: UM.Theme.getFont("small").pointSize
                                 validator: DoubleValidator { decimals: 1 }
                                 onEditingFinished:
                                     UM.Controller.setProperty("ForceY", parseFloat(text) || 0.0)
@@ -703,7 +760,7 @@ Item
                                 Layout.fillWidth: true
                                 text: bcPanel.forceZ.toFixed(1)
                                 readOnly: bcPanel.currentMode === "rotate"
-                                font.pointSize: 9
+                                font.pointSize: UM.Theme.getFont("small").pointSize
                                 validator: DoubleValidator { decimals: 1 }
                                 onEditingFinished:
                                     UM.Controller.setProperty("ForceZ", parseFloat(text) || 0.0)
@@ -865,75 +922,6 @@ Item
                         }
                     }
 
-                    // ── Quick setup ───────────────────────────────────────
-                    UM.Label
-                    {
-                        text: catalog.i18nc("@label", "Quick Setup")
-                        font: UM.Theme.getFont("medium_bold")
-                    }
-
-                    Rectangle
-                    {
-                        Layout.fillWidth: true
-                        visible: (toolProperties.getValue("QuickSetupMode") ?? "") !== ""
-                        height: visible ? quickModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
-                        color: "#1a3a2a"
-                        radius: UM.Theme.getSize("default_radius").width
-
-                        UM.Label
-                        {
-                            id: quickModeLabel
-                            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width }
-                            wrapMode: Text.WordWrap
-                            color: "#aaffcc"
-                            font: UM.Theme.getFont("small")
-                            text: {
-                                var mode = toolProperties.getValue("QuickSetupMode") ?? ""
-                                if (mode === "gravity_pick_bottom") return catalog.i18nc("@info", "Click the bottom face of your part (the face resting on the build plate or surface).")
-                                if (mode === "cantilever_pick_fixed") return catalog.i18nc("@info", "Click the face where the part is fixed/clamped (the end that doesn't move).")
-                                return ""
-                            }
-                        }
-                    }
-
-                    Cura.SecondaryButton
-                    {
-                        Layout.fillWidth: true
-                        text: catalog.i18nc("@action:button", "Gravity: Click Bottom Face")
-                        onClicked: UM.Controller.setProperty("QuickGravityStart", true)
-                    }
-
-                    Cura.SecondaryButton
-                    {
-                        Layout.fillWidth: true
-                        text: catalog.i18nc("@action:button", "Cantilever: Click Fixed End")
-                        onClicked: UM.Controller.setProperty("QuickCantileverStart", true)
-                    }
-
-                    RowLayout
-                    {
-                        Layout.fillWidth: true
-                        spacing: UM.Theme.getSize("default_margin").width / 2
-
-                        Cura.SecondaryButton
-                        {
-                            Layout.fillWidth: true
-                            text: catalog.i18nc("@action:button", "Fix Bolt Holes")
-                            onClicked: UM.Controller.setProperty("QuickMountHoles", true)
-                        }
-                        SpinBox
-                        {
-                            id: holeDiameterSpinBox
-                            // Internal integer ×100 → display as mm with 2 decimals
-                            // e.g. value 625 → "6.25 mm"
-                            from: 50; to: 5000; value: 800; stepSize: 25
-                            onValueModified: UM.Controller.setProperty("QuickHoleDiameter", value / 100.0)
-                            textFromValue: function(v) { return (v / 100.0).toFixed(2) }
-                            valueFromText: function(t) { return Math.round(parseFloat(t) * 100) }
-                        }
-                        UM.Label { text: "mm"; font: UM.Theme.getFont("small") }
-                    }
-
                     // ── Confirm and Optimize button ───────────────────────
                     Item { height: UM.Theme.getSize("default_margin").height }
 
@@ -941,7 +929,7 @@ Item
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Confirm and Optimize")
-                        enabled: bcPanel.supportListModel.length > 0 || bcPanel.forceListModel.length > 0 || bcPanel.torqueListModel.length > 0
+                        enabled: bcPanel.supportListModel.length > 0 && (bcPanel.forceListModel.length > 0 || bcPanel.torqueListModel.length > 0)
                         onClicked: UM.Controller.setProperty("OpenOptimizeDialog", true)
                     }
 
@@ -956,7 +944,7 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "optimize"
-                implicitHeight: visible ? optimizeColumn.implicitHeight : 0
+                Layout.preferredHeight: visible ? optimizeColumn.implicitHeight : 0
 
                 ColumnLayout
                 {
@@ -1063,10 +1051,61 @@ Item
                         wrapMode: Text.WordWrap
                     }
 
-                    // Safety margin
+                    // Infill pattern
                     UM.Label
                     {
-                        text: catalog.i18nc("@label", "Safety Margin")
+                        text: catalog.i18nc("@label", "Infill Pattern")
+                        font: UM.Theme.getFont("medium_bold")
+                    }
+
+                    ComboBox
+                    {
+                        id: infillPatternSelector
+                        Layout.fillWidth: true
+                        model: [
+                            { value: "gyroid",       text: "Gyroid (recommended)" },
+                            { value: "grid",         text: "Grid" },
+                            { value: "lines",        text: "Lines" },
+                            { value: "triangles",    text: "Triangles" },
+                            { value: "cubic",        text: "Cubic" },
+                            { value: "honeycomb",    text: "Honeycomb" },
+                            { value: "trihexagon",   text: "Tri-Hexagon" },
+                            { value: "tetrahedral",  text: "Octet" },
+                            { value: "quarter_cubic", text: "Quarter Cubic" },
+                            { value: "concentric",   text: "Concentric" },
+                            { value: "zigzag",       text: "Zig Zag" },
+                            { value: "cross",        text: "Cross" },
+                            { value: "cross_3d",     text: "Cross 3D" },
+                            { value: "cubicsubdiv",  text: "Cubic Subdivision" },
+                            { value: "lightning",    text: "Lightning" }
+                        ]
+                        textRole: "text"
+                        valueRole: "value"
+                        currentIndex: {
+                            var pat = toolProperties.getValue("InfillPattern") ?? "gyroid"
+                            for (var i = 0; i < model.length; i++) {
+                                if (model[i].value === pat) return i
+                            }
+                            return 0
+                        }
+                        onActivated: function(index) {
+                            UM.Controller.setProperty("InfillPattern", model[index].value)
+                        }
+                    }
+
+                    UM.Label
+                    {
+                        Layout.fillWidth: true
+                        text: catalog.i18nc("@info", "Pattern used in infill zones. Auto-detected from your print profile. Affects how stiffness scales with density.")
+                        color: UM.Theme.getColor("text_medium")
+                        font: UM.Theme.getFont("small")
+                        wrapMode: Text.WordWrap
+                    }
+
+                    // Safety factor
+                    UM.Label
+                    {
+                        text: catalog.i18nc("@label", "Safety Factor")
                         font: UM.Theme.getFont("medium_bold")
                     }
 
@@ -1083,7 +1122,7 @@ Item
                             value: Math.round((toolProperties.getValue("SafetyFactor") ?? 2.0) * 10)
                             onValueModified: UM.Controller.setProperty("SafetyFactor", value / 10.0)
                             textFromValue: function(v) { return (v / 10.0).toFixed(1) + "\u00d7" }
-                            valueFromText: function(t) { return Math.round(parseFloat(t) * 10) }
+                            valueFromText: function(t) { return Math.round(parseFloat(t.replace(/[^\d.]/g, "")) * 10) }
                         }
 
                         UM.Label
@@ -1143,6 +1182,7 @@ Item
                     // Advanced section (collapsible)
                     ColumnLayout
                     {
+                        id: advancedSection
                         Layout.fillWidth: true
                         spacing: 0
 
@@ -1178,7 +1218,7 @@ Item
 
                                 UM.ColorImage
                                 {
-                                    source: parent.parent.parent.expanded ? UM.Theme.getIcon("ChevronSingleUp") : UM.Theme.getIcon("ChevronSingleDown")
+                                    source: advancedSection.expanded ? UM.Theme.getIcon("ChevronSingleUp") : UM.Theme.getIcon("ChevronSingleDown")
                                     color: UM.Theme.getColor("text_medium")
                                     width: UM.Theme.getSize("small_button_icon").width
                                     height: width
@@ -1188,7 +1228,7 @@ Item
                             MouseArea
                             {
                                 anchors.fill: parent
-                                onClicked: parent.parent.expanded = !parent.parent.expanded
+                                onClicked: advancedSection.expanded = !advancedSection.expanded
                             }
                         }
 
@@ -1196,7 +1236,7 @@ Item
                         GridLayout
                         {
                             Layout.fillWidth: true
-                            visible: parent.expanded
+                            visible: advancedSection.expanded
                             Layout.leftMargin: UM.Theme.getSize("default_margin").width / 2
                             Layout.rightMargin: UM.Theme.getSize("default_margin").width / 2
                             Layout.topMargin: UM.Theme.getSize("default_margin").height / 2
@@ -1232,7 +1272,7 @@ Item
                         Layout.fillWidth: true
                         visible: !toolProperties.getValue("DepsAvailable")
                         height: visible ? depsLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
-                        color: "#442222"
+                        color: Qt.rgba(UM.Theme.getColor("error").r, UM.Theme.getColor("error").g, UM.Theme.getColor("error").b, 0.2)
                         radius: UM.Theme.getSize("default_radius").width
 
                         ColumnLayout
@@ -1244,7 +1284,7 @@ Item
                             {
                                 Layout.fillWidth: true
                                 text: catalog.i18nc("@info:warning", "Required libraries not installed. Click Install, then restart Cura.")
-                                color: "#ff6666"
+                                color: UM.Theme.getColor("error")
                                 wrapMode: Text.WordWrap
                                 font: UM.Theme.getFont("small")
                             }
@@ -1287,7 +1327,7 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "running"
-                implicitHeight: visible ? runningColumn.implicitHeight : 0
+                Layout.preferredHeight: visible ? runningColumn.implicitHeight : 0
 
                 ColumnLayout
                 {
@@ -1373,7 +1413,7 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "review"
-                implicitHeight: visible ? reviewColumn.implicitHeight : 0
+                Layout.preferredHeight: visible ? reviewColumn.implicitHeight : 0
 
                 ColumnLayout
                 {
@@ -1397,9 +1437,9 @@ Item
                         radius: UM.Theme.getSize("default_radius").width
                         color: {
                             var q = toolProperties.getValue("MeshQuality") ?? ""
-                            if (q === "high") return "#1a3a1a"
-                            if (q === "medium") return "#3a3a1a"
-                            if (q === "low") return "#3a1a1a"
+                            if (q === "high") return Qt.rgba(UM.Theme.getColor("success").r, UM.Theme.getColor("success").g, UM.Theme.getColor("success").b, 0.15)
+                            if (q === "medium") return Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.15)
+                            if (q === "low") return Qt.rgba(UM.Theme.getColor("error").r, UM.Theme.getColor("error").g, UM.Theme.getColor("error").b, 0.15)
                             return "transparent"
                         }
 
@@ -1418,19 +1458,19 @@ Item
                             {
                                 text: {
                                     var q = toolProperties.getValue("MeshQuality") ?? ""
-                                    if (q === "high") return "●"
-                                    if (q === "medium") return "●"
-                                    if (q === "low") return "●"
+                                    if (q === "high") return "HIGH ●"
+                                    if (q === "medium") return "MED ◐"
+                                    if (q === "low") return "LOW ○"
                                     return ""
                                 }
                                 color: {
                                     var q = toolProperties.getValue("MeshQuality") ?? ""
-                                    if (q === "high") return "#44cc44"
-                                    if (q === "medium") return "#cccc44"
-                                    if (q === "low") return "#cc4444"
-                                    return "#888888"
+                                    if (q === "high") return UM.Theme.getColor("success")
+                                    if (q === "medium") return UM.Theme.getColor("warning")
+                                    if (q === "low") return UM.Theme.getColor("error")
+                                    return UM.Theme.getColor("text_inactive")
                                 }
-                                font.pointSize: 14
+                                font.pointSize: UM.Theme.getFont("large").pointSize
                             }
 
                             ColumnLayout
@@ -1448,25 +1488,18 @@ Item
                                         return ""
                                     }
                                     font: UM.Theme.getFont("small")
-                                    color: "#dddddd"
+                                    color: UM.Theme.getColor("text")
                                     wrapMode: Text.WordWrap
                                     Layout.fillWidth: true
                                 }
 
                                 UM.Label
                                 {
-                                    visible: {
-                                        var w = toolProperties.getValue("MeshWarnings") ?? "[]"
-                                        var arr = JSON.parse(w)
-                                        return arr.length > 0
-                                    }
-                                    text: {
-                                        var w = toolProperties.getValue("MeshWarnings") ?? "[]"
-                                        var arr = JSON.parse(w)
-                                        return arr.join("\n")
-                                    }
+                                    property var _meshWarnings: JSON.parse(toolProperties.getValue("MeshWarnings") ?? "[]")
+                                    visible: _meshWarnings.length > 0
+                                    text: _meshWarnings.join("\n")
                                     font: UM.Theme.getFont("small")
-                                    color: "#bbaa66"
+                                    color: UM.Theme.getColor("warning")
                                     wrapMode: Text.WordWrap
                                     Layout.fillWidth: true
                                 }
@@ -1482,10 +1515,10 @@ Item
                         radius: UM.Theme.getSize("default_radius").width
                         color: {
                             var v = bcPanel.safetyVerdict
-                            if (v === "unsafe")       return "#442222"
-                            if (v === "marginal")     return "#443322"
-                            if (v === "safe")         return "#224422"
-                            if (v === "conservative") return "#222244"
+                            if (v === "unsafe")       return Qt.rgba(UM.Theme.getColor("error").r, UM.Theme.getColor("error").g, UM.Theme.getColor("error").b, 0.35)
+                            if (v === "marginal")     return Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.3)
+                            if (v === "safe")         return Qt.rgba(UM.Theme.getColor("success").r, UM.Theme.getColor("success").g, UM.Theme.getColor("success").b, 0.3)
+                            if (v === "conservative") return Qt.rgba(UM.Theme.getColor("primary").r, UM.Theme.getColor("primary").g, UM.Theme.getColor("primary").b, 0.25)
                             return UM.Theme.getColor("main_background")
                         }
 
@@ -1499,14 +1532,14 @@ Item
                                 margins: UM.Theme.getSize("default_margin").width
                             }
                             wrapMode: Text.WordWrap
-                            color: "#ffffff"
+                            color: UM.Theme.getColor("button_text")
                             font: UM.Theme.getFont("medium_bold")
                             text: {
                                 var v = bcPanel.safetyVerdict
-                                if (v === "unsafe")       return catalog.i18nc("@info", "Warning: Part may fail under this load. Increase max infill or redesign.")
-                                if (v === "marginal")     return catalog.i18nc("@info", "Marginal safety. Consider increasing max infill density.")
-                                if (v === "safe")         return catalog.i18nc("@info", "Part should handle this load safely with optimized infill.")
-                                if (v === "conservative") return catalog.i18nc("@info", "Part is over-engineered. You could reduce max infill to save material.")
+                                if (v === "unsafe")       return "✗ " + catalog.i18nc("@info", "Unsafe: Part may fail under this load. Increase max infill or redesign.")
+                                if (v === "marginal")     return "⚠ " + catalog.i18nc("@info", "Marginal: Safety is borderline. Consider increasing max infill density.")
+                                if (v === "safe")         return "✓ " + catalog.i18nc("@info", "Safe: Part should handle this load safely with optimized infill.")
+                                if (v === "conservative") return "ℹ " + catalog.i18nc("@info", "Conservative: Part is over-engineered. You could reduce max infill to save material.")
                                 return catalog.i18nc("@info", "Analysis complete.")
                             }
                         }
@@ -1574,6 +1607,15 @@ Item
                     }
 
                     // Secondary actions
+                    Cura.SecondaryButton
+                    {
+                        Layout.fillWidth: true
+                        text: bcPanel.stressOverlayVisible
+                            ? catalog.i18nc("@action:button", "Hide Stress Map")
+                            : catalog.i18nc("@action:button", "Show Stress Map")
+                        onClicked: UM.Controller.setProperty("ShowStressOverlay", true)
+                    }
+
                     RowLayout
                     {
                         Layout.fillWidth: true
@@ -1582,15 +1624,15 @@ Item
                         Cura.SecondaryButton
                         {
                             Layout.fillWidth: true
-                            text: catalog.i18nc("@action:button", "Hide Stress Map")
-                            onClicked: UM.Controller.setProperty("ShowStressOverlay", true)
+                            text: catalog.i18nc("@action:button", "Edit Boundary Conditions")
+                            onClicked: UM.Controller.setProperty("GoBackToDefine", true)
                         }
 
                         Cura.SecondaryButton
                         {
                             Layout.fillWidth: true
-                            text: catalog.i18nc("@action:button", "Edit Setup")
-                            onClicked: UM.Controller.setProperty("GoBackToDefine", true)
+                            text: catalog.i18nc("@action:button", "Edit Analysis Settings")
+                            onClicked: UM.Controller.setProperty("GoBackToOptimize", true)
                         }
                     }
 
@@ -1598,7 +1640,39 @@ Item
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Clear Results")
-                        onClicked: UM.Controller.setProperty("ClearResults", true)
+                        onClicked: clearConfirmDialog.open()
+                    }
+
+                    UM.Dialog
+                    {
+                        id: clearConfirmDialog
+                        title: catalog.i18nc("@title:dialog", "Clear FEA Results")
+                        width: 400 * screenScaleFactor
+
+                        UM.Label
+                        {
+                            width: parent.width
+                            text: catalog.i18nc("@info:question", "This will remove all FEA results and modifier meshes. Are you sure?")
+                            wrapMode: Text.WordWrap
+                        }
+
+                        rightButtons:
+                        [
+                            Cura.PrimaryButton
+                            {
+                                text: catalog.i18nc("@action:button", "Clear")
+                                onClicked:
+                                {
+                                    clearConfirmDialog.accept()
+                                    UM.Controller.setProperty("ClearResults", true)
+                                }
+                            },
+                            Cura.SecondaryButton
+                            {
+                                text: catalog.i18nc("@action:button", "Cancel")
+                                onClicked: clearConfirmDialog.reject()
+                            }
+                        ]
                     }
 
                     Item { height: UM.Theme.getSize("default_margin").height }
@@ -1612,7 +1686,7 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "error"
-                implicitHeight: visible ? errorColumn.implicitHeight : 0
+                Layout.preferredHeight: visible ? errorColumn.implicitHeight : 0
 
                 ColumnLayout
                 {
@@ -1622,12 +1696,23 @@ Item
 
                     Item { height: UM.Theme.getSize("default_margin").height }
 
+                    UM.Label
+                    {
+                        Layout.fillWidth: true
+                        text: toolProperties.getValue("ErrorMessage") ?? ""
+                        visible: text !== ""
+                        color: UM.Theme.getColor("error")
+                        font: UM.Theme.getFont("default")
+                        wrapMode: Text.WordWrap
+                        Layout.bottomMargin: UM.Theme.getSize("default_margin").height
+                    }
+
                     Rectangle
                     {
                         Layout.fillWidth: true
                         height: errorMsgLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2
-                        color: "#442222"
-                        border.color: "#aa4444"
+                        color: Qt.rgba(UM.Theme.getColor("error").r, UM.Theme.getColor("error").g, UM.Theme.getColor("error").b, 0.2)
+                        border.color: UM.Theme.getColor("error")
                         border.width: UM.Theme.getSize("default_lining").width
                         radius: UM.Theme.getSize("default_radius").width
 
@@ -1641,7 +1726,7 @@ Item
                                 margins: UM.Theme.getSize("default_margin").width
                             }
                             wrapMode: Text.WordWrap
-                            color: "#ff6666"
+                            color: UM.Theme.getColor("error")
                             font: UM.Theme.getFont("small")
                             text: catalog.i18nc("@info:error",
                                 "Analysis failed.\n\n" +

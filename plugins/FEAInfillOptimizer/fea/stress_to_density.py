@@ -36,8 +36,11 @@ def stress_to_density(
     - ``"power"``:   ``ρ = rho_min + (rho_max - rho_min) × s^0.5``
 
     Args:
-        von_mises: Von Mises stress per element, shape (M,), same units as
-            ``sigma_yield``.
+        von_mises: Equivalent stress per element, shape (M,), same units as
+            ``sigma_yield``.  Can be von Mises stress (MPa) for isotropic
+            materials or Tsai-Hill equivalent stress (failure_index ×
+            yield_strength) for anisotropic materials — both produce a
+            natural σ/σ_eff ratio for the density mapping.
         sigma_yield: Yield / reference stress of the material in the same
             pressure unit as ``von_mises``.  Must be positive.
         rho_min: Minimum allowed density fraction (e.g. 0.10 for 10 % infill).

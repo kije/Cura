@@ -271,6 +271,74 @@ class LinearElasticitySolver:
 
         return vm_stress
 
+    def compute_element_failure_index(
+        self,
+        tet_mesh: TetMesh,
+        displacements: np.ndarray,
+        E_per_element: np.ndarray,
+        nu_per_element: np.ndarray,
+        *,
+        bonding_coeff: float = 1.0,
+        yield_strength: float = 50.0,
+    ) -> np.ndarray:
+        """Compute per-element failure index using Tsai-Hill or von Mises.
+
+        Uses Tsai-Hill when ``bonding_coeff < 0.95`` (anisotropic material),
+        and standard von Mises otherwise (isotropic).  The failure index is
+        dimensionless: 0 = no load, 1 = at failure, >1 = overloaded.
+
+        When using Tsai-Hill, multiply the returned index by ``yield_strength``
+        to obtain an equivalent stress that can be fed to ``stress_to_density``
+        with ``sigma_yield=yield_strength``, preserving the same mapping.
+
+        Returns:
+            Equivalent stress per element, shape (M,), in MPa.  For Tsai-Hill
+            this is ``failure_index × yield_strength``; for von Mises it is the
+            raw von Mises stress.
+        """
+        nodes = tet_mesh.nodes
+        elements = tet_mesh.elements
+        n_elems = elements.shape[0]
+        result = np.zeros(n_elems, dtype=np.float64)
+
+        use_tsai_hill = bonding_coeff < 0.95
+
+        for e_idx, (elem, E, nu) in enumerate(
+            zip(elements, E_per_element, nu_per_element)
+        ):
+            n0, n1, n2, n3 = int(elem[0]), int(elem[1]), int(elem[2]), int(elem[3])
+            x0, x1, x2, x3 = nodes[n0], nodes[n1], nodes[n2], nodes[n3]
+
+            B, V = _strain_displacement_matrix(x0, x1, x2, x3)
+            if V <= 0.0:
+                continue
+
+            dof_indices = np.array(
+                [n0 * 3, n0 * 3 + 1, n0 * 3 + 2,
+                 n1 * 3, n1 * 3 + 1, n1 * 3 + 2,
+                 n2 * 3, n2 * 3 + 1, n2 * 3 + 2,
+                 n3 * 3, n3 * 3 + 1, n3 * 3 + 2],
+                dtype=np.int64,
+            )
+            u_e = displacements[dof_indices]
+
+            if bonding_coeff < 1.0:
+                D = build_constitutive_matrix_from_bonding(
+                    float(E), float(nu), bonding_coeff
+                )
+            else:
+                D = build_constitutive_matrix(float(E), float(nu))
+            strain = B @ u_e
+            stress_vec = D @ strain
+
+            if use_tsai_hill:
+                fi = _tsai_hill(stress_vec, yield_strength, bonding_coeff)
+                result[e_idx] = fi * yield_strength
+            else:
+                result[e_idx] = _von_mises(stress_vec)
+
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -361,6 +429,38 @@ def _strain_displacement_matrix(
         B[5, col + 2] = bx
 
     return B, V
+
+
+def _tsai_hill(stress: np.ndarray, yield_strength: float, bonding_coeff: float) -> float:
+    """Tsai-Hill failure index for transversely isotropic FDM parts.
+
+    For a transversely isotropic layup with Z as the weak (interlayer) axis::
+
+        (σ_x/X)² + (σ_z/Z)² - σ_x·σ_z/X² + (τ_xz/S)² ≤ 1
+
+    where X = in-plane strength (yield_strength), Z = interlayer strength
+    (bonding_coeff × yield_strength), S = interlayer shear ≈ 0.6 × Z.
+
+    Returns a failure index: 0 = no load, 1 = at failure, >1 = overloaded.
+    """
+    sx, sy, sz, txy, tyz, txz = stress
+
+    X = yield_strength
+    Z = bonding_coeff * yield_strength
+    S = 0.6 * Z
+
+    if X <= 0.0 or Z <= 0.0 or S <= 0.0:
+        return 0.0
+
+    # In-plane stress resultant (XY plane is isotropic)
+    # Use combined in-plane stress for the X-direction terms
+    sigma_ip = float(np.sqrt(max(sx**2 + sy**2 - sx * sy + 3.0 * txy**2, 0.0)))
+
+    # Out-of-plane shear resultant
+    tau_op = float(np.sqrt(tyz**2 + txz**2))
+
+    fi2 = (sigma_ip / X) ** 2 + (sz / Z) ** 2 - sigma_ip * sz / (X ** 2) + (tau_op / S) ** 2
+    return float(np.sqrt(max(fi2, 0.0)))
 
 
 def _von_mises(stress: np.ndarray) -> float:

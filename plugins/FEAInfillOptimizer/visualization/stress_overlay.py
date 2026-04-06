@@ -13,7 +13,6 @@ from UM.Mesh.MeshBuilder import MeshBuilder
 from UM.Operations.AddSceneNodeOperation import AddSceneNodeOperation
 from UM.Operations.GroupedOperation import GroupedOperation
 from UM.Operations.RemoveSceneNodeOperation import RemoveSceneNodeOperation
-from UM.Settings.SettingInstance import SettingInstance
 
 _OVERLAY_NAME = "FEA Stress Overlay"
 
@@ -168,6 +167,16 @@ class StressOverlayManager:
         surface_verts = numpy.asarray(raw_verts, dtype=numpy.float64)
         Logger.log("d", "FEA overlay: surface has %d vertices", len(surface_verts))
 
+        # Transform vertices to world space (following NonPlanarSlicing's
+        # region_overlay.py pattern — avoids double-transformation when the
+        # overlay is parented to scene_root instead of the model node).
+        world_transform = node.getWorldTransformation()
+        if world_transform is not None:
+            world_matrix = world_transform.getData()
+            rot_scale = world_matrix[:3, :3]
+            translate = world_matrix[:3, 3]
+            surface_verts = surface_verts.dot(rot_scale.T) + translate
+
         # Map element stress to surface vertices
         vertex_stress = _map_element_stress_to_vertices(
             surface_vertices=surface_verts,
@@ -266,7 +275,7 @@ class StressOverlayManager:
                     )
                     if self._shader is None:
                         return True
-                    self._shader.setUniformValue("u_opacity", 0.65)
+                    self._shader.setUniformValue("u_opacity", 0.85)
 
                 renderer.queueNode(
                     self,
@@ -288,15 +297,18 @@ class StressOverlayManager:
         controller = application.getController()
         scene = controller.getScene()
 
-        grouped_op = GroupedOperation()
-        grouped_op.addOperation(
-            AddSceneNodeOperation(overlay_node, scene.getRoot())
-        )
-        from cura.Operations.SetParentOperation import SetParentOperation
-        grouped_op.addOperation(SetParentOperation(overlay_node, node))
-        grouped_op.push()
+        # Parent to scene_root (NOT the model node) since vertices are already
+        # in world space.  This follows the ConvexHullNode / NonPlanarSlicing
+        # pattern to avoid double-transformation that causes the overlay to
+        # appear below the build plate.
+        # Store the parent node's id so _find_overlay can locate it.
+        overlay_node._fea_parent_node_id = id(node)
 
-        Logger.log("d", "FEA overlay: overlay node created with transparent shader, added to '%s'",
+        op = AddSceneNodeOperation(overlay_node, scene.getRoot())
+        op.push()
+
+        Logger.log("d", "FEA overlay: overlay node created with transparent shader, "
+                   "parented to scene root (world-space coords), for model '%s'",
                    node.getName())
 
         scene.sceneChanged.emit(overlay_node)
@@ -307,7 +319,19 @@ class StressOverlayManager:
 
     @classmethod
     def _find_overlay(cls, node: CuraSceneNode) -> Optional[CuraSceneNode]:
-        """Return the overlay child node or ``None`` if absent."""
+        """Return the overlay node for ``node`` or ``None`` if absent.
+
+        The overlay is parented to scene_root (not the model node) to avoid
+        double-transformation.  We find it by scanning scene_root's children
+        for nodes named ``_OVERLAY_NAME`` that have a matching parent id tag.
+        """
+        node_id = id(node)
+        scene = CuraApplication.getInstance().getController().getScene()
+        for child in scene.getRoot().getChildren():
+            if child.getName() == _OVERLAY_NAME:
+                if getattr(child, "_fea_parent_node_id", None) == node_id:
+                    return child  # type: ignore[return-value]
+        # Backward compat: also check direct children of node (old overlays)
         for child in node.getChildren():
             if child.getName() == _OVERLAY_NAME:
                 return child  # type: ignore[return-value]

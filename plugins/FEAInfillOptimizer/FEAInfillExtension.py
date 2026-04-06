@@ -45,6 +45,8 @@ class FEAInfillExtension(QObject, Extension):
     settingsChanged = pyqtSignal()
     preselectedNodeChanged = pyqtSignal()
     phaseChanged = pyqtSignal()
+    errorMessageChanged = pyqtSignal()
+    stressOverlayVisibleChanged = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         QObject.__init__(self, parent)
@@ -76,20 +78,87 @@ class FEAInfillExtension(QObject, Extension):
         self._analysis_stage = ""
         self._results: Optional[Dict[str, Any]] = None
         self._cancel_requested = False
+        self._stress_overlay_visible = False
+        self._error_message = ""
 
         # Settings
         self._material_name = "PLA"
         self._min_density = 10.0
         self._max_density = 80.0
         self._num_zones = 6
-        self._infill_pattern = "gyroid"
-        self._max_iterations = 5
+        self._infill_pattern = "gyroid"  # overridden by _syncInfillPatternFromCura
+        self._max_iterations = 20
         self._mesh_resolution = "medium"
         self._safety_factor = 2.0
         self._bonding_coeff = 0.5  # 50 % default; overridden by UI or material
 
         # Deferred initialization
         CuraApplication.getInstance().engineCreatedSignal.connect(self._onEngineCreated)
+
+    # Cura material type → plugin database key mapping
+    _CURA_MATERIAL_MAP = {
+        "pla": "PLA", "abs": "ABS", "petg": "PETG", "pet": "PETG",
+        "nylon": "Nylon", "pa": "Nylon", "pa6": "Nylon", "pa12": "Nylon",
+        "pc": "PC", "polycarbonate": "PC",
+        "tpu": "TPU_95A", "tpu 95a": "TPU_95A", "flex": "TPU_95A",
+        "cf": "CF_Nylon", "cf-nylon": "CF_Nylon", "cf nylon": "CF_Nylon",
+        "carbon": "CF_Nylon", "cf-pet": "CF_Nylon", "cf-pla": "CF_Nylon",
+        "asa": "ABS",  # ASA is similar to ABS mechanically
+        "hips": "ABS",  # HIPS is similar to ABS
+        "pva": "PLA",  # PVA (support) — use PLA as approximation
+        "breakaway": "PLA",  # support material
+    }
+
+    def _syncMaterialFromCura(self) -> None:
+        """Read the active material type from Cura and update the plugin's material selection.
+
+        Cura's .fdm_material XML files contain no mechanical properties (only density
+        and diameter).  We read the material *type name* (e.g. "pla", "abs") via
+        ``extruder.material.getMetaDataEntry("material")`` and map it to the plugin's
+        internal MaterialDatabase which has FDM-specific mechanical properties (E_xy,
+        E_z, yield_strength, etc.).
+        """
+        try:
+            global_stack = CuraApplication.getInstance().getGlobalContainerStack()
+            if global_stack is None or not global_stack.extruderList:
+                return
+
+            extruder = global_stack.extruderList[0]
+            if extruder.material is None:
+                return
+
+            cura_type = extruder.material.getMetaDataEntry("material", "")
+            if not cura_type:
+                return
+
+            cura_type_lower = cura_type.lower().strip()
+            db_name = self._CURA_MATERIAL_MAP.get(cura_type_lower)
+
+            if db_name and db_name != self._material_name:
+                Logger.log("i", "FEA Infill: Auto-detected Cura material '%s' → mapped to '%s'",
+                           cura_type, db_name)
+                self._material_name = db_name
+                self.settingsChanged.emit()
+            elif not db_name and cura_type_lower:
+                Logger.log("d", "FEA Infill: Cura material type '%s' has no mapping, keeping '%s'",
+                           cura_type, self._material_name)
+        except Exception:
+            Logger.logException("d", "FEA Infill: Failed to sync material from Cura")
+
+    def _syncInfillPatternFromCura(self) -> None:
+        """Read the active infill pattern from Cura's print profile."""
+        try:
+            global_stack = CuraApplication.getInstance().getGlobalContainerStack()
+            if global_stack is None or not global_stack.extruderList:
+                return
+            extruder = global_stack.extruderList[0]
+            cura_pattern = extruder.getProperty("infill_pattern", "value")
+            if cura_pattern and str(cura_pattern) != self._infill_pattern:
+                Logger.log("i", "FEA Infill: Auto-detected Cura infill pattern '%s'", cura_pattern)
+                self._infill_pattern = str(cura_pattern)
+                self.settingsChanged.emit()
+        except Exception:
+            Logger.logException("d", "FEA Infill: Failed to sync infill pattern from Cura")
 
     def _onEngineCreated(self) -> None:
         plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
@@ -109,6 +178,15 @@ class FEAInfillExtension(QObject, Extension):
                     ).show()
 
             self._recheckDeps()
+
+        # Sync material and infill pattern from Cura's active profile
+        self._syncMaterialFromCura()
+        self._syncInfillPatternFromCura()
+        app = CuraApplication.getInstance()
+        machine_manager = app.getMachineManager()
+        if machine_manager is not None:
+            machine_manager.activeMaterialChanged.connect(self._syncMaterialFromCura)
+            machine_manager.activeQualityChanged.connect(self._syncInfillPatternFromCura)
 
     _recheck_count = 0
 
@@ -279,6 +357,12 @@ class FEAInfillExtension(QObject, Extension):
         self.phaseChanged.emit()
 
     @pyqtSlot()
+    def goBackToOptimize(self) -> None:
+        """Return to the OPTIMIZE phase without clearing results."""
+        self._phase = "optimize"
+        self.phaseChanged.emit()
+
+    @pyqtSlot()
     def cancelAnalysis(self) -> None:
         """Cancel any running analysis and return to OPTIMIZE phase."""
         self._cancel_requested = True
@@ -317,6 +401,10 @@ class FEAInfillExtension(QObject, Extension):
     @pyqtProperty(bool, notify=depsAvailableChanged)
     def depsAvailable(self) -> bool:
         return self._deps_available
+
+    @pyqtProperty(str, notify=errorMessageChanged)
+    def errorMessage(self) -> str:
+        return self._error_message
 
     @pyqtSlot()
     def installDependencies(self) -> None:
@@ -445,6 +533,10 @@ class FEAInfillExtension(QObject, Extension):
     def hasResults(self) -> bool:
         return self._results is not None
 
+    @pyqtProperty(bool, notify=stressOverlayVisibleChanged)
+    def stressOverlayVisible(self) -> bool:
+        return self._stress_overlay_visible
+
     @pyqtProperty(str, notify=resultsChanged)
     def safetyVerdict(self) -> str:
         if self._results is None:
@@ -490,6 +582,16 @@ class FEAInfillExtension(QObject, Extension):
     def materialName(self, value: str) -> None:
         if self._material_name != value:
             self._material_name = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def infillPattern(self) -> str:
+        return self._infill_pattern
+
+    @infillPattern.setter
+    def infillPattern(self, value: str) -> None:
+        if self._infill_pattern != value:
+            self._infill_pattern = value
             self.settingsChanged.emit()
 
     @pyqtProperty(float, notify=settingsChanged)
@@ -646,6 +748,8 @@ class FEAInfillExtension(QObject, Extension):
                 self._results = None
                 error_msg = str(result) if result is not None else "Unknown error (job returned None)"
                 Logger.log("e", "FEA Infill: Analysis failed: %s", error_msg)
+                self._error_message = error_msg
+                self.errorMessageChanged.emit()
                 # Show error to user
                 Message(
                     i18n_catalog.i18nc("@info:status",
@@ -664,6 +768,8 @@ class FEAInfillExtension(QObject, Extension):
                     try:
                         from .visualization.stress_overlay import StressOverlayManager
                         StressOverlayManager.toggle_overlay(node, self._results)
+                        self._stress_overlay_visible = True
+                        self.stressOverlayVisibleChanged.emit()
                     except Exception:
                         Logger.logException("w", "FEA Infill: Auto stress overlay failed")
             self.phaseChanged.emit()
@@ -721,6 +827,8 @@ class FEAInfillExtension(QObject, Extension):
 
         from .visualization.stress_overlay import StressOverlayManager
         StressOverlayManager.toggle_overlay(node, self._results)
+        self._stress_overlay_visible = not self._stress_overlay_visible
+        self.stressOverlayVisibleChanged.emit()
 
     @pyqtSlot()
     @pyqtSlot()
@@ -733,10 +841,14 @@ class FEAInfillExtension(QObject, Extension):
         self._analysis_status = "idle"
         self._phase = "define"
         self._progress = 0.0
+        self._error_message = ""
+        self._stress_overlay_visible = False
         self.phaseChanged.emit()
         self.analysisStatusChanged.emit()
         self.progressChanged.emit()
         self.resultsChanged.emit()
+        self.errorMessageChanged.emit()
+        self.stressOverlayVisibleChanged.emit()
 
         node = self._getNodeById(node_id)
         if node is None:

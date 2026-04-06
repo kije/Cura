@@ -18,6 +18,8 @@ State changes are communicated to QML via ``self.propertyChanged``
 from typing import Optional
 import json
 import math
+import threading
+import time
 
 import numpy
 
@@ -106,6 +108,16 @@ class BoundaryConditionTool(Tool):
         self._hover_faces: list = []
         self._hover_preview_enabled = True
 
+        # Async hover computation state
+        self._hover_generation = 0  # monotonic counter; stale results are discarded
+        self._hover_pending = False  # True while a background thread is computing
+        self._hover_debounce_time = 0.0  # timestamp of last mouse move
+        self._hover_debounce_timer = None  # QTimer for debounced dispatch
+        self._hover_debounce_ms = 75  # ms to wait before triggering computation
+
+        # Async adjacency build state
+        self._adjacency_building = False  # True while adjacency is being built in bg
+
         # Quick setup state
         self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed"
         self._quick_setup_hole_diameter = 8.0  # mm
@@ -127,6 +139,9 @@ class BoundaryConditionTool(Tool):
             extension.resultsChanged.connect(self.propertyChanged.emit)
             extension.analysisStatusChanged.connect(self.propertyChanged.emit)
             extension.depsAvailableChanged.connect(self.propertyChanged.emit)
+            extension.settingsChanged.connect(self.propertyChanged.emit)
+            extension.errorMessageChanged.connect(self.propertyChanged.emit)
+            extension.stressOverlayVisibleChanged.connect(self.propertyChanged.emit)
 
         self.setExposedProperties(
             "Mode", "ForceX", "ForceY", "ForceZ", "ForceMagnitude",
@@ -147,7 +162,7 @@ class BoundaryConditionTool(Tool):
             "Phase",
             "RunAnalysis", "CancelAnalysis", "GoBackToDefine",
             "ApplyModifierMeshes", "ShowStressOverlay", "ClearResults",
-            "MaterialName", "SafetyFactor", "MeshResolution",
+            "MaterialName", "InfillPattern", "SafetyFactor", "MeshResolution",
             "AnalysisProgress", "AnalysisStage",
             "MaxStress", "MinStress", "SafetyFactorResult",
             "ConvergenceIterations", "SafetyVerdict", "HasResults",
@@ -155,6 +170,9 @@ class BoundaryConditionTool(Tool):
             "MinDensity", "MaxDensity", "NumZones", "MaxIterations", "BondingCoeff",
             "DepsAvailable", "InstallDependencies",
             "HoverPreviewEnabled",
+            "ErrorMessage",
+            "StressOverlayVisible",
+            "GoBackToOptimize",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -167,6 +185,8 @@ class BoundaryConditionTool(Tool):
             self._mode = mode
             self._current_face_selection.clear()
             self._hover_faces = []
+            self._hover_generation += 1  # invalidate pending hover
+            self._hover_pending = False
             if mode != MODE_ROTATE:
                 self._force_handle.hide()
                 self._rotating_group_index = -1
@@ -424,14 +444,54 @@ class BoundaryConditionTool(Tool):
         self._update_highlights()
 
     def _ensure_adjacency(self, node, verts, indices):
-        """Get or build the face adjacency cache for a node."""
+        """Get or build the face adjacency cache for a node (blocking).
+
+        For click-based selection this is acceptable since it only runs once
+        per model. For hover preview, use _ensure_adjacency_async instead.
+        """
         if not _FACE_GROUP_ANALYZER_AVAILABLE:
             return None
         node_id = id(node)
         if self._adjacency_cache_node != node_id:
             self._adjacency_cache = build_face_adjacency(verts, indices)
             self._adjacency_cache_node = node_id
+            self._adjacency_building = False
         return self._adjacency_cache
+
+    def _ensure_adjacency_async(self, node, verts, indices) -> bool:
+        """Kick off adjacency build in background if needed. Returns True if ready."""
+        if not _FACE_GROUP_ANALYZER_AVAILABLE:
+            return False
+        node_id = id(node)
+        if self._adjacency_cache_node == node_id and self._adjacency_cache is not None:
+            return True  # already cached
+        if self._adjacency_building:
+            return False  # build in progress, not ready yet
+
+        # Start background build
+        self._adjacency_building = True
+        self._adjacency_cache = None
+
+        def _build():
+            try:
+                result = build_face_adjacency(verts, indices)
+            except Exception:
+                Logger.logException("w", "FEA: adjacency build failed")
+                self._adjacency_building = False
+                return
+
+            def _deliver():
+                # Only deliver if the node hasn't changed
+                if id(node) == node_id:
+                    self._adjacency_cache = result
+                    self._adjacency_cache_node = node_id
+                self._adjacency_building = False
+
+            CuraApplication.getInstance().callLater(_deliver)
+
+        thread = threading.Thread(target=_build, daemon=True)
+        thread.start()
+        return False
 
     def getOpenOptimizeDialog(self) -> bool:
         return False
@@ -506,6 +566,16 @@ class BoundaryConditionTool(Tool):
     def setMaterialName(self, value: str) -> None:
         if self._extension:
             self._extension.materialName = str(value)
+        self.propertyChanged.emit()
+
+    def getInfillPattern(self) -> str:
+        if self._extension:
+            return self._extension.infillPattern
+        return "gyroid"
+
+    def setInfillPattern(self, value: str) -> None:
+        if self._extension:
+            self._extension.infillPattern = str(value)
         self.propertyChanged.emit()
 
     def getSafetyFactor(self) -> float:
@@ -676,14 +746,41 @@ class BoundaryConditionTool(Tool):
     def setDepsAvailable(self, value) -> None:
         pass
 
+    def getErrorMessage(self) -> str:
+        if self._extension:
+            return self._extension.errorMessage
+        return ""
+
+    def setErrorMessage(self, value) -> None:
+        pass
+
+    def getStressOverlayVisible(self) -> bool:
+        if self._extension:
+            return self._extension.stressOverlayVisible
+        return False
+
+    def setStressOverlayVisible(self, value) -> None:
+        pass  # read-only; controlled via ShowStressOverlay slot
+
+    def getGoBackToOptimize(self) -> bool:
+        return False
+
+    def setGoBackToOptimize(self, value) -> None:
+        if value and self._extension:
+            self._extension.goBackToOptimize()
+            self.propertyChanged.emit()
+
     def getHoverPreviewEnabled(self) -> bool:
         return self._hover_preview_enabled
 
     def setHoverPreviewEnabled(self, value) -> None:
         self._hover_preview_enabled = bool(value)
-        if not self._hover_preview_enabled and self._hover_faces:
-            self._hover_faces = []
-            self._update_highlights()
+        if not self._hover_preview_enabled:
+            self._hover_generation += 1  # invalidate pending hover
+            self._hover_pending = False
+            if self._hover_faces:
+                self._hover_faces = []
+                self._update_highlights()
         self.propertyChanged.emit()
 
     def getInstallDependencies(self) -> bool:
@@ -772,9 +869,6 @@ class BoundaryConditionTool(Tool):
 
     def setActiveForceIndex(self, index: int) -> None:
         self._active_force_index = int(index)
-        # Switch to rotate mode so the gizmo is interactive
-        if self._active_force_index >= 0:
-            self._mode = MODE_ROTATE
         # Sync Fx/Fy/Fz to show the selected force group's values
         selected = Selection.getSelectedObject(0)
         if selected is not None:
@@ -938,6 +1032,8 @@ class BoundaryConditionTool(Tool):
             self._force_handle.hide()
             self._rotating_group_index = -1
             self._hover_faces = []
+            self._hover_generation += 1  # invalidate any pending hover computation
+            self._hover_pending = False
             return False
 
         # ── Only allow face interaction in DEFINE phase ──────────────────
@@ -1364,7 +1460,15 @@ class BoundaryConditionTool(Tool):
             self._bc_highlight.clear()
 
     def _update_hover_preview(self, event) -> None:
-        """Update the hover face preview on mouse move."""
+        """Update the hover face preview on mouse move (debounced + non-blocking).
+
+        Mouse move events fire on every pixel of movement. This method:
+        1. Resolves the face under the cursor immediately (cheap GPU pick).
+        2. Shows a single-face highlight instantly for responsiveness.
+        3. Debounces the expensive face-group expansion so it only fires
+           after the mouse has been still for ~75ms.
+        4. Runs BFS in a background thread; delivers results via callLater.
+        """
         if not self._hover_preview_enabled:
             return
 
@@ -1379,12 +1483,14 @@ class BoundaryConditionTool(Tool):
         if not picked_node or not isinstance(picked_node, CuraSceneNode):
             if self._hover_faces:
                 self._hover_faces = []
+                self._hover_generation += 1  # invalidate any pending result
                 self._update_highlights()
             return
 
         if picked_node.callDecoration("isNonPrintingMesh"):
             if self._hover_faces:
                 self._hover_faces = []
+                self._hover_generation += 1
                 self._update_highlights()
             return
 
@@ -1398,66 +1504,110 @@ class BoundaryConditionTool(Tool):
         if face_index is None:
             if self._hover_faces:
                 self._hover_faces = []
+                self._hover_generation += 1
                 self._update_highlights()
             return
 
-        # Expand hover to show full group in surface/hole/cylinder mode
-        if self._selection_mode != "single" and _FACE_GROUP_ANALYZER_AVAILABLE:
-            hover = self._compute_hover_group_with_timeout(picked_node, face_index)
-        else:
+        # Single mode: instant highlight, no BFS needed
+        if self._selection_mode == "single" or not _FACE_GROUP_ANALYZER_AVAILABLE:
             hover = [face_index]
+            if hover != self._hover_faces:
+                self._hover_faces = hover
+                self._hover_generation += 1
+                self._update_highlights()
+            return
 
-        # Only update if hover changed (avoid constant repainting)
-        if hover != self._hover_faces:
-            self._hover_faces = hover
+        # Group mode: show single-face highlight immediately for responsiveness,
+        # then debounce the expensive BFS expansion.
+        if self._hover_faces != [face_index] and not self._hover_pending:
+            # Show instant single-face preview while we wait
+            self._hover_faces = [face_index]
             self._update_highlights()
 
-    def _compute_hover_group_with_timeout(self, node, face_index, timeout=2.0):
-        """Compute face group for hover with a timeout to prevent UI freeze.
+        # Bump generation to invalidate any in-flight computation
+        self._hover_generation += 1
+        generation = self._hover_generation
 
-        Complex meshes can take a long time for BFS flood-fill in hole/cylinder
-        mode. This runs the computation in a thread with a 2-second timeout.
-        Falls back to single-face highlight if the computation takes too long.
+        # Record debounce timestamp
+        self._hover_debounce_time = time.monotonic()
+
+        # Schedule the debounced dispatch via callLater with a delay.
+        # We use a closure over generation to detect staleness.
+        node_ref = picked_node  # prevent GC during delay
+        debounce_ms = self._hover_debounce_ms
+
+        def _debounced_check():
+            # If generation has moved on, this event is stale — discard
+            if self._hover_generation != generation:
+                return
+            # Check if enough time has passed since last mouse move
+            elapsed_ms = (time.monotonic() - self._hover_debounce_time) * 1000
+            if elapsed_ms < debounce_ms * 0.8:
+                # Mouse moved again recently; don't start yet
+                return
+            self._dispatch_hover_computation(node_ref, face_index, generation)
+
+        # Use callLater to schedule the check after the debounce period.
+        # callLater runs on the main thread's event loop, so it won't block.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(debounce_ms, _debounced_check)
+
+    def _dispatch_hover_computation(self, node, face_index: int, generation: int) -> None:
+        """Start the BFS face-group expansion in a background thread.
+
+        Results are delivered back to the main thread via callLater.
+        If generation has changed by delivery time, the result is discarded.
         """
-        import threading
+        if self._hover_generation != generation:
+            return  # already stale
 
         mesh_data = node.getMeshData()
         if mesh_data is None:
-            return [face_index]
+            return
         verts = mesh_data.getVertices()
         indices = mesh_data.getIndices()
         if verts is None:
-            return [face_index]
+            return
 
-        adjacency = self._ensure_adjacency(node, verts, indices)
-        if adjacency is None:
-            return [face_index]
+        # Check adjacency availability; kick off async build if needed
+        node_id = id(node)
+        if self._adjacency_cache_node != node_id or self._adjacency_cache is None:
+            # Adjacency not ready for this node — start async build
+            self._ensure_adjacency_async(node, verts, indices)
+            # Keep showing single-face highlight until adjacency is ready
+            return
 
-        result = [None]  # mutable container for thread result
+        adjacency = self._adjacency_cache
+        self._hover_pending = True
+        selection_mode = self._selection_mode
 
         def _compute():
             try:
-                if self._selection_mode == "flat":
-                    result[0] = find_coplanar_group(verts, indices, face_index, adjacency)
-                elif self._selection_mode == "hole":
-                    result[0] = find_hole_surface(verts, indices, face_index, adjacency)
-                elif self._selection_mode == "cylinder":
-                    result[0] = find_cylinder_surface(verts, indices, face_index, adjacency)
+                if selection_mode == "flat":
+                    result = find_coplanar_group(verts, indices, face_index, adjacency)
+                elif selection_mode == "hole":
+                    result = find_hole_surface(verts, indices, face_index, adjacency)
+                elif selection_mode == "cylinder":
+                    result = find_cylinder_surface(verts, indices, face_index, adjacency)
                 else:
-                    result[0] = [face_index]
+                    result = [face_index]
             except Exception:
-                result[0] = [face_index]
+                Logger.logException("w", "FEA: hover group BFS failed")
+                result = [face_index]
+
+            def _deliver():
+                self._hover_pending = False
+                # Discard if generation has moved on (mouse moved to new face)
+                if self._hover_generation != generation:
+                    return
+                if result != self._hover_faces:
+                    self._hover_faces = result
+                    self._update_highlights()
+
+            CuraApplication.getInstance().callLater(_deliver)
 
         thread = threading.Thread(target=_compute, daemon=True)
         thread.start()
-        thread.join(timeout=timeout)
-
-        if thread.is_alive():
-            # Computation timed out — fall back to single face
-            Logger.log("w", "FEA: hover group computation timed out (>%.0fs), showing single face", timeout)
-            return [face_index]
-
-        return result[0] if result[0] is not None else [face_index]
 
     def getRequiredExtraRenderingPasses(self) -> list:
         return ["picking_selected"]

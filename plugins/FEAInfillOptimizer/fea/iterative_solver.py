@@ -48,11 +48,30 @@ from .stress_to_density import stress_to_density
 from .tetrahedralization import TetMesh
 
 _CONVERGENCE_TOL = 1e-3
-_DAMPING = 0.5
+_DAMPING_INITIAL = 0.5
+_DAMPING_MIN = 0.2
 
 _PATTERN_EXPONENTS: Dict[str, float] = {
-    "lines": 1.0, "grid": 2.0, "triangles": 1.3,
-    "gyroid": 1.6, "cubic": 2.0, "honeycomb": 2.3,
+    # Stretching-dominated (n ≈ 1): stiffness scales linearly with density
+    "lines": 1.0,
+    "zigzag": 1.0,
+    "concentric": 1.0,
+    # Mixed (n ≈ 1.3–1.6): some stretching, some bending
+    "triangles": 1.3,
+    "trihexagon": 1.3,
+    "gyroid": 1.6,
+    "lightning": 1.0,  # sparse tree structure, acts like lines
+    # Bending-dominated (n ≈ 2.0): stiffness scales quadratically
+    "grid": 2.0,
+    "cubic": 2.0,
+    "cubicsubdiv": 2.0,
+    "tetrahedral": 1.8,  # octet truss — between stretching and bending
+    "quarter_cubic": 1.8,
+    "octagon": 2.0,
+    # Highly bending-dominated (n > 2): cell wall bending dominates
+    "honeycomb": 2.3,
+    "cross": 2.3,
+    "cross_3d": 2.3,
 }
 
 
@@ -118,9 +137,20 @@ class IterativeFEASolver:
         """
         import warnings
 
+        # Volumetric locking guard — linear tet elements (C3D4) cannot
+        # represent constant-volume deformation modes, producing spuriously
+        # stiff and qualitatively wrong results when nu approaches 0.5.
+        if material.nu > 0.45:
+            raise ValueError(
+                f"Material '{material.name}' has Poisson's ratio {material.nu} > 0.45. "
+                "Linear tetrahedral elements suffer from volumetric locking at high "
+                "Poisson's ratios, producing qualitatively wrong results. "
+                "Use a different material or reduce nu."
+            )
+
         # Warn early if the material is hyperelastic / near-incompressible —
         # linear elastic FEA is not valid in that regime.
-        if material.E_xy < 100.0 or material.nu > 0.45:
+        if material.E_xy < 100.0:
             warnings.warn(
                 "Material properties suggest an elastomer "
                 f"(E_xy={material.E_xy} MPa, nu={material.nu}). "
@@ -176,7 +206,7 @@ class IterativeFEASolver:
 
         min_rho = float(config.get("min_density", 0.10))
         max_rho = float(config.get("max_density", 0.80))
-        max_iter = int(config.get("max_iterations", 5))
+        max_iter = int(config.get("max_iterations", 20))
         pattern = str(config.get("infill_pattern", "gyroid"))
         safety_factor = float(config.get("safety_factor", 2.0))
         bonding_coeff = float(config.get("bonding_coeff", material.bonding_coefficient))
@@ -215,6 +245,11 @@ class IterativeFEASolver:
         max_change = float("inf")
         iteration = 0
 
+        # Adaptive damping: reduce damping when oscillating (max_change grows)
+        damping = _DAMPING_INITIAL
+        prev_max_change = float("inf")
+        oscillation_count = 0
+
         # Timeout in seconds for a single simu.Solve() call.  If it does not
         # return within this budget the iteration loop is aborted with an error
         # log rather than hanging the process indefinitely.
@@ -240,28 +275,39 @@ class IterativeFEASolver:
         for iteration in range(max_iter):
             _iter_t = _time.monotonic()
 
-            # --- Step 1: homogenize ----------------------------------------
+            # --- Step 1: homogenize (per-element) --------------------------
+            # Each element gets its own stiffness scaled by density^n_exp.
+            # EasyFEA supports heterogeneous materials via per-element C
+            # matrices: when material.C has shape (n_elems, 6, 6) instead of
+            # (6, 6), the stiffness assembly uses per-element properties.
             _t0 = _time.monotonic()
-            rho_mean = float(np.mean(density))
-            scale = rho_mean ** n_exp
 
-            E_avg = E_xy * scale
-            E_t_avg = E_xy * bonding_coeff * scale
-            # Shear: G = E / (2(1+ν)) for isotropic layer, scaled by bonding
-            # for transverse direction.
-            G_avg = E_avg / (2.0 * (1.0 + nu))
+            # Build base material at full density (scale=1) to get C_base
             nu_t = nu * (bonding_coeff ** 0.5)
+            G_base = E_xy / (2.0 * (1.0 + nu))
+            E_t_base = E_xy * bonding_coeff
 
             mat = TransverselyIsotropic(
                 dim=3,
-                El=E_avg,
-                Et=E_t_avg,
-                Gl=G_avg,
+                El=E_xy,
+                Et=E_t_base,
+                Gl=G_base,
                 vl=nu,
                 vt=nu_t,
             )
-            Logger.log("d", "FEA EasyFEA iter %d step 1 homogenize: %.3fs",
-                       iteration + 1, _time.monotonic() - _t0)
+
+            # Get the base (6,6) constitutive matrix, then scale per element
+            C_base = mat.C.copy()  # (6, 6)
+            scales = np.power(density, n_exp)  # (n_elems,)
+            # Broadcast: (n_elems, 1, 1) * (6, 6) → (n_elems, 6, 6)
+            C_per_elem = scales[:, np.newaxis, np.newaxis] * C_base[np.newaxis, :, :]
+            mat.C = C_per_elem  # triggers isHeterogeneous = True
+
+            Logger.log("d", "FEA EasyFEA iter %d step 1 homogenize: per-element C (%d elems), "
+                       "rho_mean=%.3f, scale_range=[%.4f, %.4f] (%.3fs)",
+                       iteration + 1, n_elems, float(np.mean(density)),
+                       float(scales.min()), float(scales.max()),
+                       _time.monotonic() - _t0)
 
             # --- Step 2: build simulation (observer-safe) -------------------
             # Remove the previous simu from the mesh/model observer lists
@@ -289,6 +335,11 @@ class IterativeFEASolver:
                 simu.add_dirichlet(fixed_nodes_ef, [0, 0, 0], ["x", "y", "z"])
 
             # Apply Neumann BCs (area-weighted force distribution)
+            # NOTE on EasyFEA semantics: add_neumann → __Bc_pointLoad divides
+            # values by len(nodes) internally (_simu.py:2351).  So passing the
+            # TOTAL force to a multi-node array distributes it equally.  The
+            # per-node weighted path below passes F*w to single-node arrays
+            # (len=1, so division is a no-op) which is also correct.
             for force_nodes, force_vec, area_weights in force_groups_ef:
                 if len(force_nodes) > 0:
                     fx_total = float(force_vec.x)
@@ -304,8 +355,8 @@ class IterativeFEASolver:
                                 ["x", "y", "z"]
                             )
                     else:
-                        # Equal distribution — pass total force, EasyFEA
-                        # divides by len(nodes) internally
+                        # Equal distribution — pass total force; EasyFEA
+                        # divides by len(nodes) in __Bc_pointLoad
                         simu.add_neumann(
                             force_nodes,
                             [fx_total, fy_total, fz_total],
@@ -391,16 +442,30 @@ class IterativeFEASolver:
                 safety_factor=safety_factor,
             )
 
-            # Damping
-            density_new = _DAMPING * density + (1.0 - _DAMPING) * density_candidate
+            # Adaptive damping
+            density_new = damping * density + (1.0 - damping) * density_candidate
             density_new = np.clip(density_new, min_rho, max_rho)
 
             max_change = float(np.max(np.abs(density_new - density)))
             density = density_new
 
-            Logger.log("d", "FEA EasyFEA iter %d: max_change=%.4f, rho_mean=%.3f (total %.1fs)",
-                       iteration + 1, max_change, float(np.mean(density)),
-                       _time.monotonic() - _iter_t)
+            # Detect oscillation: if max_change grew for 2 consecutive iters,
+            # reduce damping to stabilize convergence.
+            if max_change > prev_max_change:
+                oscillation_count += 1
+                if oscillation_count >= 2:
+                    damping = max(_DAMPING_MIN, damping * 0.8)
+                    Logger.log("d", "FEA EasyFEA iter %d: oscillation detected, "
+                               "reducing damping to %.3f", iteration + 1, damping)
+                    oscillation_count = 0
+            else:
+                oscillation_count = 0
+            prev_max_change = max_change
+
+            Logger.log("d", "FEA EasyFEA iter %d: max_change=%.4f, damping=%.3f, "
+                       "rho_mean=%.3f (total %.1fs)",
+                       iteration + 1, max_change, damping,
+                       float(np.mean(density)), _time.monotonic() - _iter_t)
 
             if progress_callback is not None:
                 progress_callback((iteration + 1) / max_iter)
@@ -446,7 +511,7 @@ class IterativeFEASolver:
         n_elems = tet_mesh.elements.shape[0]
         min_rho = float(config.get("min_density", 0.10))
         max_rho = float(config.get("max_density", 0.80))
-        max_iter = int(config.get("max_iterations", 5))
+        max_iter = int(config.get("max_iterations", 20))
         pattern = str(config.get("infill_pattern", "gyroid"))
         safety_factor = float(config.get("safety_factor", 2.0))
         bonding_coeff = float(config.get("bonding_coeff", material.bonding_coefficient))
@@ -466,6 +531,11 @@ class IterativeFEASolver:
         max_change = float("inf")
         iteration = 0
 
+        # Adaptive damping state
+        damping = _DAMPING_INITIAL
+        prev_max_change = float("inf")
+        oscillation_count = 0
+
         for iteration in range(max_iter):
             _iter_start = _time.monotonic()
             n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
@@ -483,10 +553,20 @@ class IterativeFEASolver:
             displacements = fea_solver.solve(K, f)
             _t4 = _time.monotonic()
 
-            stress = fea_solver.compute_element_stress(
-                tet_mesh, displacements, E_eff_arr, nu_arr,
-                bonding_coeff=bonding_coeff,
-            )
+            # Use Tsai-Hill failure criterion for anisotropic materials,
+            # von Mises for isotropic.  The failure index is converted back
+            # to an equivalent stress (MPa) for the density mapping.
+            if bonding_coeff < 0.95:
+                stress = fea_solver.compute_element_failure_index(
+                    tet_mesh, displacements, E_eff_arr, nu_arr,
+                    bonding_coeff=bonding_coeff,
+                    yield_strength=material.yield_strength,
+                )
+            else:
+                stress = fea_solver.compute_element_stress(
+                    tet_mesh, displacements, E_eff_arr, nu_arr,
+                    bonding_coeff=bonding_coeff,
+                )
             _t5 = _time.monotonic()
             Logger.log("d", "FEA iter %d: assemble=%.1fs, BCs=%.1fs, solve=%.1fs, stress=%.1fs",
                        iteration + 1, _t2 - _t1, _t3 - _t2, _t4 - _t3, _t5 - _t4)
@@ -500,11 +580,23 @@ class IterativeFEASolver:
                 safety_factor=safety_factor,
             )
 
-            density_new = _DAMPING * density + (1.0 - _DAMPING) * density_candidate
+            # Adaptive damping
+            density_new = damping * density + (1.0 - damping) * density_candidate
             density_new = np.clip(density_new, min_rho, max_rho)
 
             max_change = float(np.max(np.abs(density_new - density)))
             density = density_new
+
+            if max_change > prev_max_change:
+                oscillation_count += 1
+                if oscillation_count >= 2:
+                    damping = max(_DAMPING_MIN, damping * 0.8)
+                    Logger.log("d", "FEA iter %d: oscillation detected, "
+                               "reducing damping to %.3f", iteration + 1, damping)
+                    oscillation_count = 0
+            else:
+                oscillation_count = 0
+            prev_max_change = max_change
 
             if progress_callback is not None:
                 progress_callback((iteration + 1) / max_iter)
@@ -555,13 +647,15 @@ def _easyfea_fixed_nodes(bc: Any, mesh: Any, surface_mesh: Any) -> Optional[np.n
     # For each mesh node, find distance to nearest fixed vertex
     dists, _ = fixed_tree.query(mesh_coords)
 
-    # Tolerance: nodes within 0.5mm of a fixed surface vertex are constrained
-    tolerance = 0.5
+    # Tolerance: scale-relative — use 3% of the mesh bounding box diagonal
+    # to handle both small (< 20mm) and large (> 500mm) models correctly.
+    bbox_diag = float(np.linalg.norm(mesh_coords.max(axis=0) - mesh_coords.min(axis=0)))
+    tolerance = max(0.1, bbox_diag * 0.03)  # minimum 0.1mm floor
     close_mask = dists < tolerance
     close_indices = np.where(close_mask)[0]
 
-    Logger.log("d", "FEA BC: %d fixed face vertices → %d mesh nodes within %.1fmm",
-               len(fixed_positions), len(close_indices), tolerance)
+    Logger.log("d", "FEA BC: %d fixed face vertices → %d mesh nodes within %.2fmm (bbox_diag=%.1f)",
+               len(fixed_positions), len(close_indices), tolerance, bbox_diag)
 
     return close_indices if len(close_indices) > 0 else None
 
@@ -593,7 +687,8 @@ def _easyfea_force_groups(
         force_tree = KDTree(force_positions)
         dists, nearest = force_tree.query(mesh_coords)
 
-        tolerance = 0.5
+        bbox_diag = float(np.linalg.norm(mesh_coords.max(axis=0) - mesh_coords.min(axis=0)))
+        tolerance = max(0.1, bbox_diag * 0.03)
         close_mask = dists < tolerance
         force_nodes = np.where(close_mask)[0]
 
@@ -741,16 +836,39 @@ def _build_force_vector(bc, tet_mesh: TetMesh, surface_mesh: Any = None) -> np.n
         if not tet_nodes_in_group:
             continue
 
-        # Distribute evenly
-        n_nodes_grp = len(tet_nodes_in_group)
-        fx_per = fx / n_nodes_grp
-        fy_per = fy / n_nodes_grp
-        fz_per = fz / n_nodes_grp
+        # Distribute proportional to tributary area (area/3 per vertex per face)
+        face_indices_int = [int(fi) for fi in force_group.face_indices]
+        node_weights: Dict[int, float] = {}
 
-        for tn in tet_nodes_in_group:
-            f[tn * 3 + 0] += fx_per
-            f[tn * 3 + 1] += fy_per
-            f[tn * 3 + 2] += fz_per
+        if surface_mesh is not None:
+            verts_arr = np.array(surface_mesh.vertices, dtype=np.float64)
+            faces_arr = np.array(surface_mesh.faces, dtype=np.int32)
+            for fi in face_indices_int:
+                if fi >= len(faces_arr):
+                    continue
+                tri = faces_arr[fi]
+                v0, v1, v2 = verts_arr[tri[0]], verts_arr[tri[1]], verts_arr[tri[2]]
+                area = 0.5 * float(np.linalg.norm(np.cross(v1 - v0, v2 - v0)))
+                for vi in tri:
+                    tn = smap.get(int(vi))
+                    if tn is not None:
+                        node_weights[tn] = node_weights.get(tn, 0.0) + area / 3.0
+        else:
+            for tn in tet_nodes_in_group:
+                node_weights[tn] = node_weights.get(tn, 0.0) + 1.0
+
+        total_weight = sum(node_weights.values())
+        if total_weight < 1e-16 or not node_weights:
+            # Fallback to equal distribution
+            node_weights = {tn: 1.0 for tn in tet_nodes_in_group}
+            total_weight = float(len(tet_nodes_in_group))
+            if total_weight < 1e-16:
+                continue
+
+        for tn, w in node_weights.items():
+            f[tn * 3 + 0] += fx * w / total_weight
+            f[tn * 3 + 1] += fy * w / total_weight
+            f[tn * 3 + 2] += fz * w / total_weight
 
     # ── Torque groups → equivalent tangential nodal forces ───────────
     if hasattr(bc, "getTorqueGroups"):
@@ -783,28 +901,36 @@ def _build_force_vector(bc, tet_mesh: TetMesh, surface_mesh: Any = None) -> np.n
             node_positions = np.array([tet_mesh.nodes[tn] for tn in tet_nodes_in_group_t])
             center = node_positions.mean(axis=0)
 
-            # For each node, compute tangential force from torque
+            # Pre-compute perpendicular distances for rigid-body rotation model.
+            # Physical model: F_i = lambda * r_perp_i (rigid body angular disp)
+            # Total torque: T = sum(F_i * r_perp_i) = lambda * sum(r_perp_i^2)
+            # So: lambda = T / sum(r_perp_i^2), F_i = T * r_perp_i / sum(r_perp_i^2)
+            r_perps = []
+            tangents = []
             for tn in tet_nodes_in_group_t:
                 pos = tet_mesh.nodes[tn]
                 r = pos - center
-                # Project r onto plane perpendicular to axis
                 r_along_axis = np.dot(r, n_axis) * n_axis
                 r_perp = r - r_along_axis
-                r_perp_mag = np.linalg.norm(r_perp)
-                if r_perp_mag < 1e-12:
-                    continue  # node is on the axis — no tangential force
-
-                # Tangential direction = axis × r_perp (right-hand rule)
+                r_perp_mag = float(np.linalg.norm(r_perp))
                 tangent = np.cross(n_axis, r_perp)
-                tangent_mag = np.linalg.norm(tangent)
-                if tangent_mag < 1e-12:
-                    continue
-                tangent = tangent / tangent_mag
+                tangent_mag = float(np.linalg.norm(tangent))
+                if tangent_mag > 1e-12:
+                    tangent = tangent / tangent_mag
+                r_perps.append(r_perp_mag)
+                tangents.append(tangent)
 
-                # Force magnitude: T = sum(F_t * r_perp) across all nodes
-                # Distribute equally: F_t = T / (N * r_perp)
-                n_nodes_t = len(tet_nodes_in_group_t)
-                F_t = T_mag / (n_nodes_t * r_perp_mag)
+            sum_r2 = sum(r ** 2 for r in r_perps)
+            if sum_r2 < 1e-24:
+                continue  # all nodes on axis — cannot apply torque
+
+            for i, tn in enumerate(tet_nodes_in_group_t):
+                r_perp_mag = r_perps[i]
+                if r_perp_mag < 1e-12:
+                    continue  # node on axis — no tangential force
+                tangent = tangents[i]
+                # Rigid-body rotation: F_i proportional to r_perp_i
+                F_t = T_mag * r_perp_mag / sum_r2
 
                 f[tn * 3 + 0] += F_t * tangent[0]
                 f[tn * 3 + 1] += F_t * tangent[1]

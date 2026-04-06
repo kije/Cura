@@ -8,6 +8,7 @@ from cura.Operations.SetParentOperation import SetParentOperation
 from cura.Scene.BuildPlateDecorator import BuildPlateDecorator
 from cura.Scene.CuraSceneNode import CuraSceneNode
 from cura.Scene.SliceableObjectDecorator import SliceableObjectDecorator
+from cura.Settings.SettingOverrideDecorator import SettingOverrideDecorator
 from UM.Mesh.MeshData import MeshData
 from UM.Operations.AddSceneNodeOperation import AddSceneNodeOperation
 from UM.Operations.GroupedOperation import GroupedOperation
@@ -62,12 +63,13 @@ def create_all_modifier_meshes(
         node.setCalculateBoundingBox(True)
         node.calculateBoundingBoxMesh()
 
+        node.addDecorator(SettingOverrideDecorator())
         node.addDecorator(BuildPlateDecorator(active_build_plate))
         node.addDecorator(SliceableObjectDecorator())
 
-        # The SettingOverrideDecorator (auto-added by CuraSceneNode) provides
-        # a per-object container stack.  We add setting instances to the
-        # *top* container (user changes) — exactly as SupportEraser does.
+        # The SettingOverrideDecorator provides a per-object container stack.
+        # We add setting instances to the *top* container (user changes)
+        # — exactly as SupportEraser does.
         stack = node.callDecoration("getStack")
         if stack is not None:
             settings = stack.getTop()

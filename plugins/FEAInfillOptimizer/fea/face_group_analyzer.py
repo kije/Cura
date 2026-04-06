@@ -84,9 +84,19 @@ def _get_face_vertices(
         (3,)
     """
     if indices is not None:
+        if face_idx < 0 or face_idx >= indices.shape[0]:
+            raise IndexError(
+                f"face_idx {face_idx} out of range for mesh with {indices.shape[0]} faces"
+            )
         i0 = int(indices[face_idx, 0])
         i1 = int(indices[face_idx, 1])
         i2 = int(indices[face_idx, 2])
+        n_verts = verts.shape[0]
+        if i0 < 0 or i0 >= n_verts or i1 < 0 or i1 >= n_verts or i2 < 0 or i2 >= n_verts:
+            raise IndexError(
+                f"Vertex index out of range: face {face_idx} references "
+                f"vertices ({i0}, {i1}, {i2}) but mesh has {n_verts} vertices"
+            )
         return (
             verts[i0].astype(np.float64),
             verts[i1].astype(np.float64),
@@ -94,6 +104,12 @@ def _get_face_vertices(
         )
     # Flat layout: face k occupies vertex rows 3k, 3k+1, 3k+2
     base = face_idx * 3
+    n_verts = verts.shape[0]
+    if base + 2 >= n_verts or face_idx < 0:
+        raise IndexError(
+            f"face_idx {face_idx} out of range for flat mesh with {n_verts} vertices "
+            f"({n_verts // 3} faces)"
+        )
     return (
         verts[base].astype(np.float64),
         verts[base + 1].astype(np.float64),
@@ -319,6 +335,7 @@ def find_coplanar_group(
     adjacency: Dict[int, List[int]],
     *,
     angle_threshold_deg: float = 3.0,
+    max_faces: int = 5000,
 ) -> List[int]:
     """Flood-fill to find all connected coplanar faces from *seed_face*.
 
@@ -344,6 +361,9 @@ def find_coplanar_group(
         angle_threshold_deg: Maximum angular deviation (in degrees) between
             the seed normal and a candidate face's normal for the candidate to
             be included.  Defaults to ``3.0°``.
+        max_faces: Maximum number of faces to collect before stopping the BFS.
+            Prevents runaway exploration on large smooth surfaces. Defaults
+            to ``5000``.  Set to ``0`` or negative to disable the limit.
 
     Returns:
         Sorted list of face indices belonging to the coplanar group (always
@@ -375,6 +395,8 @@ def find_coplanar_group(
     accepted.add(seed_face)
     queue.append(seed_face)
 
+    limit_active = max_faces > 0
+
     while queue:
         current = queue.popleft()
 
@@ -391,6 +413,8 @@ def find_coplanar_group(
             dot = float(np.dot(seed_normal, nb_normal))
             if abs(dot) >= cos_threshold:
                 accepted.add(neighbour)
+                if limit_active and len(accepted) >= max_faces:
+                    return sorted(accepted)
                 queue.append(neighbour)
             # If not accepted: still marked in ``seen``, so we won't re-check.
             # BFS stops propagating through rejected faces, so disconnected
@@ -410,6 +434,7 @@ def find_hole_surface(
     adjacency: Dict[int, List[int]],
     *,
     angle_threshold_deg: float = 20.0,
+    max_faces: int = 5000,
 ) -> List[int]:
     """Flood-fill to find all connected faces forming a concave (hole) surface.
 
@@ -442,6 +467,9 @@ def find_hole_surface(
         adjacency: Pre-built adjacency graph from :func:`build_face_adjacency`.
         angle_threshold_deg: Maximum angular deviation between adjacent face
             normals to continue the flood fill.  Defaults to ``20.0°``.
+        max_faces: Maximum number of faces to collect before stopping the BFS.
+            Prevents runaway exploration on large smooth surfaces. Defaults
+            to ``5000``.  Set to ``0`` or negative to disable the limit.
 
     Returns:
         Sorted list of face indices in the concave surface group.
@@ -456,6 +484,7 @@ def find_hole_surface(
         verts, indices, seed_face, adjacency,
         angle_threshold_deg=angle_threshold_deg,
         concave=True,
+        max_faces=max_faces,
     )
 
 
@@ -470,6 +499,7 @@ def find_cylinder_surface(
     adjacency: Dict[int, List[int]],
     *,
     angle_threshold_deg: float = 20.0,
+    max_faces: int = 5000,
 ) -> List[int]:
     """Flood-fill to find all connected faces forming a convex (cylinder) surface.
 
@@ -496,6 +526,9 @@ def find_cylinder_surface(
         adjacency: Pre-built adjacency graph from :func:`build_face_adjacency`.
         angle_threshold_deg: Maximum angular deviation between adjacent face
             normals to continue the flood fill.  Defaults to ``20.0°``.
+        max_faces: Maximum number of faces to collect before stopping the BFS.
+            Prevents runaway exploration on large smooth surfaces. Defaults
+            to ``5000``.  Set to ``0`` or negative to disable the limit.
 
     Returns:
         Sorted list of face indices in the convex surface group.
@@ -510,6 +543,7 @@ def find_cylinder_surface(
         verts, indices, seed_face, adjacency,
         angle_threshold_deg=angle_threshold_deg,
         concave=False,
+        max_faces=max_faces,
     )
 
 
@@ -525,6 +559,7 @@ def _flood_fill_curved(
     *,
     angle_threshold_deg: float,
     concave: bool,
+    max_faces: int = 5000,
 ) -> List[int]:
     """Internal BFS for :func:`find_hole_surface` and :func:`find_cylinder_surface`.
 
@@ -579,6 +614,9 @@ def _flood_fill_curved(
         adjacency: Pre-built adjacency graph.
         angle_threshold_deg: Max angular deviation per BFS step.
         concave: ``True`` → concave (hole/pocket); ``False`` → convex (cylinder/boss).
+        max_faces: Maximum number of faces to collect before stopping the BFS.
+            Prevents runaway exploration on large smooth surfaces. Defaults
+            to ``5000``.  Set to ``0`` or negative to disable the limit.
 
     Returns:
         Sorted list of admitted face indices.
@@ -588,6 +626,7 @@ def _flood_fill_curved(
         return []
 
     cos_threshold = float(np.cos(np.radians(angle_threshold_deg)))
+    limit_active = max_faces > 0
 
     # ``seen``     — prevents re-evaluating the same face.
     # ``accepted`` — the result set; only accepted faces are enqueued.
@@ -647,6 +686,8 @@ def _flood_fill_curved(
 
             # All gates passed — accept and propagate.
             accepted.add(neighbour)
+            if limit_active and len(accepted) >= max_faces:
+                return sorted(accepted)
             queue.append((neighbour, nb_normal, nb_centroid))
 
     return sorted(accepted)
