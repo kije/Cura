@@ -694,9 +694,9 @@ Item
                                 id: magnitudeField
                                 Layout.fillWidth: true
                                 validator: DoubleValidator { bottom: 0; decimals: 1 }
-                                property real _backendMagnitude: Number(toolProperties.getValue("ForceMagnitude") ?? 100)
-                                onBackendMagnitudeChanged: { if (!activeFocus) text = _backendMagnitude.toFixed(1) }
-                                Component.onCompleted: text = _backendMagnitude.toFixed(1)
+                                property real backendMagnitude: Number(toolProperties.getValue("ForceMagnitude") ?? 100)
+                                onBackendMagnitudeChanged: { if (!activeFocus) text = backendMagnitude.toFixed(1) }
+                                Component.onCompleted: text = backendMagnitude.toFixed(1)
                                 onEditingFinished:
                                     UM.Controller.setProperty("ForceMagnitude", parseFloat(text) || 100.0)
                             }
