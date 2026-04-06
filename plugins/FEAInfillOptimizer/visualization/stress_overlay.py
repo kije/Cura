@@ -255,7 +255,10 @@ class StressOverlayManager:
 
         # Create overlay node that renders with the transparent_object shader.
         # Uses the same approach as NonPlanarSlicing's region_overlay.py:
-        # custom SceneNode with render() method using transparent_object.shader.
+        # custom SceneNode with render() using a per-vertex-color shader.
+        # The built-in transparent_object.shader only uses u_diffuseColor uniform
+        # and ignores vertex colors entirely. Our custom stress_overlay.shader
+        # reads per-vertex a_color attribute for the viridis colormap.
         from UM.Scene.SceneNode import SceneNode
         from UM.View.GL.OpenGL import OpenGL
 
@@ -270,9 +273,19 @@ class StressOverlayManager:
                 if not self.getMeshData():
                     return True
                 if self._shader is None:
-                    self._shader = OpenGL.getInstance().createShaderProgram(
-                        Resources.getPath(Resources.Shaders, "transparent_object.shader")
+                    # Use our custom shader that reads per-vertex a_color
+                    import os
+                    shader_path = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "resources", "shaders", "stress_overlay.shader"
                     )
+                    self._shader = OpenGL.getInstance().createShaderProgram(shader_path)
+                    if self._shader is None:
+                        Logger.log("w", "FEA overlay: failed to load stress_overlay.shader, "
+                                   "falling back to transparent_object")
+                        self._shader = OpenGL.getInstance().createShaderProgram(
+                            Resources.getPath(Resources.Shaders, "transparent_object.shader")
+                        )
                     if self._shader is None:
                         return True
                     self._shader.setUniformValue("u_opacity", 0.85)
