@@ -44,6 +44,7 @@ except Exception:
 from .fea_solver import LinearElasticitySolver
 from .homogenization import effective_properties
 from .material_database import Material
+from .oc_update import oc_density_update
 from .stress_to_density import stress_to_density
 from .tetrahedralization import TetMesh
 
@@ -516,6 +517,14 @@ class IterativeFEASolver:
         safety_factor = float(config.get("safety_factor", 2.0))
         bonding_coeff = float(config.get("bonding_coeff", material.bonding_coefficient))
 
+        # OC optimization method: "heuristic" (default) or "oc"
+        opt_method = str(config.get("optimization_method", "heuristic"))
+        volume_fraction = float(config.get("volume_fraction", 0.5))
+        use_oc = opt_method == "oc"
+        if use_oc:
+            Logger.log("i", "FEA solve: using SIMP Optimality Criteria (OC) density update, "
+                       "volume_fraction=%.2f", volume_fraction)
+
         _t0 = _time.monotonic()
         fixed_nodes = _fixed_nodes_from_bc(boundary_conditions, tet_mesh, surface_mesh)
         force_vector = _build_force_vector(boundary_conditions, tet_mesh, surface_mesh)
@@ -571,18 +580,38 @@ class IterativeFEASolver:
             Logger.log("d", "FEA iter %d: assemble=%.1fs, BCs=%.1fs, solve=%.1fs, stress=%.1fs",
                        iteration + 1, _t2 - _t1, _t3 - _t2, _t4 - _t3, _t5 - _t4)
 
-            density_candidate = stress_to_density(
-                stress,
-                sigma_yield=material.yield_strength,
-                rho_min=min_rho,
-                rho_max=max_rho,
-                method="power",
-                safety_factor=safety_factor,
-            )
+            if use_oc:
+                # SIMP OC density update — uses compliance sensitivity
+                # and bisection on Lagrange multiplier for volume constraint
+                n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
+                density_new = oc_density_update(
+                    density,
+                    tet_mesh,
+                    displacements,
+                    E_base=material.E_xy,
+                    nu=material.nu,
+                    n_exp=n_exp,
+                    rho_min=min_rho,
+                    rho_max=max_rho,
+                    volume_fraction=volume_fraction,
+                    move_limit=0.2,
+                    eta=0.5,
+                    bonding_coeff=bonding_coeff,
+                )
+            else:
+                # Heuristic stress-to-density mapping (default)
+                density_candidate = stress_to_density(
+                    stress,
+                    sigma_yield=material.yield_strength,
+                    rho_min=min_rho,
+                    rho_max=max_rho,
+                    method="power",
+                    safety_factor=safety_factor,
+                )
 
-            # Adaptive damping
-            density_new = damping * density + (1.0 - damping) * density_candidate
-            density_new = np.clip(density_new, min_rho, max_rho)
+                # Adaptive damping
+                density_new = damping * density + (1.0 - damping) * density_candidate
+                density_new = np.clip(density_new, min_rho, max_rho)
 
             max_change = float(np.max(np.abs(density_new - density)))
             density = density_new

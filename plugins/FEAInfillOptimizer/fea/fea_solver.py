@@ -271,6 +271,81 @@ class LinearElasticitySolver:
 
         return vm_stress
 
+    def compute_element_compliance(
+        self,
+        tet_mesh: TetMesh,
+        displacements: np.ndarray,
+        E_per_element: np.ndarray,
+        nu_per_element: np.ndarray,
+        *,
+        bonding_coeff: float = 1.0,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute per-element compliance u_e^T k_e u_e and element volumes.
+
+        For each element the compliance is computed as::
+
+            ce_e = V_e × (B u_e)^T × D × (B u_e)
+                 = V_e × strain^T × stress
+
+        This equals the element strain energy contribution u_e^T k_e u_e
+        and is the key quantity needed for SIMP topology optimization
+        sensitivity analysis.
+
+        Args:
+            tet_mesh: Tetrahedral mesh.
+            displacements: Nodal displacement vector, shape (ndof,).
+            E_per_element: Young's modulus per element, shape (M,).
+            nu_per_element: Poisson's ratio per element, shape (M,).
+            bonding_coeff: Layer bonding coefficient k in (0, 1].
+
+        Returns:
+            Tuple of ``(ce, volumes)`` where:
+            - ``ce``: per-element compliance, shape (M,), same energy unit
+              as (force × displacement).
+            - ``volumes``: per-element volume, shape (M,).
+        """
+        nodes = tet_mesh.nodes
+        elements = tet_mesh.elements
+        n_elems = elements.shape[0]
+        ce = np.zeros(n_elems, dtype=np.float64)
+        volumes = np.zeros(n_elems, dtype=np.float64)
+
+        use_aniso = bonding_coeff < 1.0
+
+        for e_idx, (elem, E, nu) in enumerate(
+            zip(elements, E_per_element, nu_per_element)
+        ):
+            n0, n1, n2, n3 = int(elem[0]), int(elem[1]), int(elem[2]), int(elem[3])
+            x0, x1, x2, x3 = nodes[n0], nodes[n1], nodes[n2], nodes[n3]
+
+            B, V = _strain_displacement_matrix(x0, x1, x2, x3)
+            if V <= 0.0:
+                continue
+
+            volumes[e_idx] = V
+
+            dof_indices = np.array(
+                [n0 * 3, n0 * 3 + 1, n0 * 3 + 2,
+                 n1 * 3, n1 * 3 + 1, n1 * 3 + 2,
+                 n2 * 3, n2 * 3 + 1, n2 * 3 + 2,
+                 n3 * 3, n3 * 3 + 1, n3 * 3 + 2],
+                dtype=np.int64,
+            )
+            u_e = displacements[dof_indices]
+
+            if use_aniso:
+                D = build_constitutive_matrix_from_bonding(
+                    float(E), float(nu), bonding_coeff
+                )
+            else:
+                D = build_constitutive_matrix(float(E), float(nu))
+
+            strain = B @ u_e        # (6,)
+            stress = D @ strain     # (6,)
+            ce[e_idx] = V * float(strain @ stress)
+
+        return ce, volumes
+
     def compute_element_failure_index(
         self,
         tet_mesh: TetMesh,

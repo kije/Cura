@@ -41,6 +41,16 @@ from cura.PickingPass import PickingPass
 from cura.Scene.CuraSceneNode import CuraSceneNode
 
 from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
+from .operations.bc_operations import (
+    AddFixedFacesOperation,
+    RemoveFixedFacesOperation,
+    ClearFixedFacesOperation,
+    AddForceGroupOperation,
+    RemoveForceGroupOperation,
+    AddTorqueGroupOperation,
+    RemoveTorqueGroupOperation,
+    ClearAllBCsOperation,
+)
 from .visualization.bc_highlight import BCHighlightHandle
 from .visualization.force_direction_handle import (
     ForceDirectionHandle,
@@ -168,6 +178,7 @@ class BoundaryConditionTool(Tool):
             "ConvergenceIterations", "SafetyVerdict", "HasResults",
             "ActiveNodeName", "MeshQuality", "MeshWarnings",
             "MinDensity", "MaxDensity", "NumZones", "MaxIterations", "BondingCoeff",
+            "OptimizationMethod", "VolumeFraction",
             "DepsAvailable", "InstallDependencies",
             "HoverPreviewEnabled",
             "ErrorMessage",
@@ -311,7 +322,11 @@ class BoundaryConditionTool(Tool):
                 return
             bc = selected.callDecoration("getBoundaryConditions")
             if bc is not None:
-                bc.clearForceGroups()
+                # Remove groups in reverse-index order so each RemoveForceGroupOperation
+                # snapshots the correct index before prior removals shift the list.
+                groups = bc.getForceGroups()
+                for i in range(len(groups) - 1, -1, -1):
+                    RemoveForceGroupOperation(bc, i).push()
             self._force_handle.hide()
             self._rotating_group_index = -1
             self.propertyChanged.emit()
@@ -379,7 +394,7 @@ class BoundaryConditionTool(Tool):
 
         if result["fixed_faces"]:
             bc = self._get_or_create_bc(selected)
-            bc.addFixedFaces(result["fixed_faces"])
+            AddFixedFacesOperation(bc, result["fixed_faces"]).push()
             self.propertyChanged.emit()
             self._update_highlights()
 
@@ -430,11 +445,12 @@ class BoundaryConditionTool(Tool):
         bc = self._get_or_create_bc(node)
 
         if result.get("fixed_faces"):
-            bc.addFixedFaces(result["fixed_faces"])
+            AddFixedFacesOperation(bc, result["fixed_faces"]).push()
 
         for fg in result.get("force_groups", []):
             fx, fy, fz = fg["force"]
-            bc.addForceGroup(fg["face_indices"], Vector(fx, fy, fz))
+            force = Vector(fx, fy, fz)
+            AddForceGroupOperation(bc, fg["face_indices"], force).push()
             self._force_x = fx
             self._force_y = fy
             self._force_z = fz
@@ -738,6 +754,22 @@ class BoundaryConditionTool(Tool):
             self._extension._bonding_coeff = float(value)
         self.propertyChanged.emit()
 
+    def getOptimizationMethod(self) -> str:
+        return self._extension._optimization_method if self._extension else "heuristic"
+
+    def setOptimizationMethod(self, value) -> None:
+        if self._extension:
+            self._extension._optimization_method = str(value)
+        self.propertyChanged.emit()
+
+    def getVolumeFraction(self) -> float:
+        return self._extension._volume_fraction if self._extension else 50.0
+
+    def setVolumeFraction(self, value) -> None:
+        if self._extension:
+            self._extension._volume_fraction = float(value)
+        self.propertyChanged.emit()
+
     # ── Dependency management ──────────────────────────────────────────────
 
     def getDepsAvailable(self) -> bool:
@@ -851,7 +883,7 @@ class BoundaryConditionTool(Tool):
             return
         bc = selected.callDecoration("getBoundaryConditions")
         if bc is not None and hasattr(bc, "removeTorqueGroup"):
-            bc.removeTorqueGroup(index)
+            RemoveTorqueGroupOperation(bc, index).push()
             self.propertyChanged.emit()
             self._update_highlights()
 
@@ -982,7 +1014,7 @@ class BoundaryConditionTool(Tool):
                 return
             bc = selected.callDecoration("getBoundaryConditions")
             if bc is not None:
-                bc.clearFixedFaces()
+                ClearFixedFacesOperation(bc).push()
             self._active_support_index = -1
             self.propertyChanged.emit()
             self._update_highlights()
@@ -1000,7 +1032,7 @@ class BoundaryConditionTool(Tool):
                 return
             bc = selected.callDecoration("getBoundaryConditions")
             if bc is not None:
-                bc.removeForceGroup(index)
+                RemoveForceGroupOperation(bc, index).push()
                 if self._rotating_group_index == index:
                     self._force_handle.hide()
                     self._rotating_group_index = -1
@@ -1126,11 +1158,11 @@ class BoundaryConditionTool(Tool):
                     to_add = [f for f in face_indices_to_add if f not in existing]
                     to_remove = [f for f in face_indices_to_add if f in existing]
                     if to_remove:
-                        bc.removeFixedFaces(to_remove)
+                        RemoveFixedFacesOperation(bc, to_remove).push()
                     if to_add:
-                        bc.addFixedFaces(to_add)
+                        AddFixedFacesOperation(bc, to_add).push()
                 else:
-                    bc.addFixedFaces(face_indices_to_add)
+                    AddFixedFacesOperation(bc, face_indices_to_add).push()
                 self.propertyChanged.emit()
                 self._update_highlights()
 
@@ -1326,7 +1358,7 @@ class BoundaryConditionTool(Tool):
         force = Vector(force_dir.x * mag, force_dir.y * mag, force_dir.z * mag)
 
         bc = self._get_or_create_bc(selected)
-        bc.addForceGroup(list(self._current_face_selection), force)
+        AddForceGroupOperation(bc, list(self._current_face_selection), force).push()
 
         # Update Fx/Fy/Fz to reflect the auto-computed direction
         self._force_x = force.x
@@ -1382,11 +1414,9 @@ class BoundaryConditionTool(Tool):
         normal = compute_face_normal(verts, indices, self._current_face_selection)
 
         bc = self._get_or_create_bc(selected)
-        bc.addTorqueGroup(
-            list(self._current_face_selection),
-            normal,
-            self._torque_magnitude,
-        )
+        AddTorqueGroupOperation(
+            bc, list(self._current_face_selection), normal, self._torque_magnitude
+        ).push()
 
         self._current_face_selection.clear()
         self.propertyChanged.emit()
@@ -1398,7 +1428,7 @@ class BoundaryConditionTool(Tool):
             return
         bc = selected.callDecoration("getBoundaryConditions")
         if bc is not None:
-            bc.clearAll()
+            ClearAllBCsOperation(bc).push()
         self._current_face_selection.clear()
         self._force_handle.hide()
         self._rotating_group_index = -1
@@ -1414,7 +1444,7 @@ class BoundaryConditionTool(Tool):
             return
         bc = selected.callDecoration("getBoundaryConditions")
         if bc is not None:
-            bc.removeForceGroup(index)
+            RemoveForceGroupOperation(bc, index).push()
             if self._rotating_group_index == index:
                 self._force_handle.hide()
                 self._rotating_group_index = -1
@@ -1428,7 +1458,7 @@ class BoundaryConditionTool(Tool):
             return
         bc = selected.callDecoration("getBoundaryConditions")
         if bc is not None:
-            bc.clearFixedFaces()
+            ClearFixedFacesOperation(bc).push()
             self.propertyChanged.emit()
             self._update_highlights()
 

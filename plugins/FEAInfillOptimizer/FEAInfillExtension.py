@@ -91,6 +91,8 @@ class FEAInfillExtension(QObject, Extension):
         self._mesh_resolution = "medium"
         self._safety_factor = 2.0
         self._bonding_coeff = 0.5  # 50 % default; overridden by UI or material
+        self._optimization_method = "heuristic"  # "heuristic" or "oc"
+        self._volume_fraction = 50.0  # target volume % for OC method (displayed as %)
 
         # Deferred initialization
         CuraApplication.getInstance().engineCreatedSignal.connect(self._onEngineCreated)
@@ -644,6 +646,26 @@ class FEAInfillExtension(QObject, Extension):
             self._bonding_coeff = value
             self.settingsChanged.emit()
 
+    @pyqtProperty(str, notify=settingsChanged)
+    def optimizationMethod(self) -> str:
+        return self._optimization_method
+
+    @optimizationMethod.setter
+    def optimizationMethod(self, value: str) -> None:
+        if self._optimization_method != value:
+            self._optimization_method = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(float, notify=settingsChanged)
+    def volumeFraction(self) -> float:
+        return self._volume_fraction
+
+    @volumeFraction.setter
+    def volumeFraction(self, value: float) -> None:
+        if self._volume_fraction != value:
+            self._volume_fraction = value
+            self.settingsChanged.emit()
+
     # -- FEA Actions --
 
     @pyqtSlot()
@@ -711,6 +733,8 @@ class FEAInfillExtension(QObject, Extension):
             "mesh_resolution": self._mesh_resolution,
             "safety_factor": self._safety_factor,
             "bonding_coeff": self._bonding_coeff / 100.0,
+            "optimization_method": self._optimization_method,
+            "volume_fraction": self._volume_fraction / 100.0,
         }
 
         job = FEASolveJob(node, bc_decorator, material, config)

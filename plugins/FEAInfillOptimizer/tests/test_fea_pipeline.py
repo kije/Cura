@@ -11,6 +11,7 @@ Run with:
     python -m pytest plugins/FEAInfillOptimizer/tests/test_fea_pipeline.py -v
 """
 
+import os
 import sys
 import warnings
 
@@ -19,19 +20,28 @@ import pytest
 import scipy.sparse as sp
 
 # ---------------------------------------------------------------------------
+# Ensure the plugins directory is on sys.path so FEAInfillOptimizer is importable.
+# ---------------------------------------------------------------------------
+_PLUGINS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..")
+)
+if _PLUGINS_DIR not in sys.path:
+    sys.path.insert(0, _PLUGINS_DIR)
+
+# ---------------------------------------------------------------------------
 # Imports — conftest.py has already injected all UM/cura stubs into sys.modules
 # ---------------------------------------------------------------------------
 
-from plugins.FEAInfillOptimizer.fea.homogenization import (
+from FEAInfillOptimizer.fea.homogenization import (
     build_constitutive_matrix,
     effective_properties,
     _PATTERN_EXPONENTS,
     _DEFAULT_EXPONENT,
 )
-from plugins.FEAInfillOptimizer.fea.material_database import Material, MaterialDatabase
-from plugins.FEAInfillOptimizer.fea.stress_to_density import stress_to_density
-from plugins.FEAInfillOptimizer.fea.tetrahedralization import TetMesh
-from plugins.FEAInfillOptimizer.fea.fea_solver import (
+from FEAInfillOptimizer.fea.material_database import Material, MaterialDatabase
+from FEAInfillOptimizer.fea.stress_to_density import stress_to_density
+from FEAInfillOptimizer.fea.tetrahedralization import TetMesh
+from FEAInfillOptimizer.fea.fea_solver import (
     LinearElasticitySolver,
     _strain_displacement_matrix,
     _von_mises,
@@ -770,11 +780,11 @@ class TestTetrahedralization:
     the entire class can be skipped quickly when gmsh is absent.
     """
 
-    from plugins.FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
+    from FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
 
     @pytest.fixture(scope="class")
     def cube_tet_mesh(self):
-        from plugins.FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
+        from FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
         cube = _make_cube_trimesh(side=5.0)
         return tetrahedralize(cube, element_size=2.5)
 
@@ -817,7 +827,7 @@ class TestTetrahedralization:
 
     def test_coarser_mesh_has_fewer_elements(self):
         """A much coarser element size must produce fewer tetrahedra than a fine one."""
-        from plugins.FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
+        from FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
         cube = _make_cube_trimesh(side=5.0)
         # Use a 5× size difference to ensure Gmsh produces a reliably different count.
         coarse = tetrahedralize(cube, element_size=3.0)
@@ -827,7 +837,7 @@ class TestTetrahedralization:
         )
 
     def test_preset_medium_produces_valid_mesh(self):
-        from plugins.FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
+        from FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
         cube = _make_cube_trimesh(side=5.0)
         mesh = tetrahedralize(cube, element_size="medium")
         assert mesh.elements.shape[0] > 0
@@ -860,7 +870,7 @@ class TestCubeCompressionIntegration:
 
     @pytest.fixture(scope="class")
     def compression_results(self):
-        from plugins.FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
+        from FEAInfillOptimizer.fea.tetrahedralization import tetrahedralize
 
         cube = _make_cube_trimesh(side=self.SIDE)
         tet_mesh = tetrahedralize(cube, element_size=self.ELEMENT_SIZE)

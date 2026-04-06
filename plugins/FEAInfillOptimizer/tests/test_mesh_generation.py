@@ -1050,7 +1050,7 @@ class TestFEABoundaryConditionDecorator:
     def test_to_dict_has_expected_keys(
         self, decorator: FEABoundaryConditionDecorator
     ) -> None:
-        assert set(decorator.toDict().keys()) == {"fixed_faces", "force_groups", "material_name"}
+        assert set(decorator.toDict().keys()) == {"fixed_faces", "force_groups", "torque_groups", "material_name"}
 
     def test_round_trip_empty_decorator(
         self, decorator: FEABoundaryConditionDecorator

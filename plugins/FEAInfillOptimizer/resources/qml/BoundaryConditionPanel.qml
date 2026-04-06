@@ -1263,6 +1263,36 @@ Item
                             UM.Label { text: catalog.i18nc("@label", "Layer bonding (%)"); font: UM.Theme.getFont("small") }
                             SpinBox { from: 10; to: 100; value: 50; stepSize: 5; Layout.fillWidth: true
                                 onValueModified: UM.Controller.setProperty("BondingCoeff", value) }
+
+                            UM.Label { text: catalog.i18nc("@label", "Optimization"); font: UM.Theme.getFont("small") }
+                            ComboBox
+                            {
+                                Layout.fillWidth: true
+                                model: [
+                                    { value: "heuristic", text: catalog.i18nc("@option", "Heuristic (default)") },
+                                    { value: "oc",        text: catalog.i18nc("@option", "SIMP OC (advanced)") }
+                                ]
+                                textRole: "text"
+                                valueRole: "value"
+                                currentIndex: (toolProperties.getValue("OptimizationMethod") ?? "heuristic") === "oc" ? 1 : 0
+                                onActivated: function(index) {
+                                    UM.Controller.setProperty("OptimizationMethod", model[index].value)
+                                }
+                            }
+
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Target volume (%)")
+                                font: UM.Theme.getFont("small")
+                                visible: (toolProperties.getValue("OptimizationMethod") ?? "heuristic") === "oc"
+                            }
+                            SpinBox
+                            {
+                                from: 10; to: 90; value: 50; stepSize: 5
+                                Layout.fillWidth: true
+                                visible: (toolProperties.getValue("OptimizationMethod") ?? "heuristic") === "oc"
+                                onValueModified: UM.Controller.setProperty("VolumeFraction", value)
+                            }
                         }
                     }
 
