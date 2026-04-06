@@ -398,41 +398,43 @@ class IterativeFEASolver:
 
 
 def _easyfea_fixed_nodes(bc: Any, mesh: Any, surface_mesh: Any) -> Optional[np.ndarray]:
-    """Resolve fixed-face indices to EasyFEA mesh node indices via AABB query.
+    """Resolve fixed-face indices to EasyFEA mesh node indices via KDTree proximity.
 
-    Args:
-        bc: ``FEABoundaryConditionDecorator`` instance.
-        mesh: EasyFEA mesh object.
-        surface_mesh: ``trimesh.Trimesh`` surface mesh (may be None).
-
-    Returns:
-        Array of EasyFEA node indices, or None if no fixed faces.
+    Uses nearest-neighbor distance matching instead of AABB (which was too broad
+    for flat models — an AABB of the bottom face spans the entire XY extent).
     """
     fixed_face_indices: List[int] = bc.getFixedFaces()
     if not fixed_face_indices:
         return None
 
-    if surface_mesh is not None:
-        sv_indices = _face_indices_to_vertex_indices(fixed_face_indices, surface_mesh)
-        if not sv_indices:
-            return None
-        pos_arr = np.array([surface_mesh.vertices[i] for i in sv_indices], dtype=np.float64)
-    else:
-        # No surface mesh: treat face indices as vertex indices of the tet mesh
-        # (legacy fallback — positional query not possible without coordinates)
+    if surface_mesh is None:
         return None
 
-    pos_min = pos_arr.min(axis=0) - 0.1
-    pos_max = pos_arr.max(axis=0) + 0.1
+    sv_indices = _face_indices_to_vertex_indices(fixed_face_indices, surface_mesh)
+    if not sv_indices:
+        return None
 
-    nodes = mesh.Nodes_Conditions(
-        lambda x, y, z: (
-            (x >= pos_min[0]) & (x <= pos_max[0]) &
-            (y >= pos_min[1]) & (y <= pos_max[1]) &
-            (z >= pos_min[2]) & (z <= pos_max[2])
-        )
-    )
-    return nodes if nodes is not None and len(nodes) > 0 else None
+    # Get the actual fixed vertex positions
+    fixed_positions = np.array([surface_mesh.vertices[i] for i in sv_indices], dtype=np.float64)
+
+    # Get all mesh node positions from EasyFEA
+    mesh_coords = mesh.coord  # (N, 3) array of node positions
+
+    # Find mesh nodes that are CLOSE to any fixed vertex (within tolerance)
+    from scipy.spatial import KDTree
+    fixed_tree = KDTree(fixed_positions)
+    # For each mesh node, find distance to nearest fixed vertex
+    dists, _ = fixed_tree.query(mesh_coords)
+
+    # Tolerance: nodes within 0.5mm of a fixed surface vertex are constrained
+    tolerance = 0.5
+    close_mask = dists < tolerance
+    close_indices = np.where(close_mask)[0]
+
+    Logger.log("d", "FEA BC: %d fixed face vertices → %d mesh nodes within %.1fmm",
+               len(fixed_positions), len(close_indices), tolerance)
+
+    return close_indices if len(close_indices) > 0 else None
 
 
 def _easyfea_force_groups(
@@ -440,38 +442,34 @@ def _easyfea_force_groups(
 ) -> List[Tuple[np.ndarray, Any]]:
     """Map force groups to (EasyFEA node array, force UM.Vector) pairs.
 
-    Args:
-        bc: ``FEABoundaryConditionDecorator`` instance.
-        mesh: EasyFEA mesh object.
-        surface_mesh: ``trimesh.Trimesh`` surface mesh (may be None).
-
-    Returns:
-        List of ``(node_array, force_vector)`` tuples.
+    Uses KDTree proximity matching instead of AABB.
     """
     result: List[Tuple[np.ndarray, Any]] = []
+    if surface_mesh is None:
+        return result
+
+    mesh_coords = mesh.coord  # (N, 3)
 
     for force_group in bc.getForceGroups():
-        if surface_mesh is not None:
-            sv_indices = _face_indices_to_vertex_indices(
-                [int(fi) for fi in force_group.face_indices], surface_mesh
-            )
-            if not sv_indices:
-                continue
-            fp_arr = np.array([surface_mesh.vertices[i] for i in sv_indices], dtype=np.float64)
-        else:
-            continue  # Cannot resolve without surface mesh coordinates
-
-        fp_min = fp_arr.min(axis=0) - 0.1
-        fp_max = fp_arr.max(axis=0) + 0.1
-
-        force_nodes = mesh.Nodes_Conditions(
-            lambda x, y, z: (
-                (x >= fp_min[0]) & (x <= fp_max[0]) &
-                (y >= fp_min[1]) & (y <= fp_max[1]) &
-                (z >= fp_min[2]) & (z <= fp_max[2])
-            )
+        sv_indices = _face_indices_to_vertex_indices(
+            [int(fi) for fi in force_group.face_indices], surface_mesh
         )
-        if force_nodes is not None and len(force_nodes) > 0:
+        if not sv_indices:
+            continue
+
+        force_positions = np.array([surface_mesh.vertices[i] for i in sv_indices], dtype=np.float64)
+
+        from scipy.spatial import KDTree
+        force_tree = KDTree(force_positions)
+        dists, _ = force_tree.query(mesh_coords)
+
+        tolerance = 0.5
+        close_mask = dists < tolerance
+        force_nodes = np.where(close_mask)[0]
+
+        if len(force_nodes) > 0:
+            Logger.log("d", "FEA BC: force group %d face vertices → %d mesh nodes",
+                       len(force_positions), len(force_nodes))
             result.append((force_nodes, force_group.force))
 
     return result
