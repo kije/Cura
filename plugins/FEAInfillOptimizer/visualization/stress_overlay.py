@@ -234,7 +234,7 @@ class StressOverlayManager:
                     )
                     if self._shader is None:
                         return True
-                    self._shader.setUniformValue("u_opacity", 0.45)
+                    self._shader.setUniformValue("u_opacity", 0.65)
 
                 renderer.queueNode(
                     self,

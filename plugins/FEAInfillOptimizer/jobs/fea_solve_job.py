@@ -155,6 +155,10 @@ class FEASolveJob(Job):
                 zones.append({"density": zone_obj.density, "mesh_data": mesh_data})
 
             # Compute aggregate statistics
+            from UM.Logger import Logger as _Logger
+            _Logger.log("d", "FEA job: stress_field shape=%s, min=%.4f, max=%.4f",
+                       stress_field.shape, float(stress_field.min()) if len(stress_field) > 0 else 0,
+                       float(stress_field.max()) if len(stress_field) > 0 else 0)
             max_stress = float(numpy.max(stress_field)) if len(stress_field) > 0 else 0.0
             min_stress = float(numpy.min(stress_field)) if len(stress_field) > 0 else 0.0
             yield_strength = self._material.yield_strength

@@ -273,12 +273,19 @@ class IterativeFEASolver:
 
             # Extract von Mises stress per element
             svm = simu.Result("Svm")
+            max_disp = float(np.max(np.abs(simu.displacement))) if simu.displacement is not None else 0.0
+            Logger.log("d", "FEA EasyFEA: max displacement=%.6f mm", max_disp)
+
             if svm is None or len(svm) == 0:
+                Logger.log("w", "FEA EasyFEA: Svm returned None or empty!")
                 stress = np.zeros(n_elems, dtype=np.float64)
             else:
                 stress = np.asarray(svm, dtype=np.float64)
+                Logger.log("d", "FEA EasyFEA: Svm shape=%s, min=%.4f, max=%.4f, mean=%.4f MPa",
+                           stress.shape, float(stress.min()), float(stress.max()), float(stress.mean()))
                 if len(stress) != n_elems:
-                    # EasyFEA may return nodal values; average to elements
+                    Logger.log("w", "FEA EasyFEA: Svm length %d != n_elems %d, averaging",
+                               len(stress), n_elems)
                     stress = np.full(n_elems, float(np.mean(stress)), dtype=np.float64)
 
             # Map stress → density candidate
