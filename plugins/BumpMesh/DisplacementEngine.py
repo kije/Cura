@@ -27,6 +27,8 @@ def displace(
 def compute_vertex_normals(vertices: numpy.ndarray, indices: numpy.ndarray) -> numpy.ndarray:
     """Compute area-weighted per-vertex normals from triangle mesh.
 
+    Uses numpy.bincount for fast scatter-add (10-20x faster than numpy.add.at).
+
     :param vertices: (N, 3) float32 vertex positions.
     :param indices: (M, 3) int32 triangle indices.
     :return: (N, 3) float32 unit normals per vertex.
@@ -40,10 +42,17 @@ def compute_vertex_normals(vertices: numpy.ndarray, indices: numpy.ndarray) -> n
     edge2 = v2 - v0
     face_normals = numpy.cross(edge1, edge2)
 
-    # Accumulate face normals onto vertices
-    vertex_normals = numpy.zeros_like(vertices)
-    for i in range(3):
-        numpy.add.at(vertex_normals, indices[:, i], face_normals)
+    # Accumulate face normals onto vertices using bincount (vectorized scatter-add)
+    num_verts = len(vertices)
+    flat_indices = indices.ravel()  # (M*3,)
+    # Repeat each face normal 3 times (once per vertex of the face)
+    face_normals_repeated = numpy.repeat(face_normals, 3, axis=0)  # (M*3, 3)
+
+    vertex_normals = numpy.zeros((num_verts, 3), dtype=numpy.float64)
+    for axis in range(3):
+        vertex_normals[:, axis] = numpy.bincount(
+            flat_indices, weights=face_normals_repeated[:, axis], minlength=num_verts
+        )
 
     # Normalize
     lengths = numpy.linalg.norm(vertex_normals, axis=1, keepdims=True)
@@ -77,7 +86,7 @@ def compute_angle_mask(normals: numpy.ndarray, mask_angle_deg: float) -> numpy.n
 def smooth_texture(texture_data: numpy.ndarray, iterations: int) -> numpy.ndarray:
     """Apply box blur smoothing to the displacement map.
 
-    Uses the same convolution pattern as Cura's ImageReader.
+    Pre-allocates the padded buffer to avoid repeated allocation.
 
     :param texture_data: (H, W) float32 grayscale texture.
     :param iterations: Number of blur passes.
@@ -86,9 +95,23 @@ def smooth_texture(texture_data: numpy.ndarray, iterations: int) -> numpy.ndarra
     if iterations <= 0:
         return texture_data
 
+    h, w = texture_data.shape
     result = texture_data.copy()
+    padded = numpy.empty((h + 2, w + 2), dtype=numpy.float32)
+
     for _ in range(iterations):
-        padded = numpy.pad(result, ((1, 1), (1, 1)), mode="edge")
+        # Fill interior
+        padded[1:-1, 1:-1] = result
+        # Edge padding (replicate border)
+        padded[0, 1:-1] = result[0, :]
+        padded[-1, 1:-1] = result[-1, :]
+        padded[1:-1, 0] = result[:, 0]
+        padded[1:-1, -1] = result[:, -1]
+        # Corner padding
+        padded[0, 0] = result[0, 0]
+        padded[0, -1] = result[0, -1]
+        padded[-1, 0] = result[-1, 0]
+        padded[-1, -1] = result[-1, -1]
 
         result = (padded[1:-1, 1:-1] +
                   padded[1:-1, 2:] + padded[1:-1, :-2] +

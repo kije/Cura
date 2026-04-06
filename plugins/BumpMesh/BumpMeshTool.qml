@@ -16,6 +16,7 @@ Item
     height: childrenRect.height
     UM.I18nCatalog { id: catalog; name: "cura" }
 
+    // States: 0=NO_SELECTION, 1=READY, 2=PROCESSING, 3=ERROR
     property int currentState: UM.Controller.properties.getValue("State")
     property bool hasTexture: UM.Controller.properties.getValue("HasTexture")
 
@@ -23,7 +24,7 @@ Item
     {
         id: mainColumn
         spacing: UM.Theme.getSize("default_margin").height
-        visible: currentState !== 0 && currentState !== 2
+        visible: (currentState === 1 || currentState === 3)
 
         // === Section: Displacement Map ===
         UM.Label
@@ -56,6 +57,13 @@ Item
             color: UM.Theme.getColor("text_inactive")
         }
 
+        UM.Label
+        {
+            visible: !hasTexture
+            text: catalog.i18nc("@label", "Load a displacement map texture to begin.")
+            color: UM.Theme.getColor("text_inactive")
+        }
+
         // Line separator
         Rectangle
         {
@@ -83,6 +91,21 @@ Item
             ]
             currentIndex: UM.Controller.properties.getValue("ProjectionMode")
             onCurrentIndexChanged: UM.Controller.setProperty("ProjectionMode", currentIndex)
+        }
+
+        UM.Label
+        {
+            text:
+            {
+                var mode = projectionCombo.currentIndex
+                if (mode === 0) return catalog.i18nc("@label", "Blends 3 planar projections. Best for complex shapes.")
+                if (mode === 1) return catalog.i18nc("@label", "Projects from 6 box faces by dominant normal.")
+                if (mode === 2) return catalog.i18nc("@label", "Wraps around the Y axis. Good for cylindrical parts.")
+                if (mode === 3) return catalog.i18nc("@label", "Projects from center outward. Good for round objects.")
+                if (mode === 4) return catalog.i18nc("@label", "Flat projection onto the XZ plane.")
+                return ""
+            }
+            color: UM.Theme.getColor("text_inactive")
         }
 
         // Line separator
@@ -329,6 +352,13 @@ Item
 
         UM.Label
         {
+            visible: subdivisionSlider.value == 0
+            text: catalog.i18nc("@label", "0 = original mesh density (no added detail)")
+            color: UM.Theme.getColor("text_inactive")
+        }
+
+        UM.Label
+        {
             id: vertexEstimateLabel
             property int estVerts: UM.Controller.properties.getValue("EstimatedVertices")
             text:
@@ -341,6 +371,13 @@ Item
                     return catalog.i18nc("@label", "Est. vertices: %1").arg(estVerts)
             }
             color: estVerts > 500000 ? UM.Theme.getColor("warning") : UM.Theme.getColor("text_inactive")
+        }
+
+        UM.Label
+        {
+            visible: vertexEstimateLabel.estVerts > 500000
+            text: catalog.i18nc("@label", "High vertex counts may be slow or run out of memory.")
+            color: UM.Theme.getColor("warning")
         }
 
         // Line separator
@@ -387,14 +424,14 @@ Item
         UM.Label
         {
             text: maskAngleSlider.value == 0 ?
-                catalog.i18nc("@label", "(no masking)") :
+                catalog.i18nc("@label", "(no masking \u2014 displace all surfaces)") :
                 catalog.i18nc("@label", "(only surfaces within %1\u00B0 of up)").arg(maskAngleSlider.value.toFixed(0))
             color: UM.Theme.getColor("text_inactive")
         }
 
         UM.Label
         {
-            text: catalog.i18nc("@label", "Texture Smoothing")
+            text: catalog.i18nc("@label", "Texture Smoothing (blur passes)")
         }
 
         RowLayout
@@ -432,6 +469,16 @@ Item
             color: UM.Theme.getColor("lining")
         }
 
+        // === Error message ===
+        UM.Label
+        {
+            visible: currentState === 3
+            width: parent.width
+            text: UM.Controller.properties.getValue("ErrorMessage") || ""
+            color: UM.Theme.getColor("error")
+            wrapMode: Text.WordWrap
+        }
+
         // === Section: Actions ===
         RowLayout
         {
@@ -440,7 +487,7 @@ Item
             Cura.PrimaryButton
             {
                 text: catalog.i18nc("@action:button", "Apply")
-                enabled: hasTexture
+                enabled: hasTexture && currentState !== 2
                 onClicked: UM.Controller.triggerAction("applyDisplacement")
             }
 

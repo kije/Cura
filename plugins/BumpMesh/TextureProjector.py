@@ -218,27 +218,41 @@ def _project_triplanar(vertices: numpy.ndarray, normals: numpy.ndarray) -> numpy
 # --- UV Transform ---
 
 def _apply_uv_transform(uvs: numpy.ndarray, params: dict) -> numpy.ndarray:
-    """Apply scale, rotation, and offset to UV coordinates."""
+    """Apply rotation, scale, and offset to UV coordinates.
+
+    Order: center at (0.5, 0.5) -> rotate -> scale -> uncenter -> offset.
+    This ensures rotation always happens around the texture center regardless
+    of the scale values.
+    """
     scale_u = params.get("scale_u", 1.0)
     scale_v = params.get("scale_v", 1.0)
     offset_u = params.get("offset_u", 0.0)
     offset_v = params.get("offset_v", 0.0)
     rotation_deg = params.get("rotation", 0.0)
 
-    # Scale
     result = uvs.copy()
-    result[:, 0] *= scale_u
-    result[:, 1] *= scale_v
 
-    # Rotation around UV center (0.5, 0.5)
+    # Center at (0.5, 0.5)
+    result[:, 0] -= 0.5
+    result[:, 1] -= 0.5
+
+    # Rotate around origin (which is now the UV center)
     if abs(rotation_deg) > 0.01:
         rotation_rad = numpy.radians(rotation_deg)
         cos_r = numpy.cos(rotation_rad)
         sin_r = numpy.sin(rotation_rad)
-        centered_u = result[:, 0] - 0.5
-        centered_v = result[:, 1] - 0.5
-        result[:, 0] = centered_u * cos_r - centered_v * sin_r + 0.5
-        result[:, 1] = centered_u * sin_r + centered_v * cos_r + 0.5
+        u_rot = result[:, 0] * cos_r - result[:, 1] * sin_r
+        v_rot = result[:, 0] * sin_r + result[:, 1] * cos_r
+        result[:, 0] = u_rot
+        result[:, 1] = v_rot
+
+    # Scale around the center
+    result[:, 0] *= scale_u
+    result[:, 1] *= scale_v
+
+    # Uncenter
+    result[:, 0] += 0.5
+    result[:, 1] += 0.5
 
     # Offset
     result[:, 0] += offset_u

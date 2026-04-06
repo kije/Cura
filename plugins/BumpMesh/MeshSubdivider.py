@@ -21,58 +21,50 @@ def subdivide(vertices: numpy.ndarray, indices: numpy.ndarray, levels: int = 1) 
 
 
 def _subdivide_once(vertices: numpy.ndarray, indices: numpy.ndarray) -> tuple:
-    """Single level of midpoint subdivision."""
+    """Single level of midpoint subdivision (fully vectorized)."""
     num_verts = len(vertices)
-    edge_midpoints = {}  # (min_idx, max_idx) -> midpoint_vertex_index
-    new_verts_list = []
-    next_idx = num_verts
+    num_faces = len(indices)
 
-    new_indices = numpy.empty((len(indices) * 4, 3), dtype=numpy.int32)
+    # Build all 3 edges per face, each sorted so smaller index comes first
+    # Edge order per face: (v0,v1), (v1,v2), (v0,v2)
+    edge_pairs = numpy.stack([
+        indices[:, [0, 1]],
+        indices[:, [1, 2]],
+        indices[:, [0, 2]],
+    ], axis=1)  # (M, 3, 2)
 
-    for i, tri in enumerate(indices):
-        v0, v1, v2 = int(tri[0]), int(tri[1]), int(tri[2])
+    # Sort each edge so (min, max) for deduplication
+    edge_pairs = numpy.sort(edge_pairs, axis=2)
+    all_edges = edge_pairs.reshape(-1, 2)  # (M*3, 2)
 
-        # Get or create midpoints for each edge
-        m01 = _get_or_create_midpoint(edge_midpoints, new_verts_list, vertices, v0, v1, next_idx)
-        if m01 >= next_idx:
-            next_idx += 1
-        m12 = _get_or_create_midpoint(edge_midpoints, new_verts_list, vertices, v1, v2, next_idx)
-        if m12 >= next_idx:
-            next_idx += 1
-        m02 = _get_or_create_midpoint(edge_midpoints, new_verts_list, vertices, v0, v2, next_idx)
-        if m02 >= next_idx:
-            next_idx += 1
+    # Find unique edges and map each of the M*3 edges back to its unique index
+    unique_edges, edge_inverse = numpy.unique(all_edges, axis=0, return_inverse=True)
+    num_unique_edges = len(unique_edges)
 
-        # Create 4 sub-triangles
-        base = i * 4
-        new_indices[base] = [v0, m01, m02]
-        new_indices[base + 1] = [m01, v1, m12]
-        new_indices[base + 2] = [m02, m12, v2]
-        new_indices[base + 3] = [m01, m12, m02]
+    # Compute midpoints for each unique edge
+    midpoints = (vertices[unique_edges[:, 0]] + vertices[unique_edges[:, 1]]) * 0.5
 
-    if new_verts_list:
-        new_verts_array = numpy.array(new_verts_list, dtype=numpy.float32)
-        all_vertices = numpy.vstack([vertices, new_verts_array])
-    else:
-        all_vertices = vertices
+    # Assign new vertex indices starting after existing vertices
+    # edge_inverse maps each of the M*3 edges to its unique edge index
+    # Reshape to (M, 3) where columns correspond to edge01, edge12, edge02
+    midpoint_global_indices = (num_verts + edge_inverse).astype(numpy.int32)
+    face_midpoints = midpoint_global_indices.reshape(num_faces, 3)
+
+    m01 = face_midpoints[:, 0]
+    m12 = face_midpoints[:, 1]
+    m02 = face_midpoints[:, 2]
+
+    v0 = indices[:, 0]
+    v1 = indices[:, 1]
+    v2 = indices[:, 2]
+
+    # Build 4 sub-triangles per face
+    new_indices = numpy.empty((num_faces * 4, 3), dtype=numpy.int32)
+    new_indices[0::4] = numpy.column_stack([v0, m01, m02])
+    new_indices[1::4] = numpy.column_stack([m01, v1, m12])
+    new_indices[2::4] = numpy.column_stack([m02, m12, v2])
+    new_indices[3::4] = numpy.column_stack([m01, m12, m02])
+
+    all_vertices = numpy.vstack([vertices, midpoints.astype(numpy.float32)])
 
     return all_vertices, new_indices
-
-
-def _get_or_create_midpoint(
-    edge_midpoints: dict,
-    new_verts_list: list,
-    vertices: numpy.ndarray,
-    v_a: int,
-    v_b: int,
-    next_idx: int
-) -> int:
-    """Get existing midpoint for an edge, or create a new one."""
-    key = (min(v_a, v_b), max(v_a, v_b))
-    if key in edge_midpoints:
-        return edge_midpoints[key]
-
-    midpoint = (vertices[v_a] + vertices[v_b]) * 0.5
-    new_verts_list.append(midpoint)
-    edge_midpoints[key] = next_idx
-    return next_idx

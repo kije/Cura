@@ -1,6 +1,7 @@
 # Copyright (c) 2025 BumpMesh Plugin
 # Released under the terms of the LGPLv3 or higher.
 
+import weakref
 from typing import Optional
 
 import numpy
@@ -18,20 +19,37 @@ from . import TextureProjector
 
 
 class DisplacementJob(Job):
-    """Background job that runs the full displacement pipeline."""
+    """Background job that runs the full displacement pipeline.
 
-    def __init__(self, node: SceneNode, texture_data: numpy.ndarray, params: dict) -> None:
+    Mesh data (vertices/indices) is pre-copied on the main thread for thread safety.
+    The node is held via a weak reference to avoid preventing garbage collection.
+    """
+
+    def __init__(
+        self,
+        node: SceneNode,
+        vertices: numpy.ndarray,
+        indices: Optional[numpy.ndarray],
+        texture_data: numpy.ndarray,
+        params: dict
+    ) -> None:
         super().__init__()
-        self._node = node
+        self._node_ref = weakref.ref(node)
+        self._vertices = vertices
+        self._indices = indices
         self._texture_data = texture_data
         self._params = params
         self._result_mesh: Optional[MeshData] = None
+        self._error: Optional[str] = None
 
-    def getNode(self) -> SceneNode:
-        return self._node
+    def getNode(self) -> Optional[SceneNode]:
+        return self._node_ref()
 
     def getResultMesh(self) -> Optional[MeshData]:
         return self._result_mesh
+
+    def getError(self) -> Optional[str]:
+        return self._error
 
     def run(self) -> None:
         message = Message(
@@ -45,26 +63,22 @@ class DisplacementJob(Job):
 
         try:
             self._run_pipeline(message)
+        except MemoryError:
+            Logger.logException("e", "Out of memory during displacement")
+            self._result_mesh = None
+            self._error = "Out of memory. Try lowering the subdivision level."
         except Exception:
             Logger.logException("e", "Error during displacement")
             self._result_mesh = None
+            self._error = "Displacement failed. Check the log for details."
         finally:
             message.hide()
 
     def _run_pipeline(self, message: Message) -> None:
-        mesh = self._node.getMeshData()
-        if mesh is None:
-            return
+        vertices = self._vertices
+        indices = self._indices
 
-        vertices = mesh.getVertices()
-        if vertices is None:
-            return
-        vertices = vertices.copy()
-
-        indices = mesh.getIndices()
-        if indices is not None:
-            indices = indices.copy()
-        else:
+        if indices is None:
             # If no index buffer, create sequential indices (every 3 vertices = 1 triangle)
             num_verts = len(vertices)
             indices = numpy.arange(num_verts, dtype=numpy.int32).reshape(-1, 3)

@@ -1,7 +1,7 @@
 # Copyright (c) 2025 BumpMesh Plugin
 # Released under the terms of the LGPLv3 or higher.
 
-import os
+import weakref
 from enum import IntEnum
 from typing import Optional
 
@@ -11,11 +11,7 @@ from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QFileDialog
 
 from UM.Application import Application
-from UM.Event import Event, MouseEvent
-from UM.Job import Job
 from UM.Logger import Logger
-from UM.Math.Vector import Vector
-from UM.Mesh.MeshBuilder import MeshBuilder
 from UM.Mesh.MeshData import MeshData
 from UM.Scene.Selection import Selection
 from UM.Tool import Tool
@@ -25,6 +21,9 @@ from cura.CuraApplication import CuraApplication
 from .DisplacementJob import DisplacementJob
 from .MeshDisplaceOperation import MeshDisplaceOperation
 
+# Maximum estimated face count before we refuse to run (prevents OOM)
+_MAX_ESTIMATED_FACES = 5_000_000
+
 
 class BumpMeshTool(Tool):
     """Tool plugin that applies displacement/texture mapping to 3D model surfaces."""
@@ -33,6 +32,7 @@ class BumpMeshTool(Tool):
         NO_SELECTION = 0
         READY = 1
         PROCESSING = 2
+        ERROR = 3
 
     def __init__(self) -> None:
         super().__init__()
@@ -59,14 +59,16 @@ class BumpMeshTool(Tool):
 
         # State
         self._state: int = BumpMeshTool.State.NO_SELECTION
+        self._error_message: str = ""
         self._displacement_job: Optional[DisplacementJob] = None
-        self._original_mesh_cache: dict = {}  # node_id -> MeshData
+        # WeakKeyDictionary: entries auto-removed when node is garbage-collected
+        self._original_mesh_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
         self.setExposedProperties(
             "TexturePath", "ProjectionMode", "Amplitude",
             "ScaleU", "ScaleV", "OffsetU", "OffsetV", "Rotation",
             "SubdivisionLevel", "MaskAngle", "Smoothing",
-            "State", "HasTexture", "EstimatedVertices"
+            "State", "HasTexture", "EstimatedVertices", "ErrorMessage"
         )
 
         Selection.selectionChanged.connect(self._onSelectionChanged)
@@ -169,6 +171,9 @@ class BumpMeshTool(Tool):
     def getHasTexture(self) -> bool:
         return self._texture_data is not None
 
+    def getErrorMessage(self) -> str:
+        return self._error_message
+
     def getEstimatedVertices(self) -> int:
         node = self._getSelectedNode()
         if node is None:
@@ -198,11 +203,17 @@ class BumpMeshTool(Tool):
         img = QImage(file_path)
         if img.isNull():
             Logger.log("e", "Failed to load displacement map: %s", file_path)
+            self._error_message = "Failed to load image file."
+            self._state = BumpMeshTool.State.ERROR
+            self.propertyChanged.emit()
             return
 
         self._texture_image = img
         self._texture_path = file_path
         self._texture_data = self._imageToNumpyGrayscale(img)
+        self._error_message = ""
+        if self._state == BumpMeshTool.State.ERROR:
+            self._state = BumpMeshTool.State.READY
         self.propertyChanged.emit()
         Logger.log("i", "Loaded displacement map: %s (%dx%d)", file_path, img.width(), img.height())
 
@@ -219,10 +230,32 @@ class BumpMeshTool(Tool):
         if mesh is None:
             return
 
-        # Cache original mesh for undo if not already cached
-        node_id = id(node)
-        if node_id not in self._original_mesh_cache:
-            self._original_mesh_cache[node_id] = mesh
+        # OOM guard: refuse if estimated face count is too high
+        face_count = mesh.getFaceCount()
+        if face_count == 0 and mesh.getVertices() is not None:
+            face_count = len(mesh.getVertices()) // 3
+        estimated_faces = face_count * (4 ** self._subdivision_level)
+        if estimated_faces > _MAX_ESTIMATED_FACES:
+            self._error_message = (
+                "Too many faces (~%dM). Lower subdivision level or simplify mesh."
+                % (estimated_faces // 1_000_000)
+            )
+            self._state = BumpMeshTool.State.ERROR
+            self.propertyChanged.emit()
+            return
+
+        # Cache original mesh for undo (WeakKeyDictionary auto-cleans on node GC)
+        if node not in self._original_mesh_cache:
+            self._original_mesh_cache[node] = mesh
+
+        # Copy mesh data on main thread for thread safety
+        vertices = mesh.getVertices()
+        if vertices is None:
+            return
+        vertices = vertices.copy()
+        indices = mesh.getIndices()
+        if indices is not None:
+            indices = indices.copy()
 
         params = {
             "projection_mode": self._projection_mode,
@@ -238,9 +271,10 @@ class BumpMeshTool(Tool):
         }
 
         self._state = BumpMeshTool.State.PROCESSING
+        self._error_message = ""
         self.propertyChanged.emit()
 
-        self._displacement_job = DisplacementJob(node, self._texture_data, params)
+        self._displacement_job = DisplacementJob(node, vertices, indices, self._texture_data, params)
         self._displacement_job.finished.connect(self._onDisplacementFinished)
         self._displacement_job.start()
 
@@ -250,40 +284,66 @@ class BumpMeshTool(Tool):
         if node is None:
             return
 
-        node_id = id(node)
-        original = self._original_mesh_cache.get(node_id)
+        original = self._original_mesh_cache.get(node)
         if original is not None:
             current_mesh = node.getMeshData()
+            if current_mesh is None:
+                return
             op = MeshDisplaceOperation(node, current_mesh, original)
             op.push()
-            del self._original_mesh_cache[node_id]
+            del self._original_mesh_cache[node]
+            self._error_message = ""
+            if self._state == BumpMeshTool.State.ERROR:
+                self._state = BumpMeshTool.State.READY
+                self.propertyChanged.emit()
             CuraApplication.getInstance().getController().getScene().sceneChanged.emit(node)
 
     # --- Internal Methods ---
 
-    def _onDisplacementFinished(self, job: Job) -> None:
+    def _onDisplacementFinished(self, job) -> None:
         """Called when the background displacement job completes."""
         if job != self._displacement_job:
             return
 
         self._displacement_job = None
-        self._state = BumpMeshTool.State.READY
-        self.propertyChanged.emit()
+
+        error = job.getError()
+        if error:
+            self._state = BumpMeshTool.State.ERROR
+            self._error_message = error
+            self.propertyChanged.emit()
+            return
 
         result_mesh = job.getResultMesh()
         if result_mesh is None:
-            Logger.log("e", "Displacement job produced no result")
+            self._state = BumpMeshTool.State.ERROR
+            self._error_message = "Displacement produced no result."
+            self.propertyChanged.emit()
             return
 
         node = job.getNode()
         if node is None:
+            self._state = BumpMeshTool.State.READY
+            self.propertyChanged.emit()
+            return
+
+        # Verify node is still in the scene
+        scene = CuraApplication.getInstance().getController().getScene()
+        if node not in scene.getAllSceneNodes():
+            Logger.log("w", "BumpMesh: target node removed from scene during processing")
+            self._state = BumpMeshTool.State.READY
+            self.propertyChanged.emit()
             return
 
         old_mesh = node.getMeshData()
         op = MeshDisplaceOperation(node, old_mesh, result_mesh)
         op.push()
 
-        CuraApplication.getInstance().getController().getScene().sceneChanged.emit(node)
+        self._state = BumpMeshTool.State.READY
+        self._error_message = ""
+        self.propertyChanged.emit()
+
+        scene.sceneChanged.emit(node)
 
     def _getSelectedNode(self):
         """Get the currently selected scene node, or None."""
@@ -301,28 +361,31 @@ class BumpMeshTool(Tool):
         node = self._getSelectedNode()
         if node is not None and self._state != BumpMeshTool.State.PROCESSING:
             self._state = BumpMeshTool.State.READY
+            self._error_message = ""
         elif node is None:
             self._state = BumpMeshTool.State.NO_SELECTION
         self.propertyChanged.emit()
 
     @staticmethod
     def _imageToNumpyGrayscale(img: QImage) -> numpy.ndarray:
-        """Convert a QImage to a float32 grayscale numpy array [0, 1]."""
+        """Convert a QImage to a float32 grayscale numpy array [0, 1].
+
+        Uses vectorized numpy operations instead of per-pixel Python loops.
+        """
+        # Convert to a consistent 32-bit ARGB format
+        img = img.convertToFormat(QImage.Format.Format_RGB32)
         width = img.width()
         height = img.height()
 
-        # Convert to grayscale by sampling luminance from RGB
-        grayscale = numpy.zeros((height, width), dtype=numpy.float32)
-        for y in range(height):
-            for x in range(width):
-                pixel = img.pixel(x, y)
-                r = (pixel >> 16) & 0xFF
-                g = (pixel >> 8) & 0xFF
-                b = pixel & 0xFF
-                grayscale[y, x] = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        # Access raw pixel data as a numpy array
+        ptr = img.bits()
+        ptr.setsize(height * width * 4)
+        arr = numpy.frombuffer(ptr, dtype=numpy.uint8).reshape((height, width, 4)).copy()
 
+        # RGB32 layout is [B, G, R, A] on little-endian (Qt stores as 0xAARRGGBB)
+        b = arr[:, :, 0].astype(numpy.float32)
+        g = arr[:, :, 1].astype(numpy.float32)
+        r = arr[:, :, 2].astype(numpy.float32)
+
+        grayscale = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
         return grayscale
-
-    def event(self, event: Event) -> bool:
-        super().event(event)
-        return False
