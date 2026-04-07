@@ -1063,6 +1063,13 @@ class FEAInfillExtension(QObject, Extension):
             "volume_fraction": self._volume_fraction / 100.0,
         }
 
+        # Cancel any running analysis before starting a new one.
+        # Two concurrent spsolve calls deadlock on the GIL (SuperLU is
+        # partially Python-bound), so we must ensure only one job runs.
+        if hasattr(self, "_active_job") and self._active_job is not None:
+            self._active_job.requestCancel()
+            Logger.log("d", "FEA Infill: Cancelled previous analysis job before starting new one")
+
         job = FEASolveJob(node, bc_decorator, material, config)
         job.finished.connect(self._onFEAFinished)
         job.progress.connect(self._onFEAProgress)
