@@ -1,6 +1,7 @@
 # Copyright (c) 2025 BumpMesh Plugin
 # Released under the terms of the LGPLv3 or higher.
 
+import os
 import weakref
 from enum import IntEnum
 from typing import Optional
@@ -53,14 +54,16 @@ class BumpMeshTool(Tool):
         self._texture_data: Optional[numpy.ndarray] = None  # (H, W) float32 [0,1]
 
         # Displacement parameters
-        self._projection_mode: int = 0  # 0=Triplanar, 1=Cubic, 2=Cylindrical, 3=Spherical, 4=Planar
+        self._projection_mode: int = 0  # 0=Triplanar, 1=Cubic, 2=Cylindrical, 3=Spherical, 4-6=Planar
         self._amplitude: float = 1.0
         self._scale_u: float = 1.0
         self._scale_v: float = 1.0
         self._offset_u: float = 0.0
         self._offset_v: float = 0.0
         self._rotation: float = 0.0
-        self._subdivision_level: int = 1
+        self._subdivision_level: int = 2
+        self._subdivision_mode: int = 0  # 0=Uniform, 1=Adaptive
+        self._target_edge_length: float = 1.0  # mm, for adaptive mode
         self._mask_angle: float = 0.0
         self._smoothing: int = 0
 
@@ -72,9 +75,9 @@ class BumpMeshTool(Tool):
         # Preview state
         self._preview_active: bool = False
         self._has_unconfirmed_changes: bool = False
-        self._preview_original_mesh: Optional[MeshData] = None  # mesh before any preview
+        self._preview_original_mesh: Optional[MeshData] = None
         self._preview_node_ref: Optional[weakref.ref] = None
-        self._pending_preview: bool = False  # re-run preview after current job finishes
+        self._pending_preview: bool = False
 
         # Debounce timer for preview
         self._preview_timer = QTimer()
@@ -85,7 +88,8 @@ class BumpMeshTool(Tool):
         self.setExposedProperties(
             "TexturePath", "ProjectionMode", "Amplitude",
             "ScaleU", "ScaleV", "OffsetU", "OffsetV", "Rotation",
-            "SubdivisionLevel", "MaskAngle", "Smoothing",
+            "SubdivisionLevel", "SubdivisionMode", "TargetEdgeLength",
+            "MaskAngle", "Smoothing",
             "State", "HasTexture", "EstimatedVertices", "ErrorMessage",
             "HasUnconfirmedChanges"
         )
@@ -175,6 +179,26 @@ class BumpMeshTool(Tool):
             self.propertyChanged.emit()
             self._schedulePreview()
 
+    def getSubdivisionMode(self) -> int:
+        return self._subdivision_mode
+
+    def setSubdivisionMode(self, value: int) -> None:
+        value = int(value)
+        if value != self._subdivision_mode:
+            self._subdivision_mode = value
+            self.propertyChanged.emit()
+            self._schedulePreview()
+
+    def getTargetEdgeLength(self) -> float:
+        return self._target_edge_length
+
+    def setTargetEdgeLength(self, value: float) -> None:
+        value = float(value)
+        if value != self._target_edge_length:
+            self._target_edge_length = max(0.1, value)
+            self.propertyChanged.emit()
+            self._schedulePreview()
+
     def getMaskAngle(self) -> float:
         return self._mask_angle
 
@@ -219,7 +243,10 @@ class BumpMeshTool(Tool):
         face_count = mesh.getFaceCount()
         if face_count == 0 and mesh.getVertices() is not None:
             face_count = len(mesh.getVertices()) // 3
-        estimated_faces = face_count * (4 ** self._subdivision_level)
+        if self._subdivision_mode == 0:  # Uniform
+            estimated_faces = face_count * (4 ** self._subdivision_level)
+        else:  # Adaptive — rough estimate
+            estimated_faces = face_count * 4  # conservative estimate
         return estimated_faces * 3
 
     # --- Actions (triggered from QML) ---
@@ -235,6 +262,19 @@ class BumpMeshTool(Tool):
         if not file_path:
             return
 
+        self._loadTextureFromPath(file_path)
+
+    def loadBuiltinTexture(self, name: str) -> None:
+        """Load a built-in texture by name."""
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        texture_path = os.path.join(plugin_dir, "textures", name)
+        if not os.path.exists(texture_path):
+            Logger.log("e", "Built-in texture not found: %s", texture_path)
+            return
+        self._loadTextureFromPath(texture_path)
+
+    def _loadTextureFromPath(self, file_path: str) -> None:
+        """Load a displacement map image from a file path."""
         img = QImage(file_path)
         if img.isNull():
             Logger.log("e", "Failed to load displacement map: %s", file_path)
@@ -249,10 +289,20 @@ class BumpMeshTool(Tool):
         self._error_message = ""
         if self._state == BumpMeshTool.State.ERROR:
             self._state = BumpMeshTool.State.READY
-        self.propertyChanged.emit()
         Logger.log("i", "Loaded displacement map: %s (%dx%d)", file_path, img.width(), img.height())
 
+        # Auto-compute sensible parameters based on mesh and texture
+        self._autoComputeParameters()
+
+        self.propertyChanged.emit()
+
         # Auto-run preview with the new texture
+        self._schedulePreview()
+
+    def autoComputeParameters(self) -> None:
+        """Recalculate auto parameters (callable from QML)."""
+        self._autoComputeParameters()
+        self.propertyChanged.emit()
         self._schedulePreview()
 
     def confirmDisplacement(self) -> None:
@@ -268,11 +318,9 @@ class BumpMeshTool(Tool):
         if current_mesh is None:
             return
 
-        # Push a single undo operation: original -> confirmed result
         op = MeshDisplaceOperation(node, self._preview_original_mesh, current_mesh)
         op.push()
 
-        # Update preview baseline to the confirmed state
         self._preview_original_mesh = current_mesh
         self._has_unconfirmed_changes = False
         self.propertyChanged.emit()
@@ -282,6 +330,79 @@ class BumpMeshTool(Tool):
         self._preview_timer.stop()
         self._pending_preview = False
         self._revertPreview()
+
+    # --- Auto-compute ---
+
+    def _autoComputeParameters(self) -> None:
+        """Calculate sensible default parameters from the current mesh and texture."""
+        node = self._getPreviewNode()
+        if node is None:
+            node = self._getSelectedNode()
+        if node is None:
+            return
+
+        mesh = self._preview_original_mesh if self._preview_original_mesh else node.getMeshData()
+        if mesh is None:
+            return
+
+        vertices = mesh.getVertices()
+        if vertices is None or len(vertices) == 0:
+            return
+
+        # Mesh bounding box
+        bbox_min = vertices.min(axis=0)
+        bbox_max = vertices.max(axis=0)
+        bbox_size = bbox_max - bbox_min
+        bbox_diagonal = float(numpy.linalg.norm(bbox_size))
+
+        if bbox_diagonal < 0.01:
+            return
+
+        # Face count
+        face_count = mesh.getFaceCount()
+        if face_count == 0:
+            face_count = len(vertices) // 3
+
+        # Auto amplitude: ~1-2% of bbox diagonal, clamped
+        self._amplitude = round(float(numpy.clip(bbox_diagonal * 0.015, 0.2, 3.0)), 1)
+
+        # Auto scale: target ~3-5 texture repeats across the object
+        auto_scale = max(1.0, bbox_diagonal / 15.0)
+
+        # Texture aspect ratio compensation
+        if self._texture_image is not None and self._texture_image.height() > 0:
+            tex_aspect = self._texture_image.width() / self._texture_image.height()
+            self._scale_u = round(auto_scale, 1)
+            self._scale_v = round(auto_scale / tex_aspect, 1)
+        else:
+            self._scale_u = round(auto_scale, 1)
+            self._scale_v = round(auto_scale, 1)
+
+        # Auto subdivision: based on average edge length vs desired detail
+        if face_count > 0:
+            # Approximate average edge length from face count and surface area
+            approx_face_area = (bbox_size[0] * bbox_size[1] + bbox_size[1] * bbox_size[2] +
+                                bbox_size[0] * bbox_size[2]) * 2.0 / max(face_count, 1)
+            avg_edge_length = float(numpy.sqrt(max(approx_face_area, 0.001) * 2.0))
+
+            # Target: edges small enough to resolve the displacement detail
+            target_edge = max(0.3, self._amplitude * 0.4)
+
+            # Calculate uniform subdivision level needed
+            level = 0
+            for lv in range(5):
+                if avg_edge_length / (2 ** lv) <= target_edge:
+                    level = lv
+                    break
+                level = lv
+            self._subdivision_level = min(level, 3)
+
+            # Adaptive target edge length
+            self._target_edge_length = round(max(0.2, target_edge), 1)
+
+        Logger.log("i", "Auto-computed: amplitude=%.1f, scale=%.1f/%.1f, subdiv=%d, edge=%.1f",
+                   self._amplitude, self._scale_u, self._scale_v,
+                   self._subdivision_level, self._target_edge_length)
 
     # --- Event handling ---
 
@@ -298,7 +419,6 @@ class BumpMeshTool(Tool):
     # --- Internal: Preview lifecycle ---
 
     def _onToolActivated(self) -> None:
-        """Cache the current mesh as the preview baseline."""
         self._preview_active = True
         node = self._getSelectedNode()
         if node is not None:
@@ -306,7 +426,6 @@ class BumpMeshTool(Tool):
             self._preview_node_ref = weakref.ref(node)
 
     def _onToolDeactivated(self) -> None:
-        """Revert unconfirmed preview changes when leaving the tool."""
         self._preview_timer.stop()
         self._pending_preview = False
         self._preview_active = False
@@ -318,7 +437,6 @@ class BumpMeshTool(Tool):
         self._preview_node_ref = None
 
     def _revertPreview(self) -> None:
-        """Restore the mesh to its pre-preview state (no undo operation)."""
         node = self._getPreviewNode()
         if node is None or self._preview_original_mesh is None:
             return
@@ -332,7 +450,6 @@ class BumpMeshTool(Tool):
         CuraApplication.getInstance().getController().getScene().sceneChanged.emit(node)
 
     def _getPreviewNode(self) -> Optional[object]:
-        """Get the node being previewed, or None if it was garbage-collected."""
         if self._preview_node_ref is not None:
             return self._preview_node_ref()
         return None
@@ -340,26 +457,22 @@ class BumpMeshTool(Tool):
     # --- Internal: Preview scheduling ---
 
     def _schedulePreview(self) -> None:
-        """Schedule a preview update after debounce delay."""
         if not self._preview_active or self._texture_data is None:
             return
         if self._getPreviewNode() is None:
             return
 
         if self._state == BumpMeshTool.State.PROCESSING:
-            # A job is running — flag to re-run when it finishes
             self._pending_preview = True
             return
 
         self._preview_timer.start()
 
     def _runPreview(self) -> None:
-        """Run the displacement pipeline as a preview (result set directly, no undo op)."""
         node = self._getPreviewNode()
         if node is None or self._texture_data is None:
             return
 
-        # Always displace from the ORIGINAL cached mesh, not the current preview
         mesh = self._preview_original_mesh
         if mesh is None:
             return
@@ -368,17 +481,19 @@ class BumpMeshTool(Tool):
         face_count = mesh.getFaceCount()
         if face_count == 0 and mesh.getVertices() is not None:
             face_count = len(mesh.getVertices()) // 3
-        estimated_faces = face_count * (4 ** self._subdivision_level)
+        if self._subdivision_mode == 0:  # Uniform
+            estimated_faces = face_count * (4 ** self._subdivision_level)
+        else:
+            estimated_faces = face_count * 4  # rough estimate for adaptive
         if estimated_faces > _MAX_ESTIMATED_FACES:
             self._error_message = (
-                "Too many faces (~%dM). Lower subdivision level or simplify mesh."
+                "Too many faces (~%dM). Lower subdivision or simplify mesh."
                 % (estimated_faces // 1_000_000)
             )
             self._state = BumpMeshTool.State.ERROR
             self.propertyChanged.emit()
             return
 
-        # Copy mesh data on main thread for thread safety
         vertices = mesh.getVertices()
         if vertices is None:
             return
@@ -396,6 +511,8 @@ class BumpMeshTool(Tool):
             "offset_v": self._offset_v,
             "rotation": self._rotation,
             "subdivision_level": self._subdivision_level,
+            "subdivision_mode": self._subdivision_mode,
+            "target_edge_length": self._target_edge_length,
             "mask_angle": self._mask_angle,
             "smoothing": self._smoothing,
         }
@@ -409,7 +526,6 @@ class BumpMeshTool(Tool):
         self._displacement_job.start()
 
     def _onPreviewFinished(self, job) -> None:
-        """Handle preview job completion — set mesh directly (no undo operation)."""
         if job != self._displacement_job:
             return
 
@@ -435,7 +551,6 @@ class BumpMeshTool(Tool):
             self.propertyChanged.emit()
             return
 
-        # Set mesh directly (no undo operation — this is a preview)
         node.setMeshData(result_mesh)
         self._has_unconfirmed_changes = True
         self._error_message = ""
@@ -443,7 +558,6 @@ class BumpMeshTool(Tool):
 
         CuraApplication.getInstance().getController().getScene().sceneChanged.emit(node)
 
-        # If parameters changed during processing, run another preview
         if self._pending_preview:
             self._pending_preview = False
             self._schedulePreview()
@@ -451,7 +565,6 @@ class BumpMeshTool(Tool):
     # --- Internal: Utilities ---
 
     def _getSelectedNode(self):
-        """Get the currently selected scene node, or None."""
         if not Selection.hasSelection():
             return None
         if Selection.getCount() != 1:
@@ -462,15 +575,12 @@ class BumpMeshTool(Tool):
         return node
 
     def _onSelectionChanged(self) -> None:
-        """Update preview baseline when selection changes."""
         if self._state == BumpMeshTool.State.PROCESSING:
             return
 
-        # If selection changes while we have unconfirmed changes, revert old node first
         if self._has_unconfirmed_changes:
             self._revertPreview()
 
-        # Set up preview for the new selection
         node = self._getSelectedNode()
         if node is not None and self._preview_active:
             self._preview_original_mesh = node.getMeshData()
@@ -485,10 +595,7 @@ class BumpMeshTool(Tool):
 
     @staticmethod
     def _imageToNumpyGrayscale(img: QImage) -> numpy.ndarray:
-        """Convert a QImage to a float32 grayscale numpy array [0, 1].
-
-        Uses vectorized numpy operations instead of per-pixel Python loops.
-        """
+        """Convert a QImage to a float32 grayscale numpy array [0, 1]."""
         img = img.convertToFormat(QImage.Format.Format_RGB32)
         width = img.width()
         height = img.height()
@@ -497,7 +604,6 @@ class BumpMeshTool(Tool):
         ptr.setsize(height * width * 4)
         arr = numpy.frombuffer(ptr, dtype=numpy.uint8).reshape((height, width, 4)).copy()
 
-        # RGB32 layout is [B, G, R, A] on little-endian (Qt stores as 0xAARRGGBB)
         b = arr[:, :, 0].astype(numpy.float32)
         g = arr[:, :, 1].astype(numpy.float32)
         r = arr[:, :, 2].astype(numpy.float32)

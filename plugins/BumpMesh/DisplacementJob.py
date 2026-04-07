@@ -84,15 +84,25 @@ class DisplacementJob(Job):
             indices = numpy.arange(num_verts, dtype=numpy.int32).reshape(-1, 3)
 
         subdivision_level = self._params.get("subdivision_level", 0)
+        subdivision_mode = self._params.get("subdivision_mode", 0)
+        target_edge_length = self._params.get("target_edge_length", 1.0)
         projection_mode = self._params.get("projection_mode", 0)
         amplitude = self._params.get("amplitude", 1.0)
         mask_angle = self._params.get("mask_angle", 0.0)
         smoothing = self._params.get("smoothing", 0)
 
         # Step 1: Subdivide mesh (with shared vertices for correct topology)
-        if subdivision_level > 0:
+        if subdivision_mode == 0 and subdivision_level > 0:
+            # Uniform subdivision
             message.setProgress(5)
             vertices, indices = MeshSubdivider.subdivide(vertices, indices, subdivision_level)
+            Job.yieldThread()
+        elif subdivision_mode == 1:
+            # Adaptive subdivision
+            message.setProgress(5)
+            vertices, indices = MeshSubdivider.subdivide_adaptive(
+                vertices, indices, target_edge_length
+            )
             Job.yieldThread()
 
         message.setProgress(20)

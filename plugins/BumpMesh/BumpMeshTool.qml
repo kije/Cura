@@ -13,14 +13,14 @@ Item
     id: base
 
     width: childrenRect.width
-    height: Math.min(scrollView.contentHeight, 450)
+    height: Math.min(scrollView.contentHeight, 500)
 
     UM.I18nCatalog { id: catalog; name: "cura" }
 
-    // States: 1=READY, 2=PROCESSING, 3=ERROR
     property var currentState: UM.Controller.properties.getValue("State") ?? 1
     property var hasTexture: UM.Controller.properties.getValue("HasTexture") ?? false
     property var hasUnconfirmedChanges: UM.Controller.properties.getValue("HasUnconfirmedChanges") ?? false
+    property var subdivisionMode: UM.Controller.properties.getValue("SubdivisionMode") ?? 0
 
     ScrollView
     {
@@ -42,13 +42,25 @@ Item
                 font: UM.Theme.getFont("default_bold")
             }
 
-            Cura.SecondaryButton
+            RowLayout
             {
-                id: loadTextureButton
                 width: parent.width
-                text: catalog.i18nc("@action:button", "Load Texture...")
-                enabled: currentState !== 2
-                onClicked: UM.Controller.triggerAction("loadTexture")
+                spacing: UM.Theme.getSize("default_margin").width
+
+                Cura.SecondaryButton
+                {
+                    Layout.fillWidth: true
+                    text: catalog.i18nc("@action:button", "Load Texture...")
+                    enabled: currentState !== 2
+                    onClicked: UM.Controller.triggerAction("loadTexture")
+                }
+
+                Cura.SecondaryButton
+                {
+                    text: catalog.i18nc("@action:button", "Auto")
+                    enabled: hasTexture && currentState !== 2
+                    onClicked: UM.Controller.triggerAction("autoComputeParameters")
+                }
             }
 
             UM.Label
@@ -70,7 +82,7 @@ Item
             UM.Label
             {
                 visible: !hasTexture
-                text: catalog.i18nc("@label", "Load a displacement map texture to begin.")
+                text: catalog.i18nc("@label", "Load a texture to begin. Parameters auto-adjust to your model.")
                 color: UM.Theme.getColor("text_inactive")
             }
 
@@ -110,19 +122,18 @@ Item
                 text:
                 {
                     var mode = projectionCombo.currentIndex
-                    if (mode === 0) return catalog.i18nc("@label", "Blends 3 planar projections. Best for complex shapes.")
-                    if (mode === 1) return catalog.i18nc("@label", "Projects from 6 box faces by dominant normal.")
-                    if (mode === 2) return catalog.i18nc("@label", "Wraps around the Y axis. Good for cylindrical parts.")
-                    if (mode === 3) return catalog.i18nc("@label", "Projects from center outward. Good for round objects.")
-                    if (mode === 4) return catalog.i18nc("@label", "Flat projection onto the XZ plane.")
-                    if (mode === 5) return catalog.i18nc("@label", "Flat projection onto the XY plane.")
-                    if (mode === 6) return catalog.i18nc("@label", "Flat projection onto the YZ plane.")
+                    if (mode === 0) return catalog.i18nc("@label", "Blends 3 projections. Best for complex shapes.")
+                    if (mode === 1) return catalog.i18nc("@label", "Box projection by dominant normal.")
+                    if (mode === 2) return catalog.i18nc("@label", "Wraps around Y axis. Good for cylinders.")
+                    if (mode === 3) return catalog.i18nc("@label", "From center outward. Good for spheres.")
+                    if (mode === 4) return catalog.i18nc("@label", "Flat projection onto XZ plane.")
+                    if (mode === 5) return catalog.i18nc("@label", "Flat projection onto XY plane.")
+                    if (mode === 6) return catalog.i18nc("@label", "Flat projection onto YZ plane.")
                     return ""
                 }
                 color: UM.Theme.getColor("text_inactive")
             }
 
-            // Line separator
             Rectangle
             {
                 width: parent.width
@@ -150,22 +161,19 @@ Item
                     value: UM.Controller.properties.getValue("Amplitude") ?? 1.0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("Amplitude", amplitudeSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("Amplitude", amplitudeSlider.value)
                     }
                 }
                 UM.Label
                 {
-                    text: amplitudeSlider.value.toFixed(1)
-                    Layout.preferredWidth: 35
+                    text: amplitudeSlider.value.toFixed(1) + " mm"
+                    Layout.preferredWidth: 50
                 }
             }
 
             UM.Label
             {
-                text: catalog.i18nc("@label", "Scale U")
+                text: catalog.i18nc("@label", "Scale U / V")
             }
 
             RowLayout
@@ -177,27 +185,19 @@ Item
                     Layout.fillWidth: true
                     indicatorVisible: false
                     from: 0.1
-                    to: 20.0
+                    to: 50.0
                     stepSize: 0.1
                     value: UM.Controller.properties.getValue("ScaleU") ?? 1.0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("ScaleU", scaleUSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("ScaleU", scaleUSlider.value)
                     }
                 }
                 UM.Label
                 {
                     text: scaleUSlider.value.toFixed(1)
-                    Layout.preferredWidth: 35
+                    Layout.preferredWidth: 30
                 }
-            }
-
-            UM.Label
-            {
-                text: catalog.i18nc("@label", "Scale V")
             }
 
             RowLayout
@@ -209,27 +209,24 @@ Item
                     Layout.fillWidth: true
                     indicatorVisible: false
                     from: 0.1
-                    to: 20.0
+                    to: 50.0
                     stepSize: 0.1
                     value: UM.Controller.properties.getValue("ScaleV") ?? 1.0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("ScaleV", scaleVSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("ScaleV", scaleVSlider.value)
                     }
                 }
                 UM.Label
                 {
                     text: scaleVSlider.value.toFixed(1)
-                    Layout.preferredWidth: 35
+                    Layout.preferredWidth: 30
                 }
             }
 
             UM.Label
             {
-                text: catalog.i18nc("@label", "Offset U")
+                text: catalog.i18nc("@label", "Offset U / V")
             }
 
             RowLayout
@@ -246,22 +243,14 @@ Item
                     value: UM.Controller.properties.getValue("OffsetU") ?? 0.0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("OffsetU", offsetUSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("OffsetU", offsetUSlider.value)
                     }
                 }
                 UM.Label
                 {
                     text: offsetUSlider.value.toFixed(1)
-                    Layout.preferredWidth: 35
+                    Layout.preferredWidth: 30
                 }
-            }
-
-            UM.Label
-            {
-                text: catalog.i18nc("@label", "Offset V")
             }
 
             RowLayout
@@ -278,16 +267,13 @@ Item
                     value: UM.Controller.properties.getValue("OffsetV") ?? 0.0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("OffsetV", offsetVSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("OffsetV", offsetVSlider.value)
                     }
                 }
                 UM.Label
                 {
                     text: offsetVSlider.value.toFixed(1)
-                    Layout.preferredWidth: 35
+                    Layout.preferredWidth: 30
                 }
             }
 
@@ -310,10 +296,7 @@ Item
                     value: UM.Controller.properties.getValue("Rotation") ?? 0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("Rotation", rotationSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("Rotation", rotationSlider.value)
                     }
                 }
                 UM.Label
@@ -323,7 +306,6 @@ Item
                 }
             }
 
-            // Line separator
             Rectangle
             {
                 width: parent.width
@@ -334,12 +316,27 @@ Item
             // === Section: Subdivision ===
             UM.Label
             {
-                text: catalog.i18nc("@label", "Subdivision Level")
+                text: catalog.i18nc("@label", "Subdivision")
+                font: UM.Theme.getFont("default_bold")
             }
 
+            Cura.ComboBox
+            {
+                id: subdivModeCombo
+                width: parent.width
+                model: [
+                    catalog.i18nc("@item:inlistbox", "Uniform (Level)"),
+                    catalog.i18nc("@item:inlistbox", "Adaptive (Edge Length)")
+                ]
+                currentIndex: subdivisionMode
+                onCurrentIndexChanged: UM.Controller.setProperty("SubdivisionMode", currentIndex)
+            }
+
+            // Uniform mode: level slider
             RowLayout
             {
                 width: parent.width
+                visible: subdivisionMode === 0
                 UM.Slider
                 {
                     id: subdivisionSlider
@@ -348,27 +345,43 @@ Item
                     from: 0
                     to: 4
                     stepSize: 1
-                    value: UM.Controller.properties.getValue("SubdivisionLevel") ?? 1
+                    value: UM.Controller.properties.getValue("SubdivisionLevel") ?? 2
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("SubdivisionLevel", subdivisionSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("SubdivisionLevel", subdivisionSlider.value)
                     }
                 }
                 UM.Label
                 {
-                    text: subdivisionSlider.value.toFixed(0)
-                    Layout.preferredWidth: 20
+                    text: catalog.i18nc("@label", "Level %1").arg(subdivisionSlider.value.toFixed(0))
+                    Layout.preferredWidth: 50
                 }
             }
 
-            UM.Label
+            // Adaptive mode: edge length slider
+            RowLayout
             {
-                visible: subdivisionSlider.value == 0
-                text: catalog.i18nc("@label", "0 = original mesh density (no added detail)")
-                color: UM.Theme.getColor("text_inactive")
+                width: parent.width
+                visible: subdivisionMode === 1
+                UM.Slider
+                {
+                    id: edgeLengthSlider
+                    Layout.fillWidth: true
+                    indicatorVisible: false
+                    from: 0.1
+                    to: 5.0
+                    stepSize: 0.1
+                    value: UM.Controller.properties.getValue("TargetEdgeLength") ?? 1.0
+                    onPressedChanged: function(pressed)
+                    {
+                        if (!pressed) UM.Controller.setProperty("TargetEdgeLength", edgeLengthSlider.value)
+                    }
+                }
+                UM.Label
+                {
+                    text: edgeLengthSlider.value.toFixed(1) + " mm"
+                    Layout.preferredWidth: 50
+                }
             }
 
             UM.Label
@@ -387,14 +400,6 @@ Item
                 color: estVerts > 500000 ? UM.Theme.getColor("warning") : UM.Theme.getColor("text_inactive")
             }
 
-            UM.Label
-            {
-                visible: vertexEstimateLabel.estVerts > 500000
-                text: catalog.i18nc("@label", "High vertex counts may be slow or run out of memory.")
-                color: UM.Theme.getColor("warning")
-            }
-
-            // Line separator
             Rectangle
             {
                 width: parent.width
@@ -405,7 +410,7 @@ Item
             // === Section: Masking & Smoothing ===
             UM.Label
             {
-                text: catalog.i18nc("@label", "Angle Mask (degrees)")
+                text: catalog.i18nc("@label", "Angle Mask")
             }
 
             RowLayout
@@ -422,30 +427,21 @@ Item
                     value: UM.Controller.properties.getValue("MaskAngle") ?? 0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("MaskAngle", maskAngleSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("MaskAngle", maskAngleSlider.value)
                     }
                 }
                 UM.Label
                 {
-                    text: maskAngleSlider.value.toFixed(0) + "\u00B0"
-                    Layout.preferredWidth: 35
+                    text: maskAngleSlider.value == 0 ?
+                        catalog.i18nc("@label", "Off") :
+                        maskAngleSlider.value.toFixed(0) + "\u00B0"
+                    Layout.preferredWidth: 30
                 }
             }
 
             UM.Label
             {
-                text: maskAngleSlider.value == 0 ?
-                    catalog.i18nc("@label", "(no masking \u2014 displace all surfaces)") :
-                    catalog.i18nc("@label", "(only surfaces within %1\u00B0 of up)").arg(maskAngleSlider.value.toFixed(0))
-                color: UM.Theme.getColor("text_inactive")
-            }
-
-            UM.Label
-            {
-                text: catalog.i18nc("@label", "Texture Smoothing (blur passes)")
+                text: catalog.i18nc("@label", "Smoothing")
             }
 
             RowLayout
@@ -462,20 +458,18 @@ Item
                     value: UM.Controller.properties.getValue("Smoothing") ?? 0
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed)
-                        {
-                            UM.Controller.setProperty("Smoothing", smoothingSlider.value)
-                        }
+                        if (!pressed) UM.Controller.setProperty("Smoothing", smoothingSlider.value)
                     }
                 }
                 UM.Label
                 {
-                    text: smoothingSlider.value.toFixed(0)
-                    Layout.preferredWidth: 20
+                    text: smoothingSlider.value == 0 ?
+                        catalog.i18nc("@label", "Off") :
+                        smoothingSlider.value.toFixed(0)
+                    Layout.preferredWidth: 25
                 }
             }
 
-            // Line separator
             Rectangle
             {
                 width: parent.width
@@ -483,7 +477,7 @@ Item
                 color: UM.Theme.getColor("lining")
             }
 
-            // === Processing indicator (inline, not overlay) ===
+            // === Processing indicator ===
             RowLayout
             {
                 visible: currentState === 2
@@ -492,7 +486,6 @@ Item
                 UM.ColorImage
                 {
                     id: loadingIndicator
-
                     Layout.preferredWidth: UM.Theme.getSize("section_icon").width
                     Layout.preferredHeight: UM.Theme.getSize("section_icon").height
                     source: UM.Theme.getIcon("ArrowDoubleCircleRight")
