@@ -40,6 +40,7 @@ class ForceDirectionHandle(ToolHandle):
 
         self._center = Vector(0, 0, 0)
         self._visible = False
+        self.setEnabled(False)  # Start disabled — no mesh yet
 
     @property
     def center(self) -> Vector:
