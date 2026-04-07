@@ -52,6 +52,7 @@ class BCHighlightHandle(ToolHandle):
         mb = MeshBuilder()
         mesh_data = node.getMeshData()
         if mesh_data is None:
+            self.setEnabled(False)
             self.setSolidMesh(mb.build())
             return
 
@@ -59,12 +60,14 @@ class BCHighlightHandle(ToolHandle):
         indices = mesh_data.getIndices()  # (T, 3) int32 or None
 
         if verts is None:
+            self.setEnabled(False)
             self.setSolidMesh(mb.build())
             return
 
         # Position the handle in world space so local-coord painting aligns.
-        self.setEnabled(True)
         self.setTransformation(node.getWorldTransformation())
+        # setEnabled(True) is deferred until we have actual faces to paint
+        # to avoid "RenderBatch.addItem without mesh" warnings on every zoom
 
         # In later phases, reduce highlight opacity to be less distracting
         dim = phase != "define"
@@ -146,7 +149,10 @@ class BCHighlightHandle(ToolHandle):
             for face_idx in paint_hover:
                 self._paint_face(mb, verts, indices, face_idx, shadow)
 
-        self.setSolidMesh(mb.build())
+        mesh = mb.build()
+        has_faces = mesh.getVertices() is not None and len(mesh.getVertices()) > 0
+        self.setEnabled(has_faces)
+        self.setSolidMesh(mesh)
 
     def clear(self) -> None:
         """Remove all highlight geometry."""
