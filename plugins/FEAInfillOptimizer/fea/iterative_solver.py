@@ -254,7 +254,7 @@ class IterativeFEASolver:
         # Timeout in seconds for a single simu.Solve() call.  If it does not
         # return within this budget the iteration loop is aborted with an error
         # log rather than hanging the process indefinitely.
-        _SOLVE_TIMEOUT = 60.0
+        _SOLVE_TIMEOUT = 300.0
 
         # Track the previous Simulations.Elastic instance so we can remove it
         # from the mesh observer list before creating the next one.

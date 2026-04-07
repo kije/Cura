@@ -1795,7 +1795,7 @@ Item
                                 onValueModified: UM.Controller.setProperty("NumZones", value) }
 
                             UM.Label { text: catalog.i18nc("@label", "Analysis passes"); font: UM.Theme.getFont("small") }
-                            SpinBox { from: 1; to: 10; value: 5; stepSize: 1; Layout.fillWidth: true
+                            SpinBox { from: 1; to: 50; value: 20; stepSize: 1; Layout.fillWidth: true
                                 onValueModified: UM.Controller.setProperty("MaxIterations", value) }
 
                             UM.Label { text: catalog.i18nc("@label", "Layer bonding (%)"); font: UM.Theme.getFont("small") }
