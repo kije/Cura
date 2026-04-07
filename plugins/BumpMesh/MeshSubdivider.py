@@ -3,9 +3,12 @@
 
 import numpy
 
+# Safety cap for adaptive subdivision
+_MAX_ADAPTIVE_TRIANGLES = 10_000_000
+
 
 def subdivide(vertices: numpy.ndarray, indices: numpy.ndarray, levels: int = 1) -> tuple:
-    """Perform midpoint subdivision on a triangle mesh.
+    """Perform uniform midpoint subdivision on a triangle mesh.
 
     Each triangle is split into 4 sub-triangles by inserting midpoints on each edge.
     Shared edges produce shared midpoints (no duplicate vertices).
@@ -20,33 +23,60 @@ def subdivide(vertices: numpy.ndarray, indices: numpy.ndarray, levels: int = 1) 
     return vertices, indices
 
 
+def subdivide_adaptive(
+    vertices: numpy.ndarray,
+    indices: numpy.ndarray,
+    target_edge_length: float,
+    max_triangles: int = _MAX_ADAPTIVE_TRIANGLES,
+    max_iterations: int = 20
+) -> tuple:
+    """Perform adaptive subdivision based on target edge length.
+
+    Only splits edges that exceed the target length. Per-triangle, the number of
+    flagged edges (0/1/2/3) determines the split pattern:
+      0 flagged: keep unchanged
+      1 flagged: split into 2 triangles
+      2 flagged: split into 3 triangles
+      3 flagged: split into 4 triangles (standard midpoint)
+
+    :param vertices: (N, 3) float32 array of vertex positions.
+    :param indices: (M, 3) int32 array of triangle indices.
+    :param target_edge_length: Maximum edge length in mm before splitting.
+    :param max_triangles: Safety cap on total triangle count.
+    :param max_iterations: Maximum subdivision passes.
+    :return: Tuple of (new_vertices, new_indices).
+    """
+    for _ in range(max_iterations):
+        if len(indices) >= max_triangles:
+            break
+
+        vertices, indices, any_split = _subdivide_adaptive_once(
+            vertices, indices, target_edge_length, max_triangles
+        )
+        if not any_split:
+            break
+
+    return vertices, indices
+
+
 def _subdivide_once(vertices: numpy.ndarray, indices: numpy.ndarray) -> tuple:
-    """Single level of midpoint subdivision (fully vectorized)."""
+    """Single level of uniform midpoint subdivision (fully vectorized)."""
     num_verts = len(vertices)
     num_faces = len(indices)
 
-    # Build all 3 edges per face, each sorted so smaller index comes first
-    # Edge order per face: (v0,v1), (v1,v2), (v0,v2)
     edge_pairs = numpy.stack([
         indices[:, [0, 1]],
         indices[:, [1, 2]],
         indices[:, [0, 2]],
     ], axis=1)  # (M, 3, 2)
 
-    # Sort each edge so (min, max) for deduplication
     edge_pairs = numpy.sort(edge_pairs, axis=2)
-    all_edges = edge_pairs.reshape(-1, 2)  # (M*3, 2)
+    all_edges = edge_pairs.reshape(-1, 2)
 
-    # Find unique edges and map each of the M*3 edges back to its unique index
     unique_edges, edge_inverse = numpy.unique(all_edges, axis=0, return_inverse=True)
-    num_unique_edges = len(unique_edges)
 
-    # Compute midpoints for each unique edge
     midpoints = (vertices[unique_edges[:, 0]] + vertices[unique_edges[:, 1]]) * 0.5
 
-    # Assign new vertex indices starting after existing vertices
-    # edge_inverse maps each of the M*3 edges to its unique edge index
-    # Reshape to (M, 3) where columns correspond to edge01, edge12, edge02
     midpoint_global_indices = (num_verts + edge_inverse).astype(numpy.int32)
     face_midpoints = midpoint_global_indices.reshape(num_faces, 3)
 
@@ -58,7 +88,6 @@ def _subdivide_once(vertices: numpy.ndarray, indices: numpy.ndarray) -> tuple:
     v1 = indices[:, 1]
     v2 = indices[:, 2]
 
-    # Build 4 sub-triangles per face
     new_indices = numpy.empty((num_faces * 4, 3), dtype=numpy.int32)
     new_indices[0::4] = numpy.column_stack([v0, m01, m02])
     new_indices[1::4] = numpy.column_stack([m01, v1, m12])
@@ -68,3 +97,158 @@ def _subdivide_once(vertices: numpy.ndarray, indices: numpy.ndarray) -> tuple:
     all_vertices = numpy.vstack([vertices, midpoints.astype(numpy.float32)])
 
     return all_vertices, new_indices
+
+
+def _subdivide_adaptive_once(
+    vertices: numpy.ndarray,
+    indices: numpy.ndarray,
+    target_edge_length: float,
+    max_triangles: int
+) -> tuple:
+    """Single pass of adaptive subdivision.
+
+    Returns (new_vertices, new_indices, any_split).
+    """
+    num_verts = len(vertices)
+    num_faces = len(indices)
+
+    # Build edges: (v0,v1), (v1,v2), (v0,v2) per face
+    edge_pairs = numpy.stack([
+        indices[:, [0, 1]],
+        indices[:, [1, 2]],
+        indices[:, [0, 2]],
+    ], axis=1)  # (M, 3, 2)
+
+    # Compute edge lengths
+    e01 = numpy.linalg.norm(vertices[indices[:, 1]] - vertices[indices[:, 0]], axis=1)
+    e12 = numpy.linalg.norm(vertices[indices[:, 2]] - vertices[indices[:, 1]], axis=1)
+    e02 = numpy.linalg.norm(vertices[indices[:, 2]] - vertices[indices[:, 0]], axis=1)
+    edge_lengths = numpy.stack([e01, e12, e02], axis=1)  # (M, 3)
+
+    # Flag edges exceeding target length
+    flags = edge_lengths > target_edge_length  # (M, 3) bool
+    flag_counts = flags.sum(axis=1)  # (M,) int: 0, 1, 2, or 3
+
+    if flag_counts.max() == 0:
+        return vertices, indices, False
+
+    # Estimate output triangle count
+    output_estimate = (
+        (flag_counts == 0).sum() +
+        (flag_counts == 1).sum() * 2 +
+        (flag_counts == 2).sum() * 3 +
+        (flag_counts == 3).sum() * 4
+    )
+    if output_estimate > max_triangles:
+        return vertices, indices, False
+
+    # Sort edges for deduplication
+    sorted_edges = numpy.sort(edge_pairs, axis=2)
+    all_edges = sorted_edges.reshape(-1, 2)
+    all_flags = flags.ravel()  # (M*3,)
+
+    # Find unique edges that need midpoints (only flagged ones)
+    flagged_edges = all_edges[all_flags]
+    if len(flagged_edges) == 0:
+        return vertices, indices, False
+
+    unique_flagged, inv_flagged = numpy.unique(flagged_edges, axis=0, return_inverse=True)
+    midpoints = (vertices[unique_flagged[:, 0]] + vertices[unique_flagged[:, 1]]) * 0.5
+
+    # Build a mapping from edge key to midpoint index
+    # For the full all_edges array, create midpoint index or -1
+    midpoint_indices = numpy.full(len(all_edges), -1, dtype=numpy.int32)
+    flagged_positions = numpy.where(all_flags)[0]
+    midpoint_indices[flagged_positions] = (num_verts + inv_flagged).astype(numpy.int32)
+
+    # Reshape to (M, 3): per-face midpoint indices (-1 if not split)
+    face_midpoints = midpoint_indices.reshape(num_faces, 3)
+
+    # Process each group by flag count
+    new_tris_list = []
+
+    # Group 0: unchanged triangles
+    mask_0 = flag_counts == 0
+    if mask_0.any():
+        new_tris_list.append(indices[mask_0])
+
+    # Group 3: full midpoint subdivision (4 sub-tris)
+    mask_3 = flag_counts == 3
+    if mask_3.any():
+        tri3 = indices[mask_3]
+        fm3 = face_midpoints[mask_3]
+        v0, v1, v2 = tri3[:, 0], tri3[:, 1], tri3[:, 2]
+        m01, m12, m02 = fm3[:, 0], fm3[:, 1], fm3[:, 2]
+        t0 = numpy.column_stack([v0, m01, m02])
+        t1 = numpy.column_stack([m01, v1, m12])
+        t2 = numpy.column_stack([m02, m12, v2])
+        t3 = numpy.column_stack([m01, m12, m02])
+        new_tris_list.extend([t0, t1, t2, t3])
+
+    # Group 1: split into 2 (split the flagged edge)
+    mask_1 = flag_counts == 1
+    if mask_1.any():
+        tri1 = indices[mask_1]
+        fm1 = face_midpoints[mask_1]
+        fl1 = flags[mask_1]  # (K, 3) bool — exactly one True per row
+
+        # Find which edge is flagged (0=e01, 1=e12, 2=e02)
+        flagged_edge_idx = numpy.argmax(fl1, axis=1)
+
+        for edge_idx in range(3):
+            sel = flagged_edge_idx == edge_idx
+            if not sel.any():
+                continue
+            t = tri1[sel]
+            fm = fm1[sel]
+            v0, v1, v2 = t[:, 0], t[:, 1], t[:, 2]
+            mid = fm[:, edge_idx]
+
+            if edge_idx == 0:  # e01 split: mid on v0-v1
+                new_tris_list.append(numpy.column_stack([v0, mid, v2]))
+                new_tris_list.append(numpy.column_stack([mid, v1, v2]))
+            elif edge_idx == 1:  # e12 split: mid on v1-v2
+                new_tris_list.append(numpy.column_stack([v0, v1, mid]))
+                new_tris_list.append(numpy.column_stack([v0, mid, v2]))
+            else:  # e02 split: mid on v0-v2
+                new_tris_list.append(numpy.column_stack([v0, v1, mid]))
+                new_tris_list.append(numpy.column_stack([v1, v2, mid]))
+
+    # Group 2: split into 3 (two edges flagged — fan from vertex opposite the unsplit edge)
+    mask_2 = flag_counts == 2
+    if mask_2.any():
+        tri2 = indices[mask_2]
+        fm2 = face_midpoints[mask_2]
+        fl2 = flags[mask_2]
+
+        # Find the unflagged edge (0=e01, 1=e12, 2=e02)
+        unflagged_edge_idx = numpy.argmin(fl2.astype(numpy.int32), axis=1)
+
+        for unsplit_idx in range(3):
+            sel = unflagged_edge_idx == unsplit_idx
+            if not sel.any():
+                continue
+            t = tri2[sel]
+            fm = fm2[sel]
+            v0, v1, v2 = t[:, 0], t[:, 1], t[:, 2]
+
+            if unsplit_idx == 0:  # e01 unsplit, e12 and e02 split
+                m12, m02 = fm[:, 1], fm[:, 2]
+                new_tris_list.append(numpy.column_stack([v0, v1, m12]))
+                new_tris_list.append(numpy.column_stack([v0, m12, m02]))
+                new_tris_list.append(numpy.column_stack([m12, v2, m02]))
+            elif unsplit_idx == 1:  # e12 unsplit, e01 and e02 split
+                m01, m02 = fm[:, 0], fm[:, 2]
+                new_tris_list.append(numpy.column_stack([v0, m01, m02]))
+                new_tris_list.append(numpy.column_stack([m01, v1, m02]))
+                new_tris_list.append(numpy.column_stack([v1, v2, m02]))
+            else:  # e02 unsplit, e01 and e12 split
+                m01, m12 = fm[:, 0], fm[:, 1]
+                new_tris_list.append(numpy.column_stack([v0, m01, m12]))
+                new_tris_list.append(numpy.column_stack([m01, v1, m12]))
+                new_tris_list.append(numpy.column_stack([v0, m12, v2]))
+
+    new_indices = numpy.vstack(new_tris_list).astype(numpy.int32)
+    new_vertices = numpy.vstack([vertices, midpoints.astype(numpy.float32)])
+
+    return new_vertices, new_indices, True

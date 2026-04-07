@@ -10,7 +10,8 @@ def project(vertices: numpy.ndarray, normals: numpy.ndarray, mode: int, params: 
 
     :param vertices: (N, 3) float32 vertex positions.
     :param normals: (N, 3) float32 per-vertex normals.
-    :param mode: Projection mode (0=Triplanar, 1=Cubic, 2=Cylindrical, 3=Spherical, 4=Planar).
+    :param mode: Projection mode (0=Triplanar, 1=Cubic, 2=Cylindrical, 3=Spherical,
+                 4=Planar XZ, 5=Planar XY, 6=Planar YZ).
     :param params: Dict with scale_u, scale_v, offset_u, offset_v, rotation (degrees).
     :return: (N, 2) float32 UV coordinates.
     """
@@ -23,9 +24,13 @@ def project(vertices: numpy.ndarray, normals: numpy.ndarray, mode: int, params: 
     elif mode == 3:
         uvs = _project_spherical(vertices)
     elif mode == 4:
-        uvs = _project_planar(vertices)
+        uvs = _project_planar_xz(vertices)
+    elif mode == 5:
+        uvs = _project_planar_xy(vertices)
+    elif mode == 6:
+        uvs = _project_planar_yz(vertices)
     else:
-        uvs = _project_planar(vertices)
+        uvs = _project_planar_xz(vertices)
 
     # Apply UV transforms: scale, rotation, offset
     uvs = _apply_uv_transform(uvs, params)
@@ -130,7 +135,7 @@ def sample_displacement_triplanar(
 
 # --- Projection Mode Implementations ---
 
-def _project_planar(vertices: numpy.ndarray) -> numpy.ndarray:
+def _project_planar_xz(vertices: numpy.ndarray) -> numpy.ndarray:
     """Planar projection onto the XZ plane, normalized to bounding box."""
     bbox_min = vertices.min(axis=0)
     bbox_max = vertices.max(axis=0)
@@ -138,6 +143,30 @@ def _project_planar(vertices: numpy.ndarray) -> numpy.ndarray:
     bbox_size = numpy.where(bbox_size < 1e-6, 1.0, bbox_size)
 
     u = (vertices[:, 0] - bbox_min[0]) / bbox_size[0]
+    v = (vertices[:, 2] - bbox_min[2]) / bbox_size[2]
+    return numpy.column_stack([u, v]).astype(numpy.float32)
+
+
+def _project_planar_xy(vertices: numpy.ndarray) -> numpy.ndarray:
+    """Planar projection onto the XY plane, normalized to bounding box."""
+    bbox_min = vertices.min(axis=0)
+    bbox_max = vertices.max(axis=0)
+    bbox_size = bbox_max - bbox_min
+    bbox_size = numpy.where(bbox_size < 1e-6, 1.0, bbox_size)
+
+    u = (vertices[:, 0] - bbox_min[0]) / bbox_size[0]
+    v = (vertices[:, 1] - bbox_min[1]) / bbox_size[1]
+    return numpy.column_stack([u, v]).astype(numpy.float32)
+
+
+def _project_planar_yz(vertices: numpy.ndarray) -> numpy.ndarray:
+    """Planar projection onto the YZ plane, normalized to bounding box."""
+    bbox_min = vertices.min(axis=0)
+    bbox_max = vertices.max(axis=0)
+    bbox_size = bbox_max - bbox_min
+    bbox_size = numpy.where(bbox_size < 1e-6, 1.0, bbox_size)
+
+    u = (vertices[:, 1] - bbox_min[1]) / bbox_size[1]
     v = (vertices[:, 2] - bbox_min[2]) / bbox_size[2]
     return numpy.column_stack([u, v]).astype(numpy.float32)
 

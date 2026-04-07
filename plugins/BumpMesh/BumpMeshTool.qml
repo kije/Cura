@@ -97,7 +97,9 @@ Item
                     catalog.i18nc("@item:inlistbox", "Cubic"),
                     catalog.i18nc("@item:inlistbox", "Cylindrical"),
                     catalog.i18nc("@item:inlistbox", "Spherical"),
-                    catalog.i18nc("@item:inlistbox", "Planar")
+                    catalog.i18nc("@item:inlistbox", "Planar XZ"),
+                    catalog.i18nc("@item:inlistbox", "Planar XY"),
+                    catalog.i18nc("@item:inlistbox", "Planar YZ")
                 ]
                 currentIndex: UM.Controller.properties.getValue("ProjectionMode") ?? 0
                 onCurrentIndexChanged: UM.Controller.setProperty("ProjectionMode", currentIndex)
@@ -113,6 +115,8 @@ Item
                     if (mode === 2) return catalog.i18nc("@label", "Wraps around the Y axis. Good for cylindrical parts.")
                     if (mode === 3) return catalog.i18nc("@label", "Projects from center outward. Good for round objects.")
                     if (mode === 4) return catalog.i18nc("@label", "Flat projection onto the XZ plane.")
+                    if (mode === 5) return catalog.i18nc("@label", "Flat projection onto the XY plane.")
+                    if (mode === 6) return catalog.i18nc("@label", "Flat projection onto the YZ plane.")
                     return ""
                 }
                 color: UM.Theme.getColor("text_inactive")

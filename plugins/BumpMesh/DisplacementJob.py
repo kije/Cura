@@ -89,31 +89,42 @@ class DisplacementJob(Job):
         mask_angle = self._params.get("mask_angle", 0.0)
         smoothing = self._params.get("smoothing", 0)
 
-        # Step 1: Subdivide mesh
+        # Step 1: Subdivide mesh (with shared vertices for correct topology)
         if subdivision_level > 0:
             message.setProgress(5)
             vertices, indices = MeshSubdivider.subdivide(vertices, indices, subdivision_level)
             Job.yieldThread()
 
+        message.setProgress(20)
+
+        # Step 2: Flatten mesh to triangle soup
+        # This is critical: shared vertices at sharp edges get wrong averaged normals
+        # which causes spikes and disconnected geometry. Flattening gives each face its
+        # own vertices, then we recompute smooth normals with crease-angle detection.
+        vertices = DisplacementEngine.flatten_mesh(vertices, indices)
+        # After flattening, vertices is (M*3, 3) triangle soup — no index buffer needed
+        Job.yieldThread()
         message.setProgress(30)
 
-        # Step 2: Compute vertex normals
-        normals = DisplacementEngine.compute_vertex_normals(vertices, indices)
+        # Step 3: Compute normals with smooth-group detection
+        # Coincident vertices get averaged normals only if their face normals are
+        # within 60 degrees of each other. Sharp edges get per-face normals.
+        normals = DisplacementEngine.compute_flat_normals(vertices)
         Job.yieldThread()
         message.setProgress(40)
 
-        # Step 3: Smooth texture if needed
+        # Step 4: Smooth texture if needed
         texture = self._texture_data
         if smoothing > 0:
             texture = DisplacementEngine.smooth_texture(texture, smoothing)
             Job.yieldThread()
         message.setProgress(50)
 
-        # Step 4: Compute angle mask
+        # Step 5: Compute angle mask
         mask = DisplacementEngine.compute_angle_mask(normals, mask_angle)
         message.setProgress(55)
 
-        # Step 5: Sample displacement values
+        # Step 6: Sample displacement values
         if projection_mode == 0:  # Triplanar
             displacement_values = TextureProjector.sample_displacement_triplanar(
                 vertices, normals, texture, self._params
@@ -125,14 +136,13 @@ class DisplacementJob(Job):
         Job.yieldThread()
         message.setProgress(70)
 
-        # Step 6: Displace vertices
+        # Step 7: Displace vertices
         new_vertices = DisplacementEngine.displace(vertices, normals, displacement_values, amplitude, mask)
         message.setProgress(80)
 
-        # Step 7: Build new mesh
+        # Step 8: Build new mesh (triangle soup — no index buffer)
         builder = MeshBuilder()
         builder.setVertices(new_vertices)
-        builder.setIndices(indices)
         builder.calculateNormals(fast=True)
         self._result_mesh = builder.build()
 
