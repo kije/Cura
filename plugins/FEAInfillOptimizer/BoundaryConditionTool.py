@@ -1155,6 +1155,11 @@ class BoundaryConditionTool(Tool):
 
         if event.type == Event.ToolActivateEvent:
             self._update_highlights()
+            # Track model transforms so overlays follow the model
+            selected = Selection.getSelectedObject(0)
+            if selected is not None:
+                selected.transformationChanged.connect(self._onModelTransformChanged)
+                self._tracked_node = selected
             return False
 
         if event.type == Event.ToolDeactivateEvent:
@@ -1166,6 +1171,13 @@ class BoundaryConditionTool(Tool):
             self._hover_faces = []
             self._hover_generation += 1  # invalidate any pending hover computation
             self._hover_pending = False
+            # Disconnect transform tracking
+            if hasattr(self, "_tracked_node") and self._tracked_node is not None:
+                try:
+                    self._tracked_node.transformationChanged.disconnect(self._onModelTransformChanged)
+                except Exception:
+                    pass
+                self._tracked_node = None
             return False
 
         # ── Only allow face interaction in DEFINE phase ──────────────────
@@ -1745,6 +1757,28 @@ class BoundaryConditionTool(Tool):
             ClearFixedFacesOperation(bc).push()
             self.propertyChanged.emit()
             self._update_highlights()
+
+    def _onModelTransformChanged(self, *args) -> None:
+        """Called when the tracked model node's transform changes (move/scale/rotate).
+
+        Updates BC highlight overlay to match new position and removes
+        the stress overlay (which has pre-baked world-space vertices that
+        are now invalid — re-run analysis to regenerate).
+        """
+        self._centroid_cache = None  # invalidate — positions changed
+        self._update_highlights()
+
+        # Remove stress overlay — its world-space vertices are now wrong
+        if self._extension and self._extension.stressOverlayVisible:
+            node = Selection.getSelectedObject(0)
+            if node is not None:
+                try:
+                    from .visualization.stress_overlay import StressOverlayManager
+                    StressOverlayManager.remove_overlay(node)
+                    self._extension._stress_overlay_visible = False
+                    self._extension.stressOverlayVisibleChanged.emit()
+                except Exception:
+                    pass
 
     def _update_highlights(self) -> None:
         node = Selection.getSelectedObject(0)
