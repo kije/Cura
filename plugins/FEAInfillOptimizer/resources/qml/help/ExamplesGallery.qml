@@ -9,21 +9,24 @@ import QtQuick.Layouts 1.15
 import UM 1.5 as UM
 import Cura 1.0 as Cura
 
-UM.Dialog
+Item
 {
-    id: examplesDialog
-    title: catalog.i18nc("@title:window", "Example Setups - FEA Infill Optimizer")
-    width: 700 * screenScaleFactor
-    height: 500 * screenScaleFactor
-    minimumWidth: 500 * screenScaleFactor
-    minimumHeight: 350 * screenScaleFactor
-
-    property var examples: []
-    property string searchQuery: ""
-    property string selectedCategory: "all"
-    property string selectedExampleId: ""
+    id: examplesRoot
 
     UM.I18nCatalog { id: catalog; name: "cura" }
+
+    property alias visible: examplesDialog.visible
+    function open() { examplesDialog.open() }
+    function close() { examplesDialog.close() }
+
+    UM.Dialog
+    {
+        id: examplesDialog
+        title: catalog.i18nc("@title:window", "Example Setups - FEA Infill Optimizer")
+        width: 700 * screenScaleFactor
+        height: 500 * screenScaleFactor
+        minimumWidth: 500 * screenScaleFactor
+        minimumHeight: 350 * screenScaleFactor
 
     // Load examples from JSON
     Component.onCompleted:
@@ -595,4 +598,5 @@ UM.Dialog
             }
         }
     }
-}
+    } // UM.Dialog
+} // Item
