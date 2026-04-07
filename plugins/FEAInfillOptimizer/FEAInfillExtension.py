@@ -241,8 +241,10 @@ class FEAInfillExtension(QObject, Extension):
             app.workspaceLoaded.connect(self._restoreBCsFromScene)
 
         # Also listen for scene changes — nodes may get metadata restored
-        # asynchronously during workspace loading.
+        # asynchronously during workspace loading, and stress overlays may
+        # need cleanup when models are deleted.
         app.getController().getScene().sceneChanged.connect(self._onSceneNodeMayHaveBCMetadata)
+        app.getController().getScene().sceneChanged.connect(self._cleanupOrphanedOverlays)
 
         # Sync BC data to node.metadata before save.  writeStarted fires
         # right before the 3MF writer serialises nodes, so our metadata
@@ -329,6 +331,25 @@ class FEAInfillExtension(QObject, Extension):
                         active_node.metadata[self._RESULTS_METADATA_KEY] = results_json
                 except Exception:
                     pass
+
+    _last_overlay_cleanup = 0.0
+
+    def _cleanupOrphanedOverlays(self, *args) -> None:
+        """Remove stress overlays whose parent model was deleted.
+
+        Throttled to at most once per second since sceneChanged fires
+        very frequently (mouse moves, rendering updates, etc.).
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_overlay_cleanup < 1.0:
+            return
+        self._last_overlay_cleanup = now
+        try:
+            from .visualization.stress_overlay import StressOverlayManager
+            StressOverlayManager.cleanup_orphaned_overlays()
+        except Exception:
+            pass
 
     def _onSceneNodeMayHaveBCMetadata(self, node) -> None:
         """Check a single node for BC metadata and restore if found.

@@ -400,6 +400,35 @@ class StressOverlayManager:
     # ------------------------------------------------------------------
 
     @classmethod
+    def cleanup_orphaned_overlays(cls) -> None:
+        """Remove any stress overlay nodes whose parent model no longer exists.
+
+        Since overlays are parented to scene_root (not the model node),
+        they persist when the model is deleted. This method scans for
+        orphans and removes them.  Should be called on scene changes.
+        """
+        scene = CuraApplication.getInstance().getController().getScene()
+        root = scene.getRoot()
+
+        # Build set of live node ids
+        live_ids = set()
+        for node in root.getChildren():
+            if node.getName() != _OVERLAY_NAME:
+                live_ids.add(id(node))
+
+        # Find and remove orphaned overlays
+        to_remove = []
+        for child in list(root.getChildren()):
+            if child.getName() == _OVERLAY_NAME:
+                parent_id = getattr(child, "_fea_parent_node_id", None)
+                if parent_id is not None and parent_id not in live_ids:
+                    to_remove.append(child)
+
+        for overlay in to_remove:
+            op = RemoveSceneNodeOperation(overlay)
+            op.push()
+
+    @classmethod
     def _find_overlay(cls, node: CuraSceneNode) -> Optional[CuraSceneNode]:
         """Return the overlay node for ``node`` or ``None`` if absent.
 
