@@ -45,8 +45,18 @@ class ForceDirectionHandle(ToolHandle):
     def center(self) -> Vector:
         return self._center
 
-    def show_at(self, center: Vector, scale: float = 1.0) -> None:
-        """Build and display the rotation rings at the given world position."""
+    def show_at(self, center: Vector, scale: float = 1.0,
+                axis_direction: Optional[Vector] = None) -> None:
+        """Build and display the rotation rings at the given world position.
+
+        Args:
+            center: World-space position to place the gizmo.
+            scale: Size multiplier based on model bounding box.
+            axis_direction: Optional direction vector to draw a visible axis
+                line through the center. Used for torque axis visualization
+                so the user can see what they're rotating. If None, only
+                the rotation rings are shown (force editing mode).
+        """
         self._center = center
         self._visible = True
         self.setEnabled(True)
@@ -75,6 +85,39 @@ class ForceDirectionHandle(ToolHandle):
             axis=Vector.Unit_Y, angle=math.pi / 2,
             color=self._x_axis_color, center=center
         )
+
+        # Axis direction line — a visible cylinder along the axis direction
+        # so the user can see what they're rotating (critical for torque editing)
+        if axis_direction is not None:
+            axis_len = outer * 2.0  # extend beyond the rings
+            d = axis_direction.normalized()
+            # Cyan color for the axis line (distinct from ring colors)
+            axis_color = ToolHandle._DisabledSelectionColor  # fallback
+            try:
+                from UM.Math.Color import Color
+                axis_color = Color(0.0, 0.85, 0.95, 1.0)  # cyan
+            except Exception:
+                pass
+            p1 = center + d * axis_len
+            p2 = center - d * axis_len
+            mb.addCube(
+                width=width * 1.5, height=axis_len * 2, depth=width * 1.5,
+                center=center, color=axis_color,
+            )
+            # Draw small cone arrowheads at both ends
+            # Use addVertex for a simple line representation
+            # Actually, addCube stretched along the axis is simplest —
+            # but it's always axis-aligned. Use two small cubes at the tips instead.
+            tip_size = width * 3
+            mb.addCube(
+                width=tip_size, height=tip_size, depth=tip_size,
+                center=p1, color=axis_color,
+            )
+            mb.addCube(
+                width=tip_size, height=tip_size, depth=tip_size,
+                center=p2, color=axis_color,
+            )
+
         self.setSolidMesh(mb.build())
 
         # Selection (hit-test) mesh — wider invisible rings for easier clicking

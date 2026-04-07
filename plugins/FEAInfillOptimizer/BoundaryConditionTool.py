@@ -1006,7 +1006,10 @@ class BoundaryConditionTool(Tool):
                                 scale = max(0.1, diag / 80.0)
                             else:
                                 scale = 1.0
-                            self._force_handle.show_at(centroid, scale=scale)
+                            self._force_handle.show_at(
+                                centroid, scale=scale,
+                                axis_direction=tg.torque_axis,
+                            )
         self.propertyChanged.emit()
         self._update_highlights()
 
@@ -1465,6 +1468,13 @@ class BoundaryConditionTool(Tool):
                 new_axis = Vector(new_axis.x / length, new_axis.y / length, new_axis.z / length)
             tg.torque_axis = new_axis
 
+            # Refresh the axis line visualization to show the new direction
+            self._force_handle.show_at(
+                self._force_handle.center,
+                scale=self._force_handle._outer_radius / 12.5,  # preserve current scale
+                axis_direction=new_axis,
+            )
+
             self.setDragStart(event.x, event.y)
             self.propertyChanged.emit()
             self._update_highlights()
@@ -1646,7 +1656,10 @@ class BoundaryConditionTool(Tool):
             scale = max(0.1, diag / 80.0)
         else:
             scale = 1.0
-        self._force_handle.show_at(centroid, scale=scale)
+        self._force_handle.show_at(
+            centroid, scale=scale,
+            axis_direction=normal,
+        )
 
         self.propertyChanged.emit()
         self._update_highlights()
