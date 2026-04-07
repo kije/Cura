@@ -269,6 +269,11 @@ Item
                     text: "X"
                     checked: UM.Controller.properties.getValue("SymmetryX") === true
                     onClicked: UM.Controller.setProperty("SymmetryX", !checked)
+                    toolItem: UM.ColorImage
+                    {
+                        source: UM.Theme.getIcon("Mirror")
+                        color: UM.Theme.getColor("icon")
+                    }
                 }
 
                 UM.ToolbarButton
@@ -276,6 +281,11 @@ Item
                     text: "Y"
                     checked: UM.Controller.properties.getValue("SymmetryY") === true
                     onClicked: UM.Controller.setProperty("SymmetryY", !checked)
+                    toolItem: UM.ColorImage
+                    {
+                        source: UM.Theme.getIcon("Mirror")
+                        color: UM.Theme.getColor("icon")
+                    }
                 }
 
                 UM.ToolbarButton
@@ -283,6 +293,11 @@ Item
                     text: "Z"
                     checked: UM.Controller.properties.getValue("SymmetryZ") === true
                     onClicked: UM.Controller.setProperty("SymmetryZ", !checked)
+                    toolItem: UM.ColorImage
+                    {
+                        source: UM.Theme.getIcon("Mirror")
+                        color: UM.Theme.getColor("icon")
+                    }
                 }
             }
 
