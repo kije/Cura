@@ -250,15 +250,50 @@ class FEAInfillExtension(QObject, Extension):
         app.getOutputDeviceManager().writeStarted.connect(self._syncAllBCsToMetadata)
 
     _BC_METADATA_KEY = "fea_infill_boundary_conditions"
+    _SETTINGS_METADATA_KEY = "fea_infill_settings"
+    _RESULTS_METADATA_KEY = "fea_infill_results"
 
     def _syncAllBCsToMetadata(self, *args) -> None:
-        """Persist BC data from decorators → node.metadata for all scene nodes.
+        """Persist BC data, analysis settings, and results summary → node.metadata.
 
         Called right before writing a 3MF file.  The 3MF writer reads
         node.metadata and saves each entry via savitar_node.setSetting().
+        Settings and results are saved on ANY printable node that has BCs,
+        or on the active node if no BCs are defined yet.
         """
         import json
         scene = CuraApplication.getInstance().getController().getScene()
+        settings = {
+            "material_name": self._material_name,
+            "infill_pattern": self._infill_pattern,
+            "min_density": self._min_density,
+            "max_density": self._max_density,
+            "num_zones": self._num_zones,
+            "max_iterations": self._max_iterations,
+            "mesh_resolution": self._mesh_resolution,
+            "safety_factor": self._safety_factor,
+            "bonding_coeff": self._bonding_coeff,
+            "optimization_method": self._optimization_method,
+            "volume_fraction": self._volume_fraction,
+        }
+        settings_json = json.dumps(settings)
+
+        results_json = None
+        if self._results is not None:
+            results_summary = {
+                "max_stress": self._results.get("max_stress", 0),
+                "min_stress": self._results.get("min_stress", 0),
+                "safety_factor": self._results.get("safety_factor", 0),
+                "iterations": self._results.get("iterations", 0),
+                "converged": self._results.get("converged", False),
+                "mesh_quality": self._results.get("mesh_quality", ""),
+                "mesh_method": self._results.get("mesh_method", ""),
+                "num_zones": len(self._results.get("zones", [])),
+                "zone_densities": [z["density"] for z in self._results.get("zones", [])],
+            }
+            results_json = json.dumps(results_summary)
+
+        saved_settings_on = set()
         for node in DepthFirstIterator(scene.getRoot()):
             if not isinstance(node, CuraSceneNode):
                 continue
@@ -270,11 +305,30 @@ class FEAInfillExtension(QObject, Extension):
                     Logger.log("d", "FEA Infill: Saved BCs for node '%s' (%d fixed, %d forces, %d torques)",
                                node.getName(), bc.getFixedFaceCount(),
                                bc.getForceGroupCount(), bc.getTorqueGroupCount())
+                    # Save settings alongside BCs
+                    node.metadata[self._SETTINGS_METADATA_KEY] = settings_json
+                    if results_json is not None:
+                        node.metadata[self._RESULTS_METADATA_KEY] = results_json
+                    elif self._RESULTS_METADATA_KEY in node.metadata:
+                        del node.metadata[self._RESULTS_METADATA_KEY]
+                    saved_settings_on.add(id(node))
                 elif self._BC_METADATA_KEY in node.metadata:
                     del node.metadata[self._BC_METADATA_KEY]
             except Exception:
                 Logger.logException("w", "FEA Infill: Failed to save BCs for node '%s'",
                                     node.getName())
+
+        # If there is an active node (results phase) without BCs metadata yet,
+        # still persist settings/results so they survive a save-without-BCs edge case.
+        if self._active_node_key and (self._results is not None):
+            active_node = self._node_cache.get(self._active_node_key)
+            if active_node is not None and id(active_node) not in saved_settings_on:
+                try:
+                    active_node.metadata[self._SETTINGS_METADATA_KEY] = settings_json
+                    if results_json is not None:
+                        active_node.metadata[self._RESULTS_METADATA_KEY] = results_json
+                except Exception:
+                    pass
 
     def _onSceneNodeMayHaveBCMetadata(self, node) -> None:
         """Check a single node for BC metadata and restore if found.
@@ -305,11 +359,19 @@ class FEAInfillExtension(QObject, Extension):
                        "(%d fixed, %d forces, %d torques)",
                        node.getName(), decorator.getFixedFaceCount(),
                        decorator.getForceGroupCount(), decorator.getTorqueGroupCount())
+
+            # Restore settings if present
+            if self._SETTINGS_METADATA_KEY in node.metadata:
+                self._restoreSettingsFromNode(node)
+
+            # Restore results summary if present
+            if self._RESULTS_METADATA_KEY in node.metadata:
+                self._restoreResultsFromNode(node)
         except Exception:
             pass  # Silently ignore — this fires very frequently
 
     def _restoreBCsFromScene(self, *args) -> None:
-        """Restore BC decorators from node.metadata after loading.
+        """Restore BC decorators, settings, and results from node.metadata after loading.
 
         The 3MF reader puts unknown savitar settings into node.metadata.
         The value might be a Savitar setting object (with .value attr)
@@ -342,6 +404,59 @@ class FEAInfillExtension(QObject, Extension):
             except Exception:
                 Logger.logException("w", "FEA Infill: Failed to restore BCs for node '%s'",
                                     node.getName())
+
+            # Restore analysis settings
+            if self._SETTINGS_METADATA_KEY in node.metadata:
+                self._restoreSettingsFromNode(node)
+
+            # Restore results summary (puts plugin in review phase)
+            if self._RESULTS_METADATA_KEY in node.metadata:
+                self._restoreResultsFromNode(node)
+
+    def _restoreSettingsFromNode(self, node) -> None:
+        """Read fea_infill_settings from node.metadata and apply to extension state."""
+        try:
+            raw = node.metadata[self._SETTINGS_METADATA_KEY]
+            settings_str = raw.value if hasattr(raw, "value") else str(raw)
+            settings = json.loads(settings_str)
+            self._material_name = settings.get("material_name", self._material_name)
+            self._infill_pattern = settings.get("infill_pattern", self._infill_pattern)
+            self._min_density = float(settings.get("min_density", self._min_density))
+            self._max_density = float(settings.get("max_density", self._max_density))
+            self._num_zones = int(settings.get("num_zones", self._num_zones))
+            self._max_iterations = int(settings.get("max_iterations", self._max_iterations))
+            self._mesh_resolution = settings.get("mesh_resolution", self._mesh_resolution)
+            self._safety_factor = float(settings.get("safety_factor", self._safety_factor))
+            self._bonding_coeff = float(settings.get("bonding_coeff", self._bonding_coeff))
+            self._optimization_method = settings.get("optimization_method", self._optimization_method)
+            self._volume_fraction = float(settings.get("volume_fraction", self._volume_fraction))
+            self.settingsChanged.emit()
+            Logger.log("d", "FEA Infill: Restored settings from node '%s'", node.getName())
+        except Exception:
+            Logger.logException("w", "FEA Infill: Failed to restore settings for node '%s'",
+                                node.getName())
+
+    def _restoreResultsFromNode(self, node) -> None:
+        """Read fea_infill_results from node.metadata and enter review phase."""
+        try:
+            raw = node.metadata[self._RESULTS_METADATA_KEY]
+            results_str = raw.value if hasattr(raw, "value") else str(raw)
+            results_summary = json.loads(results_str)
+            # Store as partial results — no stress_field/density_field/tet_mesh/zones
+            self._results = results_summary
+            self._phase = "review"
+            self._active_node_key = str(id(node))
+            self._node_cache[self._active_node_key] = node
+            self.resultsChanged.emit()
+            self.phaseChanged.emit()
+            Logger.log("d", "FEA Infill: Restored results summary from node '%s' "
+                       "(max_stress=%.1f, sf=%.2f)",
+                       node.getName(),
+                       results_summary.get("max_stress", 0),
+                       results_summary.get("safety_factor", 0))
+        except Exception:
+            Logger.logException("w", "FEA Infill: Failed to restore results for node '%s'",
+                                node.getName())
 
     # -- Phase management --
 
@@ -552,6 +667,15 @@ class FEAInfillExtension(QObject, Extension):
     @pyqtProperty(bool, notify=resultsChanged)
     def hasResults(self) -> bool:
         return self._results is not None
+
+    @pyqtProperty(bool, notify=resultsChanged)
+    def hasFullResults(self) -> bool:
+        """True only when full analysis data (stress_field, zones) is in memory.
+
+        False when results were restored from a saved project file (summary only),
+        which means stress overlay and modifier mesh creation are unavailable.
+        """
+        return (self._results is not None and "stress_field" in self._results)
 
     @pyqtProperty(bool, notify=stressOverlayVisibleChanged)
     def stressOverlayVisible(self) -> bool:

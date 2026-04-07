@@ -46,6 +46,7 @@ Item
     readonly property int    convergenceIter:  Number(toolProperties.getValue("ConvergenceIterations") ?? 0)
     readonly property string safetyVerdict:    toolProperties.getValue("SafetyVerdict")    ?? ""
     readonly property bool   stressOverlayVisible: toolProperties.getValue("StressOverlayVisible") === true || toolProperties.getValue("StressOverlayVisible") === "true"
+    readonly property bool   hasFullResults:       toolProperties.getValue("HasFullResults")       === true || toolProperties.getValue("HasFullResults") === "true"
 
     implicitWidth: 280 * screenScaleFactor
     // Use 80% of the application window height so the panel fills most of
@@ -1995,6 +1996,32 @@ Item
                         font: UM.Theme.getFont("large_bold")
                     }
 
+                    // Note shown when results are restored from a saved project file
+                    Rectangle
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel.hasResults && !bcPanel.hasFullResults
+                        height: visible ? restoredNoteLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.15)
+                        radius: UM.Theme.getSize("default_radius").width
+
+                        UM.Label
+                        {
+                            id: restoredNoteLabel
+                            anchors
+                            {
+                                left: parent.left; right: parent.right
+                                verticalCenter: parent.verticalCenter
+                                margins: UM.Theme.getSize("default_margin").width / 2
+                            }
+                            text: catalog.i18nc("@info",
+                                "Results loaded from project file. Re-run analysis to enable stress map and modifier meshes.")
+                            color: UM.Theme.getColor("text_inactive")
+                            font: UM.Theme.getFont("small")
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+
                     // Mesh quality indicator
                     Rectangle
                     {
@@ -2200,7 +2227,7 @@ Item
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Apply Optimized Infill")
-                        enabled: bcPanel.hasResults
+                        enabled: bcPanel.hasResults && bcPanel.hasFullResults
                         onClicked: UM.Controller.setProperty("ApplyModifierMeshes", true)
                     }
 
@@ -2213,6 +2240,7 @@ Item
                         Cura.SecondaryButton
                         {
                             Layout.fillWidth: true
+                            enabled: bcPanel.hasFullResults
                             text: bcPanel.stressOverlayVisible
                                 ? catalog.i18nc("@action:button", "Hide Stress Map")
                                 : catalog.i18nc("@action:button", "Show Stress Map")
