@@ -172,7 +172,13 @@ class IterativeFEASolver:
                 stacklevel=2,
             )
 
+        opt_method = str(config.get("optimization_method", "heuristic"))
         use_easyfea = _EASYFEA_AVAILABLE and bool(tet_mesh.msh_path) and os.path.exists(tet_mesh.msh_path)
+
+        # SIMP OC requires scipy path (needs per-element stiffness + displacement access)
+        if opt_method == "oc":
+            use_easyfea = False
+            Logger.log("i", "FEA solve: SIMP OC selected → forcing scipy solver path")
 
         if use_easyfea:
             Logger.log("i", "FEA solve: using EasyFEA solver (msh=%s)", tet_mesh.msh_path)
@@ -181,8 +187,8 @@ class IterativeFEASolver:
                 progress_callback, surface_mesh,
             )
         else:
-            Logger.log("i", "FEA solve: using scipy fallback solver (EasyFEA available=%s)",
-                       _EASYFEA_AVAILABLE)
+            Logger.log("i", "FEA solve: using scipy solver (EasyFEA available=%s, opt=%s)",
+                       _EASYFEA_AVAILABLE, opt_method)
             return self._solve_scipy(
                 tet_mesh, boundary_conditions, material, config,
                 progress_callback, surface_mesh,
