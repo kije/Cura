@@ -240,7 +240,12 @@ class IterativeFEASolver:
         nu = material.nu
         n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
 
-        density = np.full(n_elems, min_rho, dtype=np.float64)
+        # Start at midpoint density (not min_rho) so the first iteration has
+        # a well-conditioned stiffness matrix.  Starting at min_rho creates
+        # extremely low element stiffness (e.g. 0.8% of full for rho=0.05,
+        # n=1.6) which causes solver timeout or singular matrix.
+        initial_rho = (min_rho + max_rho) / 2.0
+        density = np.full(n_elems, initial_rho, dtype=np.float64)
         stress = np.zeros(n_elems, dtype=np.float64)
         converged = False
         max_change = float("inf")
@@ -534,7 +539,8 @@ class IterativeFEASolver:
 
         fea_solver = LinearElasticitySolver()
 
-        density = np.full(n_elems, min_rho, dtype=np.float64)
+        initial_rho = (min_rho + max_rho) / 2.0
+        density = np.full(n_elems, initial_rho, dtype=np.float64)
         stress = np.zeros(n_elems, dtype=np.float64)
         converged = False
         max_change = float("inf")
