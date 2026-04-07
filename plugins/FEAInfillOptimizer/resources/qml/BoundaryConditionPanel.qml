@@ -219,6 +219,16 @@ Item
                         {
                             spacing: UM.Theme.getSize("default_margin").height / 2
 
+                            // Instruction diagram
+                            Image
+                            {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 80 * screenScaleFactor
+                                fillMode: Image.PreserveAspectFit
+                                source: Qt.resolvedUrl("../icons/guide_support.svg")
+                                Layout.bottomMargin: UM.Theme.getSize("default_margin").height / 2
+                            }
+
                             // Instruction text
                             UM.Label
                             {
@@ -394,6 +404,17 @@ Item
                         ColumnLayout
                         {
                             spacing: UM.Theme.getSize("default_margin").height / 2
+
+                            // Instruction diagram
+                            Image
+                            {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 80 * screenScaleFactor
+                                fillMode: Image.PreserveAspectFit
+                                source: Qt.resolvedUrl("../icons/guide_force.svg")
+                                Layout.bottomMargin: UM.Theme.getSize("default_margin").height / 2
+                                visible: bcPanel.currentMode !== "rotate"
+                            }
 
                             // Instruction text
                             UM.Label
@@ -802,6 +823,17 @@ Item
                         ColumnLayout
                         {
                             spacing: UM.Theme.getSize("default_margin").height / 2
+
+                            // Instruction diagram
+                            Image
+                            {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 80 * screenScaleFactor
+                                fillMode: Image.PreserveAspectFit
+                                source: Qt.resolvedUrl("../icons/guide_torque.svg")
+                                Layout.bottomMargin: UM.Theme.getSize("default_margin").height / 2
+                                visible: bcPanel.currentMode !== "torque_edit"
+                            }
 
                             // Instruction text
                             UM.Label
@@ -1319,7 +1351,7 @@ Item
                     {
                         id: materialSelector
                         Layout.fillWidth: true
-                        model: ["PLA", "ABS", "PETG", "Nylon", "PC", "TPU 95A", "CF-Nylon"]
+                        model: ["PLA", "ABS", "PETG", "Nylon", "PC", "TPU_95A", "CF_Nylon", "CF_PET"]
                         currentIndex: {
                             var mat = toolProperties.getValue("MaterialName") ?? "PLA"
                             var idx = model.indexOf(mat)

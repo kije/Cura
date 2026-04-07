@@ -105,7 +105,7 @@ class FEAInfillExtension(QObject, Extension):
         "tpu": "TPU_95A", "tpu 95a": "TPU_95A", "flex": "TPU_95A",
         "cf": "CF_Nylon", "cf-nylon": "CF_Nylon", "cf nylon": "CF_Nylon",
         "carbon": "CF_Nylon", "cf-pet": "CF_Nylon", "cf-pla": "CF_Nylon",
-        "pet-cf": "CF_Nylon", "petcf": "CF_Nylon", "pet cf": "CF_Nylon",
+        "pet-cf": "CF_PET", "petcf": "CF_PET", "pet cf": "CF_PET",
         "pla-cf": "CF_Nylon", "placf": "CF_Nylon", "pla cf": "CF_Nylon",
         "cpe": "PETG", "cpe+": "PETG",  # Ultimaker CPE ≈ PETG mechanically
         "asa": "ABS",  # ASA is similar to ABS mechanically

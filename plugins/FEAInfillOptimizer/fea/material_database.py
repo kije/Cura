@@ -144,6 +144,17 @@ _MATERIALS: Dict[str, Material] = {
         notes="Short carbon-fibre reinforced PA. E_z reflects fibre alignment penalty "
               "(~25 % of E_xy), not the ~50 % ratio of neat polymer interlayer weakness.",
     ),
+    "CF_PET": Material(
+        name="CF_PET",
+        E_xy=5000.0,
+        E_z=1750.0,   # ~35 % of E_xy: PET bonds better between layers than PA
+        nu=0.37,
+        yield_strength=60.0,
+        density=1.30,
+        failure_mode="brittle",
+        notes="Short carbon-fibre reinforced PET/PETG. Better interlayer adhesion "
+              "than CF-Nylon (k ≈ 0.35 vs 0.25) but lower in-plane stiffness.",
+    ),
 }
 
 
