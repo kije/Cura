@@ -33,22 +33,21 @@ class BCHighlightHandle(ToolHandle):
     def update_visualization(self, node, bc_decorator,
                              pending_faces=None,
                              active_force_index=-1,
-                             hover_faces=None) -> None:
+                             active_torque_index=-1,
+                             hover_faces=None,
+                             phase="define") -> None:
         """Rebuild the highlight mesh from current BC data.
-
-        Vertices are taken in local mesh space; the handle's world
-        transformation is set to the node's world transformation so the
-        overlay matches the rendered mesh exactly.
 
         Args:
             node: CuraSceneNode whose mesh is being decorated.
-            bc_decorator: FEABoundaryConditionDecorator attached to *node*,
-                or None if only pending faces should be shown.
-            pending_faces: Optional list of face indices currently selected
-                but not yet confirmed (shown in YELLOW).
-            active_force_index: Index of the force group currently selected
-                in the UI list. That group is shown in BRIGHT RED; others
-                in darker red.
+            bc_decorator: FEABoundaryConditionDecorator attached to *node*.
+            pending_faces: Face indices currently selected but not confirmed.
+            active_force_index: Active force group index (-1 = none).
+            active_torque_index: Active torque group index (-1 = none).
+            hover_faces: Faces under cursor for hover preview.
+            phase: Current workflow phase. In "define" phase, highlights are
+                full opacity. In later phases ("optimize", "running", "review"),
+                highlights are reduced to low opacity to be less distracting.
         """
         mb = MeshBuilder()
         mesh_data = node.getMeshData()
@@ -67,16 +66,22 @@ class BCHighlightHandle(ToolHandle):
         self.setEnabled(True)
         self.setTransformation(node.getWorldTransformation())
 
+        # In later phases, reduce highlight opacity to be less distracting
+        dim = phase != "define"
+        alpha_full = 60 if dim else 200
+        alpha_active = 80 if dim else 220
+        alpha_inactive = 40 if dim else 180
+
         if bc_decorator is not None:
             # Paint fixed faces GREEN
-            green = Color(0, 200, 0, 200)
+            green = Color(0, 200, 0, alpha_full)
             for face_idx in bc_decorator.getFixedFaces():
                 self._paint_face(mb, verts, indices, face_idx, green)
 
             # Paint force faces RED + arrows
-            red_inactive = Color(150, 40, 40, 180)      # dim red for inactive forces
-            red_active = Color(255, 60, 60, 220)         # bright red for active force
-            blue = Color(0, 100, 255, 255)
+            red_inactive = Color(150, 40, 40, alpha_inactive)
+            red_active = Color(255, 60, 60, alpha_active)
+            blue = Color(0, 100, 255, 255 if not dim else 120)
 
             for i, fg in enumerate(bc_decorator.getForceGroups()):
                 is_active = (i == active_force_index)
@@ -98,18 +103,28 @@ class BCHighlightHandle(ToolHandle):
                 mag = (fx ** 2 + fy ** 2 + fz ** 2) ** 0.5
                 if mag > 0:
                     direction = Vector(fx / mag, fy / mag, fz / mag)
-                    # Active force gets a bigger, brighter arrow
                     if is_active:
                         self._paint_arrow(mb, center_vec, direction, blue,
                                           head_length=4.0, head_width=2.0,
                                           tail_length=max(8.0, mag / 8.0),
                                           tail_width=0.6)
-                    else:
+                    elif not dim:  # skip arrows in dimmed phases
                         self._paint_arrow(mb, center_vec, direction,
                                           Color(0, 80, 200, 200),
                                           head_length=2.5, head_width=1.2,
                                           tail_length=max(4.0, mag / 12.0),
                                           tail_width=0.3)
+
+            # Paint torque faces PURPLE/BLUE
+            purple_inactive = Color(140, 60, 200, alpha_inactive)
+            purple_active = Color(180, 80, 255, alpha_active)
+
+            if hasattr(bc_decorator, "getTorqueGroups"):
+                for i, tg in enumerate(bc_decorator.getTorqueGroups()):
+                    is_active = (i == active_torque_index)
+                    face_color = purple_active if is_active else purple_inactive
+                    for face_idx in tg.face_indices:
+                        self._paint_face(mb, verts, indices, face_idx, face_color)
 
         # Paint PENDING faces in YELLOW (not yet confirmed)
         if pending_faces:

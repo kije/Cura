@@ -199,6 +199,7 @@ class BoundaryConditionTool(Tool):
             "ErrorMessage",
             "StressOverlayVisible",
             "GoBackToOptimize",
+            "HasFullResults",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -703,6 +704,15 @@ class BoundaryConditionTool(Tool):
         return False
 
     def setHasResults(self, value) -> None:
+        pass
+
+    def getHasFullResults(self) -> bool:
+        """True when full stress_field / zones are in memory (not just a summary)."""
+        if self._extension:
+            return self._extension.hasFullResults
+        return False
+
+    def setHasFullResults(self, value) -> None:
         pass
 
     def getActiveNodeName(self) -> str:
@@ -1753,11 +1763,14 @@ class BoundaryConditionTool(Tool):
             return
 
         try:
+            current_phase = self._extension.phase if self._extension else "define"
             self._bc_highlight.update_visualization(
                 node, bc,
                 pending_faces=self._current_face_selection if has_pending else None,
                 active_force_index=self._active_force_index,
+                active_torque_index=self._editing_torque_index,
                 hover_faces=self._hover_faces if has_hover else None,
+                phase=current_phase,
             )
         except Exception:
             Logger.logException("w", "FEA Infill: Failed to update BC highlight overlay")
