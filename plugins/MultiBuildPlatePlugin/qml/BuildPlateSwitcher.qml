@@ -51,22 +51,28 @@ Item
         spacing: UM.Theme.getSize("narrow_margin").width
 
         // One tab button per build plate.
+        // We use the integer maxBuildPlate+1 as the model count so that each
+        // delegate's built-in `index` property directly equals the plate number.
+        // This avoids depending on MultiBuildPlateModel's lazily-registered
+        // "name" / "buildPlateNumber" roles, which are only registered after
+        // the first setItems() call and cause "undefined" binding warnings.
         Repeater
         {
-            model: root.multiBuildPlateModel
+            model: root.multiBuildPlateModel.maxBuildPlate + 1
 
             Button
             {
                 id: plateButton
 
-                property bool isActive: root.multiBuildPlateModel.activeBuildPlate === model.buildPlateNumber
+                property int plateNumber: index
+                property bool isActive: root.multiBuildPlateModel.activeBuildPlate === plateNumber
 
                 Layout.preferredWidth: UM.Theme.getSize("action_button").height * 2.5
                 Layout.preferredHeight: UM.Theme.getSize("action_button").height
                 checkable: false
                 hoverEnabled: true
 
-                onClicked: Cura.SceneController.setActiveBuildPlate(model.buildPlateNumber)
+                onClicked: Cura.SceneController.setActiveBuildPlate(plateNumber)
 
                 background: Rectangle
                 {
@@ -84,7 +90,7 @@ Item
 
                 contentItem: UM.Label
                 {
-                    text: model.name
+                    text: catalog.i18nc("@button:build_plate", "Plate %1").arg(plateNumber + 1)
                     color: plateButton.isActive
                         ? UM.Theme.getColor("primary_button_text")
                         : UM.Theme.getColor("text_scene")

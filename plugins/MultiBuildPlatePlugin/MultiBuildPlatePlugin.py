@@ -8,6 +8,7 @@ from PyQt6.QtCore import QObject, pyqtSlot
 from UM.Extension import Extension
 from UM.Logger import Logger
 from UM.PluginRegistry import PluginRegistry
+from UM.Scene.Selection import Selection
 
 from cura.CuraApplication import CuraApplication
 
@@ -72,6 +73,9 @@ class MultiBuildPlatePlugin(QObject, Extension):
             self._application.getCuraSceneController().setActiveBuildPlate(active - 1)
 
     def _moveSelectionToNewBuildPlate(self) -> None:
+        if not Selection.hasSelection():
+            Logger.log("d", "MultiBuildPlatePlugin: no selection, nothing to move")
+            return
         model = self._application.getMultiBuildPlateModel()
         new_plate = model.maxBuildPlate + 1
         self._application._cura_actions.setBuildPlateForSelection(new_plate)
