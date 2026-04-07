@@ -11,7 +11,11 @@ def displace(
     amplitude: float,
     mask: numpy.ndarray
 ) -> numpy.ndarray:
-    """Displace mesh vertices along their normals.
+    """Displace mesh vertices along their normals using symmetric displacement.
+
+    Uses the same convention as bumpmesh.com: 50% grey (0.5) is neutral (no
+    displacement), white (1.0) pushes outward, black (0.0) pushes inward.
+    This preserves volume better than unidirectional displacement.
 
     :param vertices: (N, 3) float32 vertex positions.
     :param normals: (N, 3) float32 per-vertex normals (should be unit length).
@@ -20,7 +24,9 @@ def displace(
     :param mask: (N,) float32 per-vertex mask [0, 1].
     :return: (N, 3) float32 displaced vertex positions.
     """
-    offset = displacement_values * amplitude * mask
+    # Map [0, 1] -> [-1, 1]: black pushes inward, grey is neutral, white pushes outward
+    symmetric = (displacement_values - 0.5) * 2.0
+    offset = symmetric * amplitude * mask
     return vertices + normals * offset[:, numpy.newaxis]
 
 
