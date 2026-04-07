@@ -17,8 +17,8 @@ Item
     UM.I18nCatalog { id: catalog; name: "cura" }
 
     // States: 0=NO_SELECTION, 1=READY, 2=PROCESSING, 3=ERROR
-    property int currentState: UM.Controller.properties.getValue("State")
-    property bool hasTexture: UM.Controller.properties.getValue("HasTexture")
+    property var currentState: UM.Controller.properties.getValue("State")
+    property var hasTexture: UM.Controller.properties.getValue("HasTexture")
 
     Column
     {

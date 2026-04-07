@@ -166,7 +166,7 @@ class BumpMeshTool(Tool):
             self.propertyChanged.emit()
 
     def getState(self) -> int:
-        return self._state
+        return int(self._state)
 
     def getHasTexture(self) -> bool:
         return self._texture_data is not None
