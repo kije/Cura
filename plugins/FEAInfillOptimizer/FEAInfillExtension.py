@@ -871,10 +871,12 @@ class FEAInfillExtension(QObject, Extension):
             ).show()
             return
 
+        import time as _time
         self._cancel_requested = False
         self._phase = "running"
         self._analysis_status = "running"
         self._progress = 0.0
+        self._analysis_start_time = _time.monotonic()
         self.phaseChanged.emit()
         self.analysisStatusChanged.emit()
         self.progressChanged.emit()
@@ -905,14 +907,30 @@ class FEAInfillExtension(QObject, Extension):
         # Marshal to the main thread; this slot may be called from the
         # background Job thread via UM.Signal (C15: thread safety).
         def _update() -> None:
+            import time as _time
             self._progress = progress
+
+            # Compute ETA from elapsed time and progress fraction
+            elapsed = _time.monotonic() - getattr(self, "_analysis_start_time", _time.monotonic())
+            eta_str = ""
+            # Only show ETA after 10% progress (enough data for meaningful estimate)
+            if progress > 10 and progress < 100:
+                fraction = progress / 100.0
+                if fraction > 0:
+                    total_est = elapsed / fraction
+                    remaining = total_est - elapsed
+                    if remaining > 60:
+                        eta_str = " — ~%d min remaining" % int(remaining / 60 + 0.5)
+                    elif remaining > 5:
+                        eta_str = " — ~%d sec remaining" % int(remaining)
+
             if progress <= 10:
                 self._analysis_stage = "Extracting mesh..."
             elif progress <= 30:
-                self._analysis_stage = "Building volume mesh..."
+                self._analysis_stage = "Building volume mesh..." + eta_str
             elif progress <= 90:
                 iteration = max(1, int((progress - 30) / 12) + 1)
-                self._analysis_stage = "Solving FEA (iteration %d)..." % iteration
+                self._analysis_stage = "Solving FEA (iteration %d)...%s" % (iteration, eta_str)
             elif progress <= 95:
                 self._analysis_stage = "Discretizing density..."
             else:
