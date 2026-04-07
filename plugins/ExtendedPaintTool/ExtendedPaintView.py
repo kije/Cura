@@ -197,7 +197,7 @@ class ExtendedPaintView(CuraView):
             "extruder": self._makeExtrudersColors(),
         }
 
-        self._current_paint_type = "seam"
+        self._current_paint_type = "extruder"
 
     def _onMainExtruderChanged(self, node: SceneNode):
         # Since the affected extruder has changed, the previous material painting commands become irrelevant,

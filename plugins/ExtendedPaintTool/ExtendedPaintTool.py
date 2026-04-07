@@ -253,12 +253,12 @@ class ExtendedPaintTool(Tool):
         return path
 
     def getPaintType(self) -> str:
-        return self._view.getPaintType()
+        return "extruder"
 
     def setPaintType(self, paint_type: str) -> None:
-        if paint_type != self.getPaintType():
-            self._view.setPaintType(paint_type)
-
+        # ExtendedPaintTool only supports extruder painting
+        if self._view.getPaintType() != "extruder":
+            self._view.setPaintType("extruder")
             self._brush_pen = self._createBrushPen()
             self._updateScene()
             self.propertyChanged.emit()
@@ -614,7 +614,7 @@ class ExtendedPaintTool(Tool):
                         viewport_pos = self._getViewportPos(world_coords)
                         modifiers = QApplication.keyboardModifiers()
                         result = self._active_drawing_tool.handle_release(world_coords, face_id, viewport_pos, modifiers)
-                        brush_color = self._brush_color if self.getPaintType() != "extruder" else str(self._brush_extruder)
+                        brush_color = str(self._brush_extruder)
                         event_caught = self._processDrawingToolResult(result, face_id, brush_color, painted_object)
                         self._view.clearCursorStroke()
                         self._updateScene(painted_object, update_node=event_caught)
@@ -687,7 +687,7 @@ class ExtendedPaintTool(Tool):
                     self._view._current_bits_ranges,
                 )
 
-            brush_color = self._brush_color if self.getPaintType() != "extruder" else str(self._brush_extruder)
+            brush_color = str(self._brush_extruder)
             event_caught = False
 
             try:
@@ -785,6 +785,10 @@ class ExtendedPaintTool(Tool):
         self._updateState()
 
     def _onActiveToolChanged(self) -> None:
+        # Ensure extruder paint mode when this tool activates
+        if self._controller.getActiveTool() == self:
+            if self._view.getPaintType() != "extruder":
+                self._view.setPaintType("extruder")
         self._updateActiveView()
         self._updateState()
 
