@@ -92,7 +92,7 @@ class ForceDirectionHandle(ToolHandle):
             axis_len = outer * 2.0  # extend beyond the rings
             d = axis_direction.normalized()
             # Cyan color for the axis line (distinct from ring colors)
-            axis_color = ToolHandle._DisabledSelectionColor  # fallback
+            axis_color = ToolHandle.DisabledSelectionColor  # fallback
             try:
                 from UM.Math.Color import Color
                 axis_color = Color(0.0, 0.85, 0.95, 1.0)  # cyan
