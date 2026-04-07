@@ -197,6 +197,16 @@ class IterativeFEASolver:
             use_easyfea = False
             Logger.log("i", "FEA solve: SIMP OC selected → forcing scipy solver path")
 
+        # EasyFEA's heterogeneous C assembly is too slow for large meshes
+        # (>10K elements → minutes per iteration due to per-element Gauss
+        # integration without C factoring).  The scipy path with vectorized
+        # numpy assembly handles this in <1s.  Force scipy for large meshes.
+        n_elems = tet_mesh.elements.shape[0]
+        if use_easyfea and n_elems > 10000:
+            use_easyfea = False
+            Logger.log("i", "FEA solve: %d elements > 10K threshold → forcing scipy solver "
+                       "(EasyFEA per-element C too slow for large meshes)", n_elems)
+
         if use_easyfea:
             Logger.log("i", "FEA solve: using EasyFEA solver (msh=%s)", tet_mesh.msh_path)
             return self._solve_easyfea(
