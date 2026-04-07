@@ -246,11 +246,16 @@ class LinearElasticitySolver:
 
             t = threading.Thread(target=_direct, daemon=True)
             t.start()
-            t.join(timeout=60.0)
+            # 15s gives spsolve a fair chance — models that SuperLU can handle
+            # typically solve in <5s. Longer timeouts just waste time on matrices
+            # that SuperLU can't factor (ill-conditioned from anisotropic materials
+            # or insufficient BCs). CG fallback handles these robustly.
+            _SPSOLVE_TIMEOUT = 15.0
+            t.join(timeout=_SPSOLVE_TIMEOUT)
             use_direct = not (t.is_alive() or result[0] is None or exc[0] is not None)
 
             if not use_direct:
-                reason = "timeout (60s)" if t.is_alive() else str(exc[0])
+                reason = "timeout (%.0fs)" % _SPSOLVE_TIMEOUT if t.is_alive() else str(exc[0])
                 Logger.log("w", "FEA solve: spsolve %s — skipping spsolve for remaining "
                            "iterations, using CG directly", reason)
                 self._skip_spsolve = True
