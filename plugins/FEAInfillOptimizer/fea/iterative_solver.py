@@ -281,38 +281,44 @@ class IterativeFEASolver:
         for iteration in range(max_iter):
             _iter_t = _time.monotonic()
 
-            # --- Step 1: homogenize (per-element) --------------------------
-            # Each element gets its own stiffness scaled by density^n_exp.
-            # EasyFEA supports heterogeneous materials via per-element C
-            # matrices: when material.C has shape (n_elems, 6, 6) instead of
-            # (6, 6), the stiffness assembly uses per-element properties.
+            # --- Step 1: homogenize ----------------------------------------
+            # EasyFEA with per-element heterogeneous C matrices is too slow
+            # for interactive use (~100s+ per solve for 20K elements) because
+            # it can't factor C out of the Gauss integration loop.
+            #
+            # Pragmatic approach: use MEAN density for the uniform material
+            # in EasyFEA.  This is an approximation — the stress field won't
+            # reflect local stiffness variation within a single iteration,
+            # but the iterative scheme still converges because:
+            # 1. High-stress regions → density increases → mean goes up
+            # 2. Low-stress regions → density stays low → mean stabilizes
+            # 3. The stress PATTERN (where stress concentrates) is largely
+            #    determined by geometry + BCs, not local stiffness variation
+            #
+            # For exact per-element solve, use the scipy solver path which
+            # builds K directly from per-element E_eff arrays.
             _t0 = _time.monotonic()
 
-            # Build base material at full density (scale=1) to get C_base
+            rho_mean = float(np.mean(density))
+            scale = rho_mean ** n_exp
+
             nu_t = nu * (bonding_coeff ** 0.5)
-            G_base = E_xy / (2.0 * (1.0 + nu))
-            E_t_base = E_xy * bonding_coeff
+            E_scaled = E_xy * scale
+            E_t_scaled = E_xy * bonding_coeff * scale
+            G_scaled = E_scaled / (2.0 * (1.0 + nu))
 
             mat = TransverselyIsotropic(
                 dim=3,
-                El=E_xy,
-                Et=E_t_base,
-                Gl=G_base,
+                El=E_scaled,
+                Et=E_t_scaled,
+                Gl=G_scaled,
                 vl=nu,
                 vt=nu_t,
             )
 
-            # Get the base (6,6) constitutive matrix, then scale per element
-            C_base = mat.C.copy()  # (6, 6)
-            scales = np.power(density, n_exp)  # (n_elems,)
-            # Broadcast: (n_elems, 1, 1) * (6, 6) → (n_elems, 6, 6)
-            C_per_elem = scales[:, np.newaxis, np.newaxis] * C_base[np.newaxis, :, :]
-            mat.C = C_per_elem  # triggers isHeterogeneous = True
-
-            Logger.log("d", "FEA EasyFEA iter %d step 1 homogenize: per-element C (%d elems), "
-                       "rho_mean=%.3f, scale_range=[%.4f, %.4f] (%.3fs)",
-                       iteration + 1, n_elems, float(np.mean(density)),
-                       float(scales.min()), float(scales.max()),
+            Logger.log("d", "FEA EasyFEA iter %d step 1 homogenize: mean-density "
+                       "rho_mean=%.3f, scale=%.4f, E_eff=%.1f MPa (%.3fs)",
+                       iteration + 1, rho_mean, scale, E_scaled,
                        _time.monotonic() - _t0)
 
             # --- Step 2: build simulation (observer-safe) -------------------
@@ -331,6 +337,13 @@ class IterativeFEASolver:
             _prev_simu = None  # drop ref so GC can reclaim it
 
             simu = Simulations.Elastic(mesh, mat)
+            # Force the simulation to rebuild its stiffness matrix from scratch
+            # rather than relying on the observer/Need_Update mechanism which
+            # can accumulate stale state between iterations.
+            try:
+                simu.Need_Update()
+            except Exception:
+                pass
             Logger.log("d", "FEA EasyFEA iter %d step 2 build simu: %.3fs",
                        iteration + 1, _time.monotonic() - _t0)
 
