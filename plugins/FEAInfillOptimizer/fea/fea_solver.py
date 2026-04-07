@@ -96,25 +96,8 @@ class LinearElasticitySolver:
         # Get B matrices, volumes, and validity mask (cached per mesh identity)
         B_all, V, valid = self._get_cached_B(tet_mesh)
 
-        # 5. Build D matrices: (M, 6, 6) or (6, 6) if uniform nu
-        if use_aniso:
-            # Per-element D with bonding coefficient
-            D_all = np.stack([
-                build_constitutive_matrix_from_bonding(float(E), float(nu), bonding_coeff)
-                for E, nu in zip(E_per_element, nu_per_element)
-            ])  # (M, 6, 6)
-        else:
-            # Check if all nu are the same (common case)
-            nu_unique = np.unique(nu_per_element)
-            if len(nu_unique) == 1:
-                # D shape depends only on nu; scale by E per element
-                D_unit = build_constitutive_matrix(1.0, float(nu_unique[0]))  # (6, 6)
-                D_all = E_per_element[:, np.newaxis, np.newaxis] * D_unit[np.newaxis, :, :]
-            else:
-                D_all = np.stack([
-                    build_constitutive_matrix(float(E), float(nu))
-                    for E, nu in zip(E_per_element, nu_per_element)
-                ])
+        # 5. Build D matrices — vectorized, handles both isotropic and anisotropic
+        D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)
 
         # 6. Element stiffness: k_e = V * B^T @ D @ B, all at once
         # BtD = B^T @ D: (M, 12, 6) = (M, 12, 6) einsum
