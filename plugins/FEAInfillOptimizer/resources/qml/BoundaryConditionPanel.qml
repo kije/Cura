@@ -7,6 +7,8 @@ import QtQuick.Layouts 1.15
 import UM 1.5 as UM
 import Cura 1.0 as Cura
 
+import "help" as Help
+
 Item
 {
     id: bcPanel
@@ -46,9 +48,45 @@ Item
     readonly property bool   stressOverlayVisible: toolProperties.getValue("StressOverlayVisible") === true || toolProperties.getValue("StressOverlayVisible") === "true"
 
     implicitWidth: 280 * screenScaleFactor
-    implicitHeight: Math.min(600 * screenScaleFactor, (parent ? parent.height * 0.8 : 600 * screenScaleFactor))
+    // Use 80% of the application window height so the panel fills most of
+    // the viewport without overflowing behind Cura's toolbars. Content scrolls.
+    implicitHeight: {
+        try {
+            var w = UM.Controller.activeStage ? UM.Controller.activeStage.mainComponent.height : 0
+            if (w > 200) return w * 0.8
+        } catch(e) {}
+        return 700 * screenScaleFactor
+    }
 
     UM.I18nCatalog { id: catalog; name: "cura" }
+
+    // Help system: content manager and popover
+    Help.HelpContent
+    {
+        id: helpContentManager
+        popoverItem: helpPopover
+    }
+
+    Help.HelpPopover
+    {
+        id: helpPopover
+        parent: bcPanel
+    }
+
+    Help.OnboardingWizard
+    {
+        id: onboardingWizard
+    }
+
+    // Show onboarding on first use
+    Component.onCompleted:
+    {
+        if (UM.Preferences.getValue("fea_optimizer/onboarding_completed") !== true
+            && UM.Preferences.getValue("fea_optimizer/onboarding_completed") !== "true")
+        {
+            onboardingWizard.open()
+        }
+    }
 
     ScrollView
     {
@@ -87,36 +125,74 @@ Item
                     {
                         Layout.fillWidth: true
                         visible: bcPanel.supportListModel.length === 0 && bcPanel.forceListModel.length === 0 && bcPanel.torqueListModel.length === 0
-                        height: visible ? stepGuide.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
+                        height: visible ? stepGuideColumn.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
                         color: UM.Theme.getColor("detail_background")
                         radius: UM.Theme.getSize("default_radius").width
 
-                        UM.Label
+                        ColumnLayout
                         {
-                            id: stepGuide
+                            id: stepGuideColumn
                             anchors
                             {
                                 left: parent.left; right: parent.right
                                 verticalCenter: parent.verticalCenter
                                 margins: UM.Theme.getSize("default_margin").width
                             }
-                            wrapMode: Text.WordWrap
-                            color: UM.Theme.getColor("text")
-                            font: UM.Theme.getFont("small")
-                            text: catalog.i18nc("@info",
-                                "Quick start:\n" +
-                                "1. Select 'Support / Mount' and click faces where the part is held\n" +
-                                "2. Select 'Apply Load' and click faces where forces act\n" +
-                                "3. Set the load amount and click 'Confirm Load'\n" +
-                                "4. Click 'Confirm and Optimize' to run analysis")
+                            spacing: UM.Theme.getSize("default_margin").height / 2
+
+                            UM.Label
+                            {
+                                id: stepGuide
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                color: UM.Theme.getColor("text")
+                                font: UM.Theme.getFont("small")
+                                text: catalog.i18nc("@info",
+                                    "Quick start:\n" +
+                                    "1. Select 'Support / Mount' and click faces where the part is held\n" +
+                                    "2. Select 'Apply Load' and click faces where forces act\n" +
+                                    "3. Set the load amount and click 'Confirm Load'\n" +
+                                    "4. Click 'Confirm and Optimize' to run analysis")
+                            }
+
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                text: catalog.i18nc("@action", "Show Tutorial")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("primary")
+
+                                MouseArea
+                                {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked:
+                                    {
+                                        onboardingWizard.currentStep = 0
+                                        onboardingWizard.open()
+                                    }
+                                }
+                            }
                         }
                     }
 
                     // ── Quick setup ───────────────────────────────────────
-                    UM.Label
+                    RowLayout
                     {
-                        text: catalog.i18nc("@label", "Quick Setup")
-                        font: UM.Theme.getFont("medium_bold")
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@label", "Quick Setup")
+                            font: UM.Theme.getFont("medium_bold")
+                            Layout.fillWidth: true
+                        }
+
+                        Help.HelpTooltipIcon
+                        {
+                            tooltipText: catalog.i18nc("@tooltip", "One-click setups for common load scenarios like gravity, cantilever beams, and bolt-hole mounting.")
+                        }
                     }
 
                     Rectangle
@@ -219,14 +295,26 @@ Item
                         {
                             spacing: UM.Theme.getSize("default_margin").height / 2
 
-                            // Instruction diagram
-                            Image
+                            // Instruction diagram with guide link
+                            RowLayout
                             {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 80 * screenScaleFactor
-                                fillMode: Image.PreserveAspectFit
-                                source: Qt.resolvedUrl("../icons/guide_support.svg")
                                 Layout.bottomMargin: UM.Theme.getSize("default_margin").height / 2
+
+                                Image
+                                {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 80 * screenScaleFactor
+                                    fillMode: Image.PreserveAspectFit
+                                    source: Qt.resolvedUrl("../icons/guide_support.svg")
+                                }
+
+                                Help.HelpTooltipIcon
+                                {
+                                    tooltipText: catalog.i18nc("@tooltip", "Click for full guide on fixed supports")
+                                    guideId: "D01"
+                                    helpContentManager: helpContentManager
+                                }
                             }
 
                             // Instruction text
@@ -248,10 +336,22 @@ Item
                             }
 
                             // Selection helper
-                            UM.Label
+                            RowLayout
                             {
-                                text: catalog.i18nc("@label", "Selection helper")
-                                font: UM.Theme.getFont("medium_bold")
+                                Layout.fillWidth: true
+                                spacing: 4
+
+                                UM.Label
+                                {
+                                    text: catalog.i18nc("@label", "Selection helper")
+                                    font: UM.Theme.getFont("medium_bold")
+                                    Layout.fillWidth: true
+                                }
+
+                                Help.HelpTooltipIcon
+                                {
+                                    tooltipText: catalog.i18nc("@tooltip", "Single: one triangle. Surface: entire flat face. Hole: inside of a circular opening. Cylinder: outside of a round post.")
+                                }
                             }
 
                             RowLayout
@@ -405,15 +505,27 @@ Item
                         {
                             spacing: UM.Theme.getSize("default_margin").height / 2
 
-                            // Instruction diagram
-                            Image
+                            // Instruction diagram with guide link
+                            RowLayout
                             {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 80 * screenScaleFactor
-                                fillMode: Image.PreserveAspectFit
-                                source: Qt.resolvedUrl("../icons/guide_force.svg")
                                 Layout.bottomMargin: UM.Theme.getSize("default_margin").height / 2
                                 visible: bcPanel.currentMode !== "rotate"
+
+                                Image
+                                {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 80 * screenScaleFactor
+                                    fillMode: Image.PreserveAspectFit
+                                    source: Qt.resolvedUrl("../icons/guide_force.svg")
+                                }
+
+                                Help.HelpTooltipIcon
+                                {
+                                    tooltipText: catalog.i18nc("@tooltip", "Click for full guide on applying forces")
+                                    guideId: "D02"
+                                    helpContentManager: helpContentManager
+                                }
                             }
 
                             // Instruction text
@@ -824,15 +936,27 @@ Item
                         {
                             spacing: UM.Theme.getSize("default_margin").height / 2
 
-                            // Instruction diagram
-                            Image
+                            // Instruction diagram with guide link
+                            RowLayout
                             {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 80 * screenScaleFactor
-                                fillMode: Image.PreserveAspectFit
-                                source: Qt.resolvedUrl("../icons/guide_torque.svg")
                                 Layout.bottomMargin: UM.Theme.getSize("default_margin").height / 2
                                 visible: bcPanel.currentMode !== "torque_edit"
+
+                                Image
+                                {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 80 * screenScaleFactor
+                                    fillMode: Image.PreserveAspectFit
+                                    source: Qt.resolvedUrl("../icons/guide_torque.svg")
+                                }
+
+                                Help.HelpTooltipIcon
+                                {
+                                    tooltipText: catalog.i18nc("@tooltip", "Click for full guide on applying torques")
+                                    guideId: "D03"
+                                    helpContentManager: helpContentManager
+                                }
                             }
 
                             // Instruction text
@@ -1341,10 +1465,24 @@ Item
                     }
 
                     // Material
-                    UM.Label
+                    RowLayout
                     {
-                        text: catalog.i18nc("@label", "Material")
-                        font: UM.Theme.getFont("medium_bold")
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@label", "Material")
+                            font: UM.Theme.getFont("medium_bold")
+                            Layout.fillWidth: true
+                        }
+
+                        Help.HelpTooltipIcon
+                        {
+                            tooltipText: catalog.i18nc("@tooltip", "Your printing material determines stiffness (E) and strength. Stiffer materials resist bending; stronger materials resist breaking.")
+                            guideId: "O01"
+                            helpContentManager: helpContentManager
+                        }
                     }
 
                     ComboBox
@@ -1380,10 +1518,24 @@ Item
                     }
 
                     // Infill pattern
-                    UM.Label
+                    RowLayout
                     {
-                        text: catalog.i18nc("@label", "Infill Pattern")
-                        font: UM.Theme.getFont("medium_bold")
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@label", "Infill Pattern")
+                            font: UM.Theme.getFont("medium_bold")
+                            Layout.fillWidth: true
+                        }
+
+                        Help.HelpTooltipIcon
+                        {
+                            tooltipText: catalog.i18nc("@tooltip", "Determines how stiffness scales with density. Gyroid (recommended) is isotropic. Grid/Lines scale differently.")
+                            guideId: "O09"
+                            helpContentManager: helpContentManager
+                        }
                     }
 
                     ComboBox
@@ -1431,10 +1583,24 @@ Item
                     }
 
                     // Safety factor
-                    UM.Label
+                    RowLayout
                     {
-                        text: catalog.i18nc("@label", "Safety Factor")
-                        font: UM.Theme.getFont("medium_bold")
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@label", "Safety Factor")
+                            font: UM.Theme.getFont("medium_bold")
+                            Layout.fillWidth: true
+                        }
+
+                        Help.HelpTooltipIcon
+                        {
+                            tooltipText: catalog.i18nc("@tooltip", "Ratio of material strength to max allowed stress. 2.0x means the part can handle 2x the applied load. Typical: 1.5x lightweight, 2.0x general, 3.0x safety-critical.")
+                            guideId: "O12"
+                            helpContentManager: helpContentManager
+                        }
                     }
 
                     RowLayout
@@ -1464,10 +1630,24 @@ Item
                     }
 
                     // Mesh quality
-                    UM.Label
+                    RowLayout
                     {
-                        text: catalog.i18nc("@label", "Mesh Quality")
-                        font: UM.Theme.getFont("medium_bold")
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        UM.Label
+                        {
+                            text: catalog.i18nc("@label", "Mesh Quality")
+                            font: UM.Theme.getFont("medium_bold")
+                            Layout.fillWidth: true
+                        }
+
+                        Help.HelpTooltipIcon
+                        {
+                            tooltipText: catalog.i18nc("@tooltip", "Controls mesh density. Fast: ~5K elements (quick). Balanced: ~15K (good tradeoff). Precise: ~50K (accurate but slower). Use Precise for thin-walled parts.")
+                            guideId: "O13"
+                            helpContentManager: helpContentManager
+                        }
                     }
 
                     ColumnLayout
@@ -1542,6 +1722,11 @@ Item
                                     text: catalog.i18nc("@label", "Advanced Settings")
                                     font: UM.Theme.getFont("small")
                                     color: UM.Theme.getColor("text_medium")
+                                }
+
+                                Help.HelpTooltipIcon
+                                {
+                                    tooltipText: catalog.i18nc("@tooltip", "Fine-tune min/max infill density, density steps, iteration count, layer bonding, and optimization method.")
                                 }
 
                                 UM.ColorImage
@@ -1869,7 +2054,7 @@ Item
                     Rectangle
                     {
                         Layout.fillWidth: true
-                        height: visible ? verdictLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        height: visible ? verdictRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
                         radius: UM.Theme.getSize("default_radius").width
                         color: {
                             var v = bcPanel.safetyVerdict
@@ -1880,25 +2065,39 @@ Item
                             return UM.Theme.getColor("main_background")
                         }
 
-                        UM.Label
+                        RowLayout
                         {
-                            id: verdictLabel
+                            id: verdictRow
                             anchors
                             {
                                 left: parent.left; right: parent.right
                                 verticalCenter: parent.verticalCenter
                                 margins: UM.Theme.getSize("default_margin").width
                             }
-                            wrapMode: Text.WordWrap
-                            color: UM.Theme.getColor("button_text")
-                            font: UM.Theme.getFont("medium_bold")
-                            text: {
-                                var v = bcPanel.safetyVerdict
-                                if (v === "unsafe")       return "✗ " + catalog.i18nc("@info", "Unsafe: Part may fail under this load. Increase max infill or redesign.")
-                                if (v === "marginal")     return "⚠ " + catalog.i18nc("@info", "Marginal: Safety is borderline. Consider increasing max infill density.")
-                                if (v === "safe")         return "✓ " + catalog.i18nc("@info", "Safe: Part should handle this load safely with optimized infill.")
-                                if (v === "conservative") return "ℹ " + catalog.i18nc("@info", "Conservative: Part is over-engineered. You could reduce max infill to save material.")
-                                return catalog.i18nc("@info", "Analysis complete.")
+                            spacing: 4
+
+                            UM.Label
+                            {
+                                id: verdictLabel
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                color: UM.Theme.getColor("button_text")
+                                font: UM.Theme.getFont("medium_bold")
+                                text: {
+                                    var v = bcPanel.safetyVerdict
+                                    if (v === "unsafe")       return "\u2717 " + catalog.i18nc("@info", "Unsafe: Part may fail under this load. Increase max infill or redesign.")
+                                    if (v === "marginal")     return "\u26a0 " + catalog.i18nc("@info", "Marginal: Safety is borderline. Consider increasing max infill density.")
+                                    if (v === "safe")         return "\u2713 " + catalog.i18nc("@info", "Safe: Part should handle this load safely with optimized infill.")
+                                    if (v === "conservative") return "\u2139 " + catalog.i18nc("@info", "Conservative: Part is over-engineered. You could reduce max infill to save material.")
+                                    return catalog.i18nc("@info", "Analysis complete.")
+                                }
+                            }
+
+                            Help.HelpTooltipIcon
+                            {
+                                tooltipText: catalog.i18nc("@tooltip", "Compares peak stress to material yield strength / safety factor. SAFE: well below limit. MARGINAL: close. UNSAFE: exceeds limit. CONSERVATIVE: very low stress.")
+                                guideId: "R01"
+                                helpContentManager: helpContentManager
                             }
                         }
                     }
@@ -1921,36 +2120,53 @@ Item
                                 left: parent.left; right: parent.right; top: parent.top
                                 margins: UM.Theme.getSize("default_margin").width
                             }
-                            columns: 2
+                            columns: 3
                             columnSpacing: UM.Theme.getSize("default_margin").width
                             rowSpacing: UM.Theme.getSize("default_margin").height / 2
 
                             UM.Label { text: catalog.i18nc("@label", "Max Stress:"); font: UM.Theme.getFont("small") }
                             UM.Label
                             {
-                                text: bcPanel.hasResults ? bcPanel.maxStress.toFixed(1) + " MPa" : "—"
+                                text: bcPanel.hasResults ? bcPanel.maxStress.toFixed(1) + " MPa" : "\u2014"
                                 font: UM.Theme.getFont("small")
+                                Layout.fillWidth: true
+                            }
+                            Help.HelpTooltipIcon
+                            {
+                                tooltipText: catalog.i18nc("@tooltip", "Peak von Mises stress. Combines tension, compression, and shear into one value. If this exceeds yield strength / safety factor, the part may fail.")
                             }
 
                             UM.Label { text: catalog.i18nc("@label", "Min Stress:"); font: UM.Theme.getFont("small") }
                             UM.Label
                             {
-                                text: bcPanel.hasResults ? bcPanel.minStress.toFixed(1) + " MPa" : "—"
+                                text: bcPanel.hasResults ? bcPanel.minStress.toFixed(1) + " MPa" : "\u2014"
                                 font: UM.Theme.getFont("small")
+                                Layout.fillWidth: true
                             }
+                            Item { width: 20; height: 20 }
 
                             UM.Label { text: catalog.i18nc("@label", "Safety Factor:"); font: UM.Theme.getFont("small") }
                             UM.Label
                             {
-                                text: bcPanel.hasResults ? bcPanel.safetyFactorResult.toFixed(2) : "—"
+                                text: bcPanel.hasResults ? bcPanel.safetyFactorResult.toFixed(2) : "\u2014"
                                 font: UM.Theme.getFont("small")
+                                Layout.fillWidth: true
+                            }
+                            Help.HelpTooltipIcon
+                            {
+                                tooltipText: catalog.i18nc("@tooltip", "Actual ratio of yield strength to peak stress. Values >1.0 mean the part should survive. This is the result, not the target you set.")
                             }
 
                             UM.Label { text: catalog.i18nc("@label", "Iterations:"); font: UM.Theme.getFont("small") }
                             UM.Label
                             {
-                                text: bcPanel.hasResults ? bcPanel.convergenceIter.toString() : "—"
+                                text: bcPanel.hasResults ? bcPanel.convergenceIter.toString() : "\u2014"
                                 font: UM.Theme.getFont("small")
+                                Layout.fillWidth: true
+                            }
+                            Help.HelpTooltipIcon
+                            {
+                                tooltipText: catalog.i18nc("@tooltip", "Optimization passes completed. If this equals the maximum allowed, the result may not be fully converged.")
                             }
                         }
                     }
@@ -1965,13 +2181,26 @@ Item
                     }
 
                     // Secondary actions
-                    Cura.SecondaryButton
+                    RowLayout
                     {
                         Layout.fillWidth: true
-                        text: bcPanel.stressOverlayVisible
-                            ? catalog.i18nc("@action:button", "Hide Stress Map")
-                            : catalog.i18nc("@action:button", "Show Stress Map")
-                        onClicked: UM.Controller.setProperty("ShowStressOverlay", true)
+                        spacing: 4
+
+                        Cura.SecondaryButton
+                        {
+                            Layout.fillWidth: true
+                            text: bcPanel.stressOverlayVisible
+                                ? catalog.i18nc("@action:button", "Hide Stress Map")
+                                : catalog.i18nc("@action:button", "Show Stress Map")
+                            onClicked: UM.Controller.setProperty("ShowStressOverlay", true)
+                        }
+
+                        Help.HelpTooltipIcon
+                        {
+                            tooltipText: catalog.i18nc("@tooltip", "Overlays a color map showing stress distribution. Dark purple = low stress, yellow = high stress (viridis colorblind-safe gradient).")
+                            guideId: "R06"
+                            helpContentManager: helpContentManager
+                        }
                     }
 
                     RowLayout
