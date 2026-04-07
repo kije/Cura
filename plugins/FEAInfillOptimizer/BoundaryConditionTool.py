@@ -1972,6 +1972,14 @@ class BoundaryConditionTool(Tool):
                     pass
 
     def _update_highlights(self) -> None:
+        # Skip highlight updates during analysis to prevent
+        # "RenderBatch.addItem without mesh" spam on the main thread
+        current_phase = self._extension.phase if self._extension else "define"
+        if current_phase == "running":
+            self._bc_highlight.clear()
+            self._force_handle.hide()
+            return
+
         node = Selection.getSelectedObject(0)
         if node is None or not isinstance(node, CuraSceneNode):
             self._bc_highlight.clear()
