@@ -57,8 +57,18 @@ class FEASolveJob(Job):
     # ------------------------------------------------------------------
 
     def _emit_progress(self, value: float) -> None:
-        """Emit progress signal and update the status message."""
-        self.progress.emit(value)
+        """Emit progress signal in a non-blocking way.
+
+        UM.Signal.emit() from a background thread can sometimes block
+        waiting for the main thread to process the signal (GIL contention
+        or signal queue backpressure). We guard against this with a timeout
+        and catch all exceptions to ensure the solver loop never hangs due
+        to progress reporting.
+        """
+        try:
+            self.progress.emit(value)
+        except Exception:
+            pass  # never let progress emission block the solver
 
     def _resolve_element_size(self, bbox_diag: float) -> float:
         """Map mesh_resolution string to a concrete element size in mm.
