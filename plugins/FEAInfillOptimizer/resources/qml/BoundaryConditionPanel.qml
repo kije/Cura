@@ -23,6 +23,7 @@ Item
     readonly property string selectionMode:    toolProperties.getValue("SelectionMode")    ?? "single"
     readonly property int    activeSupportIdx: toolProperties.getValue("ActiveSupportIndex") ?? -1
     readonly property int    activeForceIdx:   toolProperties.getValue("ActiveForceIndex")   ?? -1
+    readonly property int    activeTorqueIdx:  toolProperties.getValue("ActiveTorqueIndex")  ?? -1
     property string _supportJson: toolProperties.getValue("SupportListModel") ?? "[]"
     property string _forceJson:   toolProperties.getValue("ForceListModel")   ?? "[]"
     property string _torqueJson:  toolProperties.getValue("TorqueListModel")  ?? "[]"
@@ -253,6 +254,8 @@ Item
                                 return catalog.i18nc("@info", "Click faces where a rotational load (twist) is applied. Then set the torque amount below.")
                             if (bcPanel.currentMode === "rotate")
                                 return catalog.i18nc("@info", "Drag the rotation rings to adjust force direction.")
+                            if (bcPanel.currentMode === "torque_edit")
+                                return catalog.i18nc("@info", "Drag the rotation rings to adjust the torque axis direction.")
                             return catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
                         }
                     }
@@ -297,6 +300,67 @@ Item
                             wrapMode: Text.WordWrap
                             color: UM.Theme.getColor("text")
                             text: catalog.i18nc("@info", "Drag the rings to adjust direction. Click 'Support / Mount' or 'Apply Load' to exit.")
+                        }
+                    }
+
+                    // ── Torque axis edit mode indicator ─────────────────
+                    Rectangle
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel.currentMode === "torque_edit"
+                        height: visible ? torqueEditColumn.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        color: Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.15)
+                        radius: UM.Theme.getSize("default_radius").width
+
+                        ColumnLayout
+                        {
+                            id: torqueEditColumn
+                            anchors
+                            {
+                                left: parent.left
+                                right: parent.right
+                                verticalCenter: parent.verticalCenter
+                                margins: UM.Theme.getSize("default_margin").width
+                            }
+                            spacing: UM.Theme.getSize("default_margin").height / 2
+
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                color: UM.Theme.getColor("text")
+                                font: UM.Theme.getFont("small_bold")
+                                text: catalog.i18nc("@info", "Editing Torque Axis — Drag the rings to rotate the axis direction")
+                            }
+
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_medium")
+                                text: {
+                                    var idx = bcPanel.activeTorqueIdx
+                                    if (idx >= 0 && idx < bcPanel.torqueListModel.length) {
+                                        var tg = bcPanel.torqueListModel[idx]
+                                        return catalog.i18nc("@info", "Current axis: [%1, %2, %3]")
+                                            .arg(tg.axisX !== undefined ? tg.axisX.toFixed(3) : "?")
+                                            .arg(tg.axisY !== undefined ? tg.axisY.toFixed(3) : "?")
+                                            .arg(tg.axisZ !== undefined ? tg.axisZ.toFixed(3) : "?")
+                                    }
+                                    return ""
+                                }
+                            }
+
+                            Cura.SecondaryButton
+                            {
+                                Layout.fillWidth: true
+                                text: catalog.i18nc("@action:button", "Done Editing Axis")
+                                onClicked:
+                                {
+                                    UM.Controller.setProperty("ActiveTorqueIndex", -1)
+                                    defineColumn.editingTorqueIndex = -1
+                                }
+                            }
                         }
                     }
 
@@ -556,40 +620,80 @@ Item
                             Rectangle
                             {
                                 width: defineColumn.width
-                                height: torqueRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
-                                color: defineColumn.editingTorqueIndex === modelData.index
-                                    ? UM.Theme.getColor("primary")
-                                    : UM.Theme.getColor("main_background")
+                                height: torqueRowLayout.implicitHeight + UM.Theme.getSize("default_margin").height
+                                color: bcPanel.activeTorqueIdx === modelData.index
+                                    ? Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.5)
+                                    : defineColumn.editingTorqueIndex === modelData.index
+                                        ? UM.Theme.getColor("primary")
+                                        : UM.Theme.getColor("main_background")
                                 border.color: UM.Theme.getColor("lining")
                                 border.width: UM.Theme.getSize("default_lining").width
                                 radius: UM.Theme.getSize("default_radius").width
 
-                                RowLayout
+                                ColumnLayout
                                 {
+                                    id: torqueRowLayout
                                     anchors.fill: parent
                                     anchors.margins: UM.Theme.getSize("default_margin").width / 2
+                                    spacing: 2
 
-                                    UM.Label
+                                    RowLayout
                                     {
-                                        id: torqueRowLabel
                                         Layout.fillWidth: true
-                                        text: modelData.label
-                                        color: UM.Theme.getColor("text")
-                                        elide: Text.ElideRight
+
+                                        UM.Label
+                                        {
+                                            id: torqueRowLabel
+                                            Layout.fillWidth: true
+                                            text: modelData.label
+                                            color: UM.Theme.getColor("text")
+                                            elide: Text.ElideRight
+                                        }
+
+                                        UM.Label
+                                        {
+                                            text: catalog.i18nc("@action", "Edit Axis")
+                                            font: UM.Theme.getFont("small")
+                                            color: UM.Theme.getColor("primary")
+
+                                            MouseArea
+                                            {
+                                                anchors.fill: parent
+                                                onClicked:
+                                                {
+                                                    defineColumn.editingForceIndex = -1
+                                                    UM.Controller.setProperty("ActiveForceIndex", -1)
+                                                    UM.Controller.setProperty("ActiveTorqueIndex", modelData.index)
+                                                }
+                                            }
+                                        }
+
+                                        UM.ColorImage
+                                        {
+                                            source: UM.Theme.getIcon("Cancel")
+                                            color: UM.Theme.getColor("text_medium")
+                                            width: UM.Theme.getSize("small_button_icon").width
+                                            height: width
+
+                                            MouseArea
+                                            {
+                                                anchors.fill: parent
+                                                onClicked: UM.Controller.setProperty("DeleteTorqueGroup", modelData.index)
+                                            }
+                                        }
                                     }
 
-                                    UM.ColorImage
+                                    // Show axis values inline when this torque is being edited
+                                    UM.Label
                                     {
-                                        source: UM.Theme.getIcon("Cancel")
+                                        visible: bcPanel.activeTorqueIdx === modelData.index
+                                        Layout.fillWidth: true
+                                        font: UM.Theme.getFont("small")
                                         color: UM.Theme.getColor("text_medium")
-                                        width: UM.Theme.getSize("small_button_icon").width
-                                        height: width
-
-                                        MouseArea
-                                        {
-                                            anchors.fill: parent
-                                            onClicked: UM.Controller.setProperty("DeleteTorqueGroup", modelData.index)
-                                        }
+                                        text: catalog.i18nc("@info", "Axis: [%1, %2, %3]")
+                                            .arg(modelData.axisX !== undefined ? modelData.axisX.toFixed(3) : "?")
+                                            .arg(modelData.axisY !== undefined ? modelData.axisY.toFixed(3) : "?")
+                                            .arg(modelData.axisZ !== undefined ? modelData.axisZ.toFixed(3) : "?")
                                     }
                                 }
 
@@ -665,6 +769,7 @@ Item
                                         defineColumn.editingForceIndex = -1
                                         defineColumn.editingTorqueIndex = -1
                                         UM.Controller.setProperty("ActiveForceIndex", -1)
+                                        UM.Controller.setProperty("ActiveTorqueIndex", -1)
                                     }
                                 }
                             }
@@ -919,6 +1024,7 @@ Item
                             defineColumn.editingForceIndex = -1
                             defineColumn.editingTorqueIndex = -1
                             UM.Controller.setProperty("ActiveForceIndex", -1)
+                            UM.Controller.setProperty("ActiveTorqueIndex", -1)
                         }
                     }
 

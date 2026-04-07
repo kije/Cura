@@ -151,6 +151,29 @@ class RemoveTorqueGroupOperation(Operation):
         self._decorator.removeTorqueGroup(self._index)
 
 
+class UpdateTorqueAxisOperation(Operation):
+    """Undoable update of a torque group's axis direction.
+
+    The axis is mutated in-place during drag; this operation receives both
+    the old (pre-drag) and new (post-drag) axes so undo/redo work correctly.
+    Note: ``redo()`` is called automatically by ``push()``, but the axis is
+    already set during drag — ``updateTorqueAxis`` is idempotent.
+    """
+
+    def __init__(self, decorator, index: int, old_axis: Vector, new_axis: Vector):
+        super().__init__()
+        self._decorator = decorator
+        self._index = index
+        self._old_axis = Vector(old_axis.x, old_axis.y, old_axis.z)
+        self._new_axis = Vector(new_axis.x, new_axis.y, new_axis.z)
+
+    def undo(self):
+        self._decorator.updateTorqueAxis(self._index, self._old_axis)
+
+    def redo(self):
+        self._decorator.updateTorqueAxis(self._index, self._new_axis)
+
+
 class ClearAllBCsOperation(Operation):
     """Undoable clear-all; snapshots full BC state for undo."""
 

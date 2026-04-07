@@ -128,6 +128,11 @@ class FEABoundaryConditionDecorator(SceneNodeDecorator):
         if 0 <= index < len(self._torque_groups):
             self._torque_groups.pop(index)
 
+    def updateTorqueAxis(self, index: int, new_axis: Vector) -> None:
+        """Update the torque axis direction for a torque group at the given index."""
+        if 0 <= index < len(self._torque_groups):
+            self._torque_groups[index].torque_axis = new_axis
+
     def clearTorqueGroups(self) -> None:
         self._torque_groups.clear()
 

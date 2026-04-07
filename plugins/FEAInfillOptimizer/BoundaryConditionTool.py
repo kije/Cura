@@ -50,6 +50,7 @@ from .operations.bc_operations import (
     AddTorqueGroupOperation,
     RemoveTorqueGroupOperation,
     ClearAllBCsOperation,
+    UpdateTorqueAxisOperation,
 )
 from .visualization.bc_highlight import BCHighlightHandle
 from .visualization.force_direction_handle import (
@@ -75,6 +76,7 @@ MODE_FIXED = "fixed"
 MODE_FORCE = "force"
 MODE_TORQUE = "torque"
 MODE_ROTATE = "rotate"
+MODE_TORQUE_EDIT = "torque_edit"
 
 
 class BoundaryConditionTool(Tool):
@@ -113,6 +115,10 @@ class BoundaryConditionTool(Tool):
 
         # Torque state
         self._torque_magnitude = 1.0  # Nm
+        self._editing_torque_index = -1  # Index of the torque group being edited (-1 = none)
+        self._torque_edit_drag_active = False
+        self._torque_edit_angle = 0.0
+        self._torque_axis_before_drag: Optional[Vector] = None  # axis at drag start for undo
 
         # Hover preview faces (shown in orange when mouse hovers over model)
         self._hover_faces: list = []
@@ -163,7 +169,7 @@ class BoundaryConditionTool(Tool):
             "QuickSetupMode", "QuickHoleDiameter",
             "TorqueMagnitude", "ConfirmTorqueGroup",
             "TorqueListModel", "DeleteTorqueGroup",
-            "ActiveSupportIndex", "ActiveForceIndex",
+            "ActiveSupportIndex", "ActiveForceIndex", "ActiveTorqueIndex",
             "SupportListModel", "ForceListModel",
             "SelectionMode",
             "DeleteActiveSupport", "DeleteActiveForce",
@@ -192,15 +198,16 @@ class BoundaryConditionTool(Tool):
         return self._mode
 
     def setMode(self, mode: str) -> None:
-        if mode in (MODE_FIXED, MODE_FORCE, MODE_TORQUE, MODE_ROTATE):
+        if mode in (MODE_FIXED, MODE_FORCE, MODE_TORQUE, MODE_ROTATE, MODE_TORQUE_EDIT):
             self._mode = mode
             self._current_face_selection.clear()
             self._hover_faces = []
             self._hover_generation += 1  # invalidate pending hover
             self._hover_pending = False
-            if mode != MODE_ROTATE:
+            if mode not in (MODE_ROTATE, MODE_TORQUE_EDIT):
                 self._force_handle.hide()
                 self._rotating_group_index = -1
+                self._editing_torque_index = -1
             self.propertyChanged.emit()
             self._update_highlights()
 
@@ -287,6 +294,8 @@ class BoundaryConditionTool(Tool):
             parts.append(f"Pending: {len(self._current_face_selection)} faces")
         if self._mode == MODE_ROTATE and self._rotating_group_index >= 0:
             parts.append(f"Rotating force {self._rotating_group_index + 1} direction")
+        if self._mode == MODE_TORQUE_EDIT and self._editing_torque_index >= 0:
+            parts.append(f"Editing torque {self._editing_torque_index + 1} axis")
         return "\n".join(parts) if parts else "No BCs defined. Click faces to begin."
 
     # ── Action trigger properties ──────────────────────────────────────────
@@ -868,6 +877,9 @@ class BoundaryConditionTool(Tool):
             result.append({
                 "index": i,
                 "label": f"Torque {i + 1}: {tg.torque_magnitude:.1f}Nm ({len(tg.face_indices)} faces)",
+                "axisX": round(tg.torque_axis.x, 3),
+                "axisY": round(tg.torque_axis.y, 3),
+                "axisZ": round(tg.torque_axis.z, 3),
             })
         return json.dumps(result)
 
@@ -884,6 +896,12 @@ class BoundaryConditionTool(Tool):
         bc = selected.callDecoration("getBoundaryConditions")
         if bc is not None and hasattr(bc, "removeTorqueGroup"):
             RemoveTorqueGroupOperation(bc, index).push()
+            if self._editing_torque_index == index:
+                self._force_handle.hide()
+                self._editing_torque_index = -1
+                self._mode = MODE_TORQUE
+            elif self._editing_torque_index > index:
+                self._editing_torque_index -= 1
             self.propertyChanged.emit()
             self._update_highlights()
 
@@ -925,6 +943,55 @@ class BoundaryConditionTool(Tool):
                             verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
                             verts_world = (transform @ verts_h.T).T[:, :3]
                             centroid = compute_face_centroid(verts_world, indices, fg.face_indices)
+                            bbox = selected.getBoundingBox()
+                            if bbox:
+                                diag = math.sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
+                                scale = max(0.1, diag / 80.0)
+                            else:
+                                scale = 1.0
+                            self._force_handle.show_at(centroid, scale=scale)
+        self.propertyChanged.emit()
+        self._update_highlights()
+
+    # ── Torque edit index property ────────────────────────────────────────
+
+    def getActiveTorqueIndex(self) -> int:
+        return self._editing_torque_index
+
+    def setActiveTorqueIndex(self, index: int) -> None:
+        self._editing_torque_index = int(index)
+        if self._editing_torque_index < 0:
+            # Exit torque edit mode
+            if self._mode == MODE_TORQUE_EDIT:
+                self._mode = MODE_TORQUE
+                self._force_handle.hide()
+            self.propertyChanged.emit()
+            self._update_highlights()
+            return
+
+        # Enter torque edit mode with gizmo at the torque group centroid
+        selected = Selection.getSelectedObject(0)
+        if selected is not None:
+            bc = selected.callDecoration("getBoundaryConditions")
+            if bc is not None:
+                groups = bc.getTorqueGroups()
+                if 0 <= self._editing_torque_index < len(groups):
+                    tg = groups[self._editing_torque_index]
+                    self._torque_magnitude = tg.torque_magnitude
+                    self._mode = MODE_TORQUE_EDIT
+                    # Clear force rotation state
+                    self._rotating_group_index = -1
+                    self._active_force_index = -1
+
+                    mesh_data = selected.getMeshData()
+                    if mesh_data is not None:
+                        verts = mesh_data.getVertices()
+                        indices = mesh_data.getIndices()
+                        if verts is not None:
+                            transform = selected.getWorldTransformation().getData()
+                            verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
+                            verts_world = (transform @ verts_h.T).T[:, :3]
+                            centroid = compute_face_centroid(verts_world, indices, tg.face_indices)
                             bbox = selected.getBoundingBox()
                             if bbox:
                                 diag = math.sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
@@ -1064,6 +1131,7 @@ class BoundaryConditionTool(Tool):
             self._bc_highlight.clear()
             self._force_handle.hide()
             self._rotating_group_index = -1
+            self._editing_torque_index = -1
             self._hover_faces = []
             self._hover_generation += 1  # invalidate any pending hover computation
             self._hover_pending = False
@@ -1082,6 +1150,10 @@ class BoundaryConditionTool(Tool):
         if event.type == Event.MouseMoveEvent and self._mode in (MODE_FIXED, MODE_FORCE, MODE_TORQUE):
             self._update_hover_preview(event)
             # Don't return True — let the event propagate for camera control
+
+        # ── Torque edit mode: handle ring dragging for torque axis ──────────
+        if self._mode == MODE_TORQUE_EDIT and self._editing_torque_index >= 0:
+            return self._handle_torque_edit_event(event)
 
         # ── Rotation mode: handle ring dragging ────────────────────────────
         if self._mode == MODE_ROTATE and self._rotating_group_index >= 0:
@@ -1289,6 +1361,132 @@ class BoundaryConditionTool(Tool):
 
         return False
 
+    # ── Torque axis edit event handler ───────────────────────────────────
+
+    def _handle_torque_edit_event(self, event: Event) -> bool:
+        """Handle mouse events when editing a torque axis direction."""
+        if event.type == Event.MousePressEvent and MouseEvent.LeftButton in event.buttons:
+            if self._selection_pass is None:
+                self._selection_pass = Application.getInstance().getRenderer().getRenderPass("selection")
+
+            selection_id = self._selection_pass.getIdAtPosition(event.x, event.y)
+            if not selection_id:
+                return False
+
+            if self._force_handle.isAxis(selection_id):
+                self.setLockedAxis(selection_id)
+                handle_pos = self._force_handle.center
+
+                if selection_id == ToolHandle.XAxis:
+                    self.setDragPlane(Plane(Vector.Unit_X, handle_pos.x))
+                elif selection_id == ToolHandle.YAxis:
+                    self.setDragPlane(Plane(Vector.Unit_Y, handle_pos.y))
+                elif selection_id == ToolHandle.ZAxis:
+                    self.setDragPlane(Plane(Vector.Unit_Z, handle_pos.z))
+
+                self.setDragStart(event.x, event.y)
+                self._torque_edit_drag_active = True
+                self._torque_edit_angle = 0.0
+
+                # Capture the axis before drag for undo
+                selected = Selection.getSelectedObject(0)
+                if selected is not None:
+                    bc = selected.callDecoration("getBoundaryConditions")
+                    if bc is not None:
+                        groups = bc.getTorqueGroups()
+                        if 0 <= self._editing_torque_index < len(groups):
+                            ax = groups[self._editing_torque_index].torque_axis
+                            self._torque_axis_before_drag = Vector(ax.x, ax.y, ax.z)
+
+                return True
+            return False
+
+        if event.type == Event.MouseMoveEvent and self._torque_edit_drag_active:
+            if not self.getDragPlane() or not self.getDragStart():
+                return False
+
+            handle_pos = self._force_handle.center
+            drag_start = (self.getDragStart() - handle_pos).normalized()
+            drag_position = self.getDragPosition(event.x, event.y)
+            if not drag_position:
+                return False
+            drag_end = (drag_position - handle_pos).normalized()
+
+            try:
+                angle = math.acos(max(-1.0, min(1.0, drag_start.dot(drag_end))))
+            except ValueError:
+                angle = 0
+
+            # Snap to 1-degree increments
+            snap = math.radians(1)
+            angle = int(angle / snap) * snap
+            if angle == 0:
+                return False
+
+            # Determine rotation direction
+            if self.getLockedAxis() == ToolHandle.XAxis:
+                direction = 1 if Vector.Unit_X.dot(drag_start.cross(drag_end)) > 0 else -1
+                axis = Vector.Unit_X
+            elif self.getLockedAxis() == ToolHandle.YAxis:
+                direction = 1 if Vector.Unit_Y.dot(drag_start.cross(drag_end)) > 0 else -1
+                axis = Vector.Unit_Y
+            elif self.getLockedAxis() == ToolHandle.ZAxis:
+                direction = 1 if Vector.Unit_Z.dot(drag_start.cross(drag_end)) > 0 else -1
+                axis = Vector.Unit_Z
+            else:
+                return False
+
+            self._torque_edit_angle += direction * angle
+
+            # Apply rotation to the torque axis direction
+            selected = Selection.getSelectedObject(0)
+            if selected is None:
+                return False
+            bc = selected.callDecoration("getBoundaryConditions")
+            if bc is None:
+                return False
+            groups = bc.getTorqueGroups()
+            if self._editing_torque_index >= len(groups):
+                return False
+
+            tg = groups[self._editing_torque_index]
+            new_axis = rotate_vector(tg.torque_axis, axis, direction * angle)
+            # Normalise the axis to avoid drift
+            length = math.sqrt(new_axis.x**2 + new_axis.y**2 + new_axis.z**2)
+            if length > 1e-9:
+                new_axis = Vector(new_axis.x / length, new_axis.y / length, new_axis.z / length)
+            tg.torque_axis = new_axis
+
+            self.setDragStart(event.x, event.y)
+            self.propertyChanged.emit()
+            self._update_highlights()
+            return True
+
+        if event.type == Event.MouseReleaseEvent and self._torque_edit_drag_active:
+            self._torque_edit_drag_active = False
+            self.setDragPlane(None)
+            self.setLockedAxis(ToolHandle.NoAxis)
+            self._torque_edit_angle = 0.0
+
+            # Push an undo operation for the completed drag
+            selected = Selection.getSelectedObject(0)
+            if selected is not None and self._torque_axis_before_drag is not None:
+                bc = selected.callDecoration("getBoundaryConditions")
+                if bc is not None:
+                    groups = bc.getTorqueGroups()
+                    if 0 <= self._editing_torque_index < len(groups):
+                        tg = groups[self._editing_torque_index]
+                        UpdateTorqueAxisOperation(
+                            bc, self._editing_torque_index,
+                            self._torque_axis_before_drag, tg.torque_axis
+                        ).push()
+            self._torque_axis_before_drag = None
+
+            self.propertyChanged.emit()
+            return True
+
+        return False
+
     # ── Face finding ───────────────────────────────────────────────────────
 
     def _find_closest_face(self, node: CuraSceneNode, picked_position: Vector) -> Optional[int]:
@@ -1419,7 +1617,29 @@ class BoundaryConditionTool(Tool):
             bc, list(self._current_face_selection), normal, self._torque_magnitude
         ).push()
 
+        # Enter torque edit mode so user can adjust the axis direction
+        group_index = len(bc.getTorqueGroups()) - 1
+        self._editing_torque_index = group_index
         self._current_face_selection.clear()
+        self._mode = MODE_TORQUE_EDIT
+
+        # Show rotation rings at the torque centroid (in world space)
+        transform = selected.getWorldTransformation().getData()
+        verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
+        verts_world = (transform @ verts_h.T).T[:, :3]
+        centroid = compute_face_centroid(
+            verts_world, indices, bc.getTorqueGroups()[group_index].face_indices
+        )
+
+        # Scale rings relative to model bounding box
+        bbox = selected.getBoundingBox()
+        if bbox:
+            diag = math.sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
+            scale = max(0.1, diag / 80.0)
+        else:
+            scale = 1.0
+        self._force_handle.show_at(centroid, scale=scale)
+
         self.propertyChanged.emit()
         self._update_highlights()
 
@@ -1433,6 +1653,7 @@ class BoundaryConditionTool(Tool):
         self._current_face_selection.clear()
         self._force_handle.hide()
         self._rotating_group_index = -1
+        self._editing_torque_index = -1
         self._active_support_index = -1
         self._active_force_index = -1
         self._mode = MODE_FIXED
