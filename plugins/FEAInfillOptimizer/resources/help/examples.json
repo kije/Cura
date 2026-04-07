@@ -1,0 +1,249 @@
+{
+    "version": 1,
+    "examples": [
+        {
+            "id": "EX01",
+            "title": "Wall-Mount Shelf Bracket",
+            "subtitle": "Cantilever with gravity load",
+            "category": ["Bracket"],
+            "difficulty": "Beginner",
+            "image": "../icons/examples/ex01_shelf_bracket.svg",
+            "image_alt": "L-shaped bracket with back plate highlighted green (fixed) and top shelf surface highlighted red with downward arrows (force).",
+            "scenario": "L-shaped bracket screwed to a wall, supporting a shelf. Classic cantilever bending. The highest stress occurs at the inner corner of the L-bend.",
+            "supports": {
+                "description": "Back plate (the face against the wall, where screws go).",
+                "selection_mode": "Surface",
+                "instructions": "Click the flat back face. It should highlight entirely."
+            },
+            "forces": [
+                {
+                    "description": "Downward load from shelf contents.",
+                    "magnitude_N": 50,
+                    "direction": "Downward (-Y)",
+                    "selection_mode": "Surface",
+                    "face": "Top shelf-bearing surface",
+                    "estimation": "Shelf load 5 kg x 10 N/kg = 50 N"
+                }
+            ],
+            "torques": [],
+            "key_insights": [
+                "Highest stress at the inner corner of the L-bend.",
+                "If the bracket fails, it will fail at the bend.",
+                "Increase infill density in the bend region."
+            ],
+            "expected_stress": "Stress concentration at the inner corner of the L-bend. Low stress on the flat plates.",
+            "recommended_settings": {
+                "material": "PLA or PETG",
+                "safety_factor": "2.0x",
+                "mesh_quality": "Balanced",
+                "infill_pattern": "Gyroid"
+            }
+        },
+        {
+            "id": "EX02",
+            "title": "Robot Arm Joint Bracket",
+            "subtitle": "Fixed + Force + Torque",
+            "category": ["Bracket", "Robotics"],
+            "difficulty": "Intermediate",
+            "image": "../icons/examples/ex02_robot_arm_bracket.svg",
+            "image_alt": "Structural bracket with upper plate highlighted green (fixed), lower bore highlighted red (force down), and flange face highlighted blue with curved arrows (torque).",
+            "scenario": "Structural bracket connecting a servo gearbox to a robot arm base. Handles vertical load (arm weight) and rotational load (servo torque).",
+            "supports": {
+                "description": "Upper flat plate (bolted to base frame).",
+                "selection_mode": "Surface",
+                "instructions": "Click the top flat mounting face."
+            },
+            "forces": [
+                {
+                    "description": "Arm weight + payload acting on gearbox seat.",
+                    "magnitude_N": 50,
+                    "direction": "Downward (-Y)",
+                    "selection_mode": "Hole",
+                    "face": "Gearbox seat hole inner wall",
+                    "estimation": "Arm 0.5 kg + payload 4.5 kg = 5 kg x 10 = 50 N"
+                }
+            ],
+            "torques": [
+                {
+                    "description": "Servo output torque through flange bolt circle.",
+                    "magnitude_Nm": 5,
+                    "axis": "Z (perpendicular to flange)",
+                    "selection_mode": "Surface",
+                    "face": "Circular flange face (NOT the hole inner wall)"
+                }
+            ],
+            "key_insights": [
+                "Select the flange FACE for torque, not the hole wall.",
+                "Torque transfers through the bolt pattern on the flat face.",
+                "Highest stress at the bracket's narrow neck."
+            ],
+            "expected_stress": "Highest stress at the bracket's narrow neck between mounting plate and gearbox seat. Moderate stress around bolt holes.",
+            "recommended_settings": {
+                "material": "CF-Nylon or PETG",
+                "safety_factor": "2.5x",
+                "mesh_quality": "Balanced or Fine",
+                "infill_pattern": "Gyroid"
+            }
+        },
+        {
+            "id": "EX03",
+            "title": "Motor Mount Housing",
+            "subtitle": "Vibration + bolt holes",
+            "category": ["Enclosure", "Motor Mount"],
+            "difficulty": "Intermediate",
+            "image": "../icons/examples/ex03_motor_mount.svg",
+            "image_alt": "Box-shaped housing with bottom feet highlighted green (fixed), motor seat highlighted red (force), and motor ring highlighted blue with curved arrows (torque).",
+            "scenario": "Enclosure for a small DC motor or gearbox. Must resist vibration forces and torque reaction from the motor.",
+            "supports": {
+                "description": "Bottom plate or mounting feet.",
+                "selection_mode": "Surface / Fix Bolt Holes",
+                "instructions": "Use Fix Bolt Holes quick setup, or Surface mode on the bottom plate."
+            },
+            "forces": [
+                {
+                    "description": "Motor vibration force on motor seat.",
+                    "magnitude_N": 10,
+                    "direction": "Perpendicular to motor axis",
+                    "selection_mode": "Surface",
+                    "face": "Motor seat inner wall",
+                    "estimation": "Small motor vibration: 5-10 N"
+                }
+            ],
+            "torques": [
+                {
+                    "description": "Motor reaction torque.",
+                    "magnitude_Nm": 1,
+                    "axis": "Along motor shaft",
+                    "selection_mode": "Surface",
+                    "face": "Motor seat ring face"
+                }
+            ],
+            "key_insights": [
+                "Vibration forces are cyclic - use higher safety factor (3.0x).",
+                "Linear FEA cannot model fatigue directly.",
+                "Higher safety factor provides fatigue margin."
+            ],
+            "expected_stress": "Stress around motor seat and bolt holes. Low stress on housing walls (unless thin).",
+            "recommended_settings": {
+                "material": "PETG or Nylon",
+                "safety_factor": "3.0x",
+                "mesh_quality": "Balanced",
+                "infill_pattern": "Gyroid"
+            }
+        },
+        {
+            "id": "EX04",
+            "title": "Structural Beam",
+            "subtitle": "Simply supported with distributed load",
+            "category": ["Beam"],
+            "difficulty": "Beginner",
+            "image": "../icons/examples/ex04_supported_beam.svg",
+            "image_alt": "Horizontal beam with both end faces highlighted green (fixed) and top face highlighted red with downward arrows (force).",
+            "scenario": "Horizontal beam supported at both ends, loaded from above. Common for shelving crossbars and bridging elements.",
+            "supports": {
+                "description": "Both end faces.",
+                "selection_mode": "Surface",
+                "instructions": "Click each end face using Surface mode."
+            },
+            "forces": [
+                {
+                    "description": "Downward load on top face.",
+                    "magnitude_N": 100,
+                    "direction": "Downward (-Y)",
+                    "selection_mode": "Surface",
+                    "face": "Top face of the beam",
+                    "estimation": "Total weight the beam carries (e.g., 10 kg = 100 N)"
+                }
+            ],
+            "torques": [],
+            "key_insights": [
+                "Max stress at the center (bottom in tension, top in compression).",
+                "Classic bending pattern visible in stress map.",
+                "Supports on both ends prevent cantilever behavior."
+            ],
+            "expected_stress": "Maximum stress at mid-span, decreasing toward supports. Bottom face in tension (higher stress).",
+            "recommended_settings": {
+                "material": "PLA",
+                "safety_factor": "2.0x",
+                "mesh_quality": "Balanced",
+                "infill_pattern": "Gyroid"
+            }
+        },
+        {
+            "id": "EX05",
+            "title": "Clamped Plate with Pressure",
+            "subtitle": "Edges fixed, face loaded",
+            "category": ["Plate", "Enclosure"],
+            "difficulty": "Intermediate",
+            "image": "../icons/examples/ex05_clamped_plate.svg",
+            "image_alt": "Flat plate with all four edge faces highlighted green (fixed) and the large top face highlighted red with downward arrows (pressure).",
+            "scenario": "Flat plate clamped around its edges under uniform pressure. Examples: enclosure lid, window panel, tank wall.",
+            "supports": {
+                "description": "All four edge faces (or entire perimeter).",
+                "selection_mode": "Surface",
+                "instructions": "Select each edge face using Surface mode."
+            },
+            "forces": [
+                {
+                    "description": "Uniform pressure on top face.",
+                    "magnitude_N": 25,
+                    "direction": "Downward (-Y)",
+                    "selection_mode": "Surface",
+                    "face": "Large flat top face",
+                    "estimation": "0.1 bar = 10,000 Pa on 50x50mm = 25 N total"
+                }
+            ],
+            "torques": [],
+            "key_insights": [
+                "If deflection > 10% of thickness, linear assumption is less accurate.",
+                "Use Fine mesh for thin plates to capture bending gradient.",
+                "Max stress at center and clamped edges."
+            ],
+            "expected_stress": "Maximum stress at the center and at the clamped edges. Zero stress at mid-thickness.",
+            "recommended_settings": {
+                "material": "PC or PETG",
+                "safety_factor": "2.5x",
+                "mesh_quality": "Fine",
+                "infill_pattern": "Gyroid"
+            }
+        },
+        {
+            "id": "EX06",
+            "title": "Bolt-On Handle / Lever",
+            "subtitle": "Grip force + bolt hole mounting",
+            "category": ["Handle", "Lever"],
+            "difficulty": "Beginner",
+            "image": "../icons/examples/ex06_handle_lever.svg",
+            "image_alt": "Handle shape with bolt holes at one end highlighted green (fixed) and grip area at the other end highlighted red with arrows (force).",
+            "scenario": "Handle or lever bolted at one end, gripped at the other. Examples: cabinet handle, tool lever, crank arm.",
+            "supports": {
+                "description": "Bolt holes at the attachment end.",
+                "selection_mode": "Fix Bolt Holes / Hole",
+                "instructions": "Use Fix Bolt Holes quick setup, or Hole mode on each bolt hole."
+            },
+            "forces": [
+                {
+                    "description": "Grip force at the free end.",
+                    "magnitude_N": 75,
+                    "direction": "Perpendicular to handle (-Y)",
+                    "selection_mode": "Surface",
+                    "face": "Grip area at the free end",
+                    "estimation": "A firm pull: 50-100 N"
+                }
+            ],
+            "torques": [],
+            "key_insights": [
+                "Highest stress at the base near bolt holes, not at the grip.",
+                "Design the thickest section at the mounting flange.",
+                "Ensure bolt hole diameter matches your actual screws."
+            ],
+            "expected_stress": "Stress concentrated at the junction between handle shaft and mounting flange. Secondary stress around bolt holes.",
+            "recommended_settings": {
+                "material": "PETG or Nylon",
+                "safety_factor": "2.0x",
+                "mesh_quality": "Balanced",
+                "infill_pattern": "Gyroid"
+            }
+        }
+    ]
+}

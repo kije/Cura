@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- Handle/lever: mounting flange with bolt holes on left, shaft, grip on right -->
+
+  <!-- Mounting flange (left end) -->
+  <rect x="25" y="30" width="35" height="50" fill="#555555" stroke="#AAAAAA" stroke-width="1.5" rx="3"/>
+
+  <!-- Handle shaft -->
+  <rect x="60" y="40" width="80" height="30" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Grip area (right end) -->
+  <rect x="140" y="35" width="30" height="40" fill="#555555" stroke="#AAAAAA" stroke-width="1.5" rx="6"/>
+
+  <!-- Bolt holes (green - fixed) -->
+  <circle cx="42" cy="42" r="5" fill="#333333" stroke="#22AA44" stroke-width="2"/>
+  <circle cx="42" cy="68" r="5" fill="#333333" stroke="#22AA44" stroke-width="2"/>
+
+  <!-- Fixed support highlight on flange -->
+  <rect x="25" y="30" width="35" height="50" fill="#22AA44" opacity="0.2" rx="3"/>
+
+  <!-- Force arrow (red) pointing down on grip -->
+  <line x1="155" y1="22" x2="155" y2="33" stroke="#DD4444" stroke-width="2"/>
+  <polygon points="155,35 151,29 159,29" fill="#DD4444"/>
+
+  <!-- Stress region at base of shaft -->
+  <rect x="56" y="38" width="14" height="34" fill="none" stroke="#FFAA00" stroke-width="1.5" stroke-dasharray="3,2" rx="2"/>
+
+  <!-- Labels -->
+  <text x="42" y="92" font-family="sans-serif" font-size="9" fill="#22AA44" text-anchor="middle">Fixed</text>
+  <text x="155" y="18" font-family="sans-serif" font-size="10" fill="#DD4444" text-anchor="middle">75 N</text>
+  <text x="63" y="84" font-family="sans-serif" font-size="9" fill="#FFAA00" text-anchor="middle">stress</text>
+  <text x="100" y="110" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Handle / Lever</text>
+
+</svg>

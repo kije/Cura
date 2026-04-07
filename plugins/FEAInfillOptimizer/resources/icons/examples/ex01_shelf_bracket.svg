@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- L-shaped bracket: vertical back plate + horizontal shelf arm -->
+
+  <!-- Vertical back plate (wall side) -->
+  <rect x="40" y="15" width="20" height="70" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Horizontal shelf arm -->
+  <rect x="60" y="65" width="80" height="20" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Fixed support highlight (green) on back plate -->
+  <rect x="40" y="15" width="20" height="70" fill="#22AA44" opacity="0.35" stroke="#22AA44" stroke-width="1.5"/>
+
+  <!-- Wall hatching behind back plate -->
+  <line x1="30" y1="15" x2="30" y2="85" stroke="#888888" stroke-width="1.5"/>
+  <line x1="30" y1="20" x2="22" y2="28" stroke="#888888" stroke-width="1"/>
+  <line x1="30" y1="33" x2="22" y2="41" stroke="#888888" stroke-width="1"/>
+  <line x1="30" y1="46" x2="22" y2="54" stroke="#888888" stroke-width="1"/>
+  <line x1="30" y1="59" x2="22" y2="67" stroke="#888888" stroke-width="1"/>
+  <line x1="30" y1="72" x2="22" y2="80" stroke="#888888" stroke-width="1"/>
+
+  <!-- Force arrows (red) pointing down on shelf surface -->
+  <line x1="80" y1="50" x2="80" y2="63" stroke="#DD4444" stroke-width="2"/>
+  <polygon points="80,65 76,57 84,57" fill="#DD4444"/>
+  <line x1="110" y1="50" x2="110" y2="63" stroke="#DD4444" stroke-width="2"/>
+  <polygon points="110,65 106,57 114,57" fill="#DD4444"/>
+  <line x1="130" y1="50" x2="130" y2="63" stroke="#DD4444" stroke-width="2"/>
+  <polygon points="130,65 126,57 134,57" fill="#DD4444"/>
+
+  <!-- Stress concentration indicator at bend corner -->
+  <circle cx="60" cy="68" r="6" fill="none" stroke="#FFAA00" stroke-width="1.5" stroke-dasharray="3,2"/>
+
+  <!-- Labels -->
+  <text x="28" y="55" font-family="sans-serif" font-size="10" fill="#22AA44" text-anchor="end">Fixed</text>
+  <text x="110" y="46" font-family="sans-serif" font-size="10" fill="#DD4444" text-anchor="middle">F = 50 N</text>
+  <text x="100" y="110" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Shelf Bracket</text>
+  <text x="63" y="100" font-family="sans-serif" font-size="9" fill="#FFAA00" text-anchor="start">stress here</text>
+
+</svg>

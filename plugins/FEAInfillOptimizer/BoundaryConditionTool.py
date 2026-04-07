@@ -134,6 +134,15 @@ class BoundaryConditionTool(Tool):
         # Async adjacency build state
         self._adjacency_building = False  # True while adjacency is being built in bg
 
+        # Re-entrancy guard for hover preview
+        self._hover_in_progress = False
+
+        # Centroid cache for fast face picking during hover
+        self._centroid_cache = None
+        self._centroid_cache_node_id = None
+        self._centroid_cache_mesh_id = None
+        self._centroid_cache_transform_bytes = None
+
         # Quick setup state
         self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed"
         self._quick_setup_hole_diameter = 8.0  # mm
@@ -1141,6 +1150,7 @@ class BoundaryConditionTool(Tool):
         if event.type == Event.ToolDeactivateEvent:
             self._bc_highlight.clear()
             self._force_handle.hide()
+            self._centroid_cache = None  # free memory
             self._rotating_group_index = -1
             self._editing_torque_index = -1
             self._hover_faces = []
@@ -1517,23 +1527,44 @@ class BoundaryConditionTool(Tool):
         if verts is None:
             return None
 
+        # Use cached world-space centroids when possible — avoids recomputing
+        # the full vertex transform on every mouse move (O(n_verts) → O(1)).
         transform = node.getWorldTransformation().getData()
-        verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
-        verts_world = (transform @ verts_h.T).T[:, :3]
+        node_id = id(node)
+        mesh_id = id(mesh_data)
+        transform_bytes = transform.tobytes()
+
+        if (self._centroid_cache is not None
+                and self._centroid_cache_node_id == node_id
+                and self._centroid_cache_mesh_id == mesh_id
+                and self._centroid_cache_transform_bytes == transform_bytes):
+            centroids = self._centroid_cache
+        else:
+            verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
+            verts_world = (transform @ verts_h.T).T[:, :3]
+
+            if indices is not None:
+                centroids = (verts_world[indices[:, 0]] +
+                             verts_world[indices[:, 1]] +
+                             verts_world[indices[:, 2]]) / 3.0
+            else:
+                n_tris = len(verts_world) // 3
+                verts_reshaped = verts_world[:n_tris * 3].reshape(n_tris, 3, 3)
+                centroids = verts_reshaped.mean(axis=1)
+
+            self._centroid_cache = centroids
+            self._centroid_cache_node_id = node_id
+            self._centroid_cache_mesh_id = mesh_id
+            self._centroid_cache_transform_bytes = transform_bytes
 
         picked = numpy.array([picked_position.x, picked_position.y, picked_position.z])
-
-        if indices is not None:
-            centroids = (verts_world[indices[:, 0]] +
-                         verts_world[indices[:, 1]] +
-                         verts_world[indices[:, 2]]) / 3.0
-        else:
-            n_tris = len(verts_world) // 3
-            verts_reshaped = verts_world[:n_tris * 3].reshape(n_tris, 3, 3)
-            centroids = verts_reshaped.mean(axis=1)
+        if not numpy.all(numpy.isfinite(picked)):
+            return None
 
         distances = numpy.linalg.norm(centroids - picked, axis=1)
-        return int(numpy.argmin(distances))
+        if len(distances) == 0:
+            return None
+        return int(numpy.nanargmin(distances))
 
     def _get_or_create_bc(self, node: CuraSceneNode) -> FEABoundaryConditionDecorator:
         bc = node.callDecoration("getBoundaryConditions")
@@ -1733,18 +1764,21 @@ class BoundaryConditionTool(Tool):
             self._bc_highlight.clear()
 
     def _update_hover_preview(self, event) -> None:
-        """Update the hover face preview on mouse move (debounced + non-blocking).
-
-        Mouse move events fire on every pixel of movement. This method:
-        1. Resolves the face under the cursor immediately (cheap GPU pick).
-        2. Shows a single-face highlight instantly for responsiveness.
-        3. Debounces the expensive face-group expansion so it only fires
-           after the mouse has been still for ~75ms.
-        4. Runs BFS in a background thread; delivers results via callLater.
-        """
+        """Update the hover face preview on mouse move (debounced + non-blocking)."""
         if not self._hover_preview_enabled:
             return
+        # Re-entrancy guard: if _update_highlights triggers a signal cascade
+        # that re-enters this method, bail out to prevent infinite recursion.
+        if self._hover_in_progress:
+            return
+        self._hover_in_progress = True
+        try:
+            self._do_hover_preview(event)
+        finally:
+            self._hover_in_progress = False
 
+    def _do_hover_preview(self, event) -> None:
+        """Inner hover preview — resolves face under cursor with debounced BFS."""
         if self._selection_pass is None:
             self._selection_pass = Application.getInstance().getRenderer().getRenderPass("selection")
             if not self._selection_pass:

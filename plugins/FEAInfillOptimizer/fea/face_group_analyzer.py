@@ -55,6 +55,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+# Absolute iteration limit for all BFS loops — prevents hangs on degenerate geometry
+MAX_BFS_ITERATIONS = 50000
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -145,6 +148,9 @@ def _face_normal(
         True
     """
     v0, v1, v2 = _get_face_vertices(verts, indices, face_idx)
+    # Guard against NaN/inf vertices from corrupt mesh data
+    if not (np.all(np.isfinite(v0)) and np.all(np.isfinite(v1)) and np.all(np.isfinite(v2))):
+        return np.zeros(3, dtype=np.float64)
     cross = np.cross(v1 - v0, v2 - v0)
     length = float(np.linalg.norm(cross))
     if length < 1e-12:
@@ -267,6 +273,11 @@ def _build_adjacency_indexed(indices: np.ndarray) -> Dict[int, List[int]]:
                 adjacency[fa].append(fb)
                 adjacency[fb].append(fa)
 
+    # Deduplicate neighbor lists (non-manifold edges can cause duplicates)
+    for fi in adjacency:
+        if len(adjacency[fi]) != len(set(adjacency[fi])):
+            adjacency[fi] = list(set(adjacency[fi]))
+
     return adjacency
 
 
@@ -320,6 +331,11 @@ def _build_adjacency_flat(
             for fb in face_list[i + 1:]:
                 adjacency[fa].append(fb)
                 adjacency[fb].append(fa)
+
+    # Deduplicate neighbor lists (non-manifold edges can cause duplicates)
+    for fi in adjacency:
+        if len(adjacency[fi]) != len(set(adjacency[fi])):
+            adjacency[fi] = list(set(adjacency[fi]))
 
     return adjacency
 
@@ -396,8 +412,12 @@ def find_coplanar_group(
     queue.append(seed_face)
 
     limit_active = max_faces > 0
+    iterations = 0
 
     while queue:
+        if iterations >= MAX_BFS_ITERATIONS:
+            break
+        iterations += 1
         current = queue.popleft()
 
         for neighbour in adjacency.get(current, []):
@@ -643,7 +663,11 @@ def _flood_fill_curved(
     accepted.add(seed_face)
     queue.append((seed_face, seed_normal, seed_centroid))
 
+    iterations = 0
     while queue:
+        if iterations >= MAX_BFS_ITERATIONS:
+            break
+        iterations += 1
         current, current_normal, current_centroid = queue.popleft()
 
         for neighbour in adjacency.get(current, []):
@@ -666,6 +690,8 @@ def _flood_fill_curved(
             #   < -eps → convex
             #   |·| ≤ eps → coplanar (pass-through: admit but don't classify)
             nb_centroid = _face_centroid(verts, indices, neighbour)
+            if not np.all(np.isfinite(nb_centroid)):
+                continue  # degenerate centroid — skip
             displacement = nb_centroid - current_centroid
             dihedral_sign = float(np.dot(current_normal, displacement))
 

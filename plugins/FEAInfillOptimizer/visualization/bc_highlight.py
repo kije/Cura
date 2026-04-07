@@ -122,7 +122,13 @@ class BCHighlightHandle(ToolHandle):
         # a bright highlight color.
         if hover_faces:
             shadow = Color(0, 0, 0, 80)  # semi-transparent black = darkening
-            for face_idx in hover_faces:
+            # Cap painted hover faces to prevent UI freeze on large selections
+            if len(hover_faces) > 500:
+                step = max(1, len(hover_faces) // 500)
+                paint_hover = hover_faces[::step]
+            else:
+                paint_hover = hover_faces
+            for face_idx in paint_hover:
                 self._paint_face(mb, verts, indices, face_idx, shadow)
 
         self.setSolidMesh(mb.build())

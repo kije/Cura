@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- Robot arm bracket: top plate + neck + lower bore -->
+
+  <!-- Upper mounting plate -->
+  <rect x="40" y="10" width="120" height="18" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Fixed support highlight (green) on top plate -->
+  <rect x="40" y="10" width="120" height="18" fill="#22AA44" opacity="0.35" stroke="#22AA44" stroke-width="1.5"/>
+
+  <!-- Narrow neck -->
+  <rect x="70" y="28" width="60" height="25" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Lower gearbox seat (bore area) -->
+  <rect x="55" y="53" width="90" height="30" fill="#555555" stroke="#AAAAAA" stroke-width="1.5" rx="4"/>
+
+  <!-- Bore hole circle -->
+  <circle cx="100" cy="68" r="14" fill="#444444" stroke="#AAAAAA" stroke-width="1"/>
+
+  <!-- Force arrow (red) pointing down into bore -->
+  <line x1="100" y1="44" x2="100" y2="54" stroke="#DD4444" stroke-width="2"/>
+  <polygon points="100,56 96,50 104,50" fill="#DD4444"/>
+
+  <!-- Torque curved arrow (blue) on flange face -->
+  <path d="M 130,60 A 14,14 0 0,1 130,76" fill="none" stroke="#4488DD" stroke-width="2"/>
+  <polygon points="130,76 126,70 134,72" fill="#4488DD"/>
+
+  <!-- Stress region at neck -->
+  <rect x="70" y="28" width="60" height="25" fill="none" stroke="#FFAA00" stroke-width="1.5" stroke-dasharray="3,2"/>
+
+  <!-- Labels -->
+  <text x="100" y="8" font-family="sans-serif" font-size="10" fill="#22AA44" text-anchor="middle">Fixed</text>
+  <text x="82" y="52" font-family="sans-serif" font-size="9" fill="#DD4444" text-anchor="end">50 N</text>
+  <text x="150" y="68" font-family="sans-serif" font-size="9" fill="#4488DD" text-anchor="start">5 Nm</text>
+  <text x="100" y="110" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Robot Arm Bracket</text>
+
+</svg>

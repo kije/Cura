@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="890" viewBox="0 0 800 890">
+  <defs>
+    <marker id="arr-red" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#EF5350"/>
+    </marker>
+    <marker id="arr-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#CE93D8"/>
+    </marker>
+    <marker id="arr-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#81C784"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="890" fill="#12122a"/>
+
+  <!-- Title -->
+  <text x="400" y="36" text-anchor="middle" fill="white" font-size="18" font-family="Arial, sans-serif" font-weight="bold">FEA Boundary Conditions — Robot Arm Joint Link</text>
+  <text x="400" y="55" text-anchor="middle" fill="#90CAF9" font-size="12" font-family="Arial, sans-serif">Schematic view (simplified) • blue part only</text>
+
+  <!-- ================================ -->
+  <!-- ARM BODY -->
+  <!-- ================================ -->
+  <polygon points="260,138 480,138 440,372 300,372" fill="#0D47A1" opacity="0.9"/>
+  <line x1="274" y1="195" x2="463" y2="195" stroke="#1976D2" stroke-width="1" opacity="0.3"/>
+  <line x1="282" y1="255" x2="451" y2="255" stroke="#1976D2" stroke-width="1" opacity="0.3"/>
+  <line x1="292" y1="318" x2="432" y2="318" stroke="#1976D2" stroke-width="1" opacity="0.3"/>
+  <text x="370" y="248" text-anchor="middle" fill="#4a8bd0" font-size="12" font-family="Arial">ARM BODY</text>
+  <text x="370" y="263" text-anchor="middle" fill="#3a6b9c" font-size="10" font-family="Arial">(no BCs here)</text>
+
+  <!-- ================================ -->
+  <!-- CIRCULAR FLANGE — center (370, 545) -->
+  <!-- ================================ -->
+
+  <!-- Outer flange body -->
+  <circle cx="370" cy="545" r="172" fill="#0D47A1"/>
+
+  <!-- Bolt holes at r=152 (8 holes, 45° apart) -->
+  <circle cx="522" cy="545" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+  <circle cx="477" cy="438" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+  <circle cx="370" cy="393" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+  <circle cx="263" cy="438" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+  <circle cx="218" cy="545" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+  <circle cx="263" cy="652" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+  <circle cx="370" cy="697" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+  <circle cx="477" cy="652" r="10" fill="#12122a" stroke="#5C9BD6" stroke-width="1.5"/>
+
+  <!-- TORQUE zone: flat annular ring face (PURPLE), r=72 to r=128 -->
+  <circle cx="370" cy="545" r="128" fill="#6A1B9A" opacity="0.9"/>
+  <circle cx="370" cy="545" r="72" fill="#0D47A1"/>
+
+  <!-- FORCE zone: bore wall indicator (RED), r=46 to r=72 -->
+  <circle cx="370" cy="545" r="72" fill="#B71C1C" opacity="0.92"/>
+  <circle cx="370" cy="545" r="46" fill="#12122a"/>
+
+  <!-- Force arrow (downward, inside bore) -->
+  <line x1="370" y1="520" x2="370" y2="566" stroke="#EF5350" stroke-width="4" marker-end="url(#arr-red)"/>
+
+  <!-- Torque arc arrows (r=110, within purple zone) -->
+  <!-- Arc 1: from 315° to 0°, CW -->
+  <path d="M 448 467 A 110 110 0 0 1 480 545" stroke="#CE93D8" stroke-width="3.5" fill="none" marker-end="url(#arr-purple)"/>
+  <!-- Arc 2: from 135° to 180°, CW -->
+  <path d="M 292 623 A 110 110 0 0 1 260 545" stroke="#CE93D8" stroke-width="3.5" fill="none" marker-end="url(#arr-purple)"/>
+
+  <!-- ================================ -->
+  <!-- MOUNTING PLATE (drawn on top) -->
+  <!-- ================================ -->
+  <rect x="230" y="72" width="280" height="52" rx="5" fill="#1B5E20" stroke="#4CAF50" stroke-width="2.5"/>
+  <!-- Bolt holes on plate -->
+  <circle cx="258" cy="98" r="9" fill="#12122a" stroke="#66BB6A" stroke-width="1.5"/>
+  <circle cx="294" cy="98" r="9" fill="#12122a" stroke="#66BB6A" stroke-width="1.5"/>
+  <circle cx="330" cy="98" r="9" fill="#12122a" stroke="#66BB6A" stroke-width="1.5"/>
+  <circle cx="410" cy="98" r="9" fill="#12122a" stroke="#66BB6A" stroke-width="1.5"/>
+  <circle cx="446" cy="98" r="9" fill="#12122a" stroke="#66BB6A" stroke-width="1.5"/>
+  <circle cx="482" cy="98" r="9" fill="#12122a" stroke="#66BB6A" stroke-width="1.5"/>
+  <!-- Fixed BC hatching symbol -->
+  <line x1="230" y1="124" x2="510" y2="124" stroke="#4CAF50" stroke-width="2"/>
+  <line x1="234" y1="124" x2="222" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="252" y1="124" x2="240" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="270" y1="124" x2="258" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="288" y1="124" x2="276" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="306" y1="124" x2="294" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="324" y1="124" x2="312" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="342" y1="124" x2="330" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="360" y1="124" x2="348" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="378" y1="124" x2="366" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="396" y1="124" x2="384" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="414" y1="124" x2="402" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="432" y1="124" x2="420" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="450" y1="124" x2="438" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="468" y1="124" x2="456" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="486" y1="124" x2="474" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+  <line x1="504" y1="124" x2="492" y2="138" stroke="#4CAF50" stroke-width="1.5"/>
+
+  <!-- ================================ -->
+  <!-- LABELS -->
+  <!-- ================================ -->
+
+  <!-- ① Fixed Support label -->
+  <line x1="590" y1="85" x2="512" y2="98" stroke="#66BB6A" stroke-width="1.5" marker-end="url(#arr-green)"/>
+  <text x="595" y="78" fill="#66BB6A" font-size="14" font-family="Arial" font-weight="bold">① FIXED SUPPORT</text>
+  <text x="595" y="94" fill="#A5D6A7" font-size="11" font-family="Arial">SUPPORTS tab</text>
+  <text x="595" y="109" fill="#A5D6A7" font-size="11" font-family="Arial">Surface helper → top plate</text>
+  <text x="595" y="124" fill="#A5D6A7" font-size="11" font-family="Arial">+ Fix Bolt Holes wizard</text>
+
+  <!-- ② Torque label -->
+  <line x1="590" y1="452" x2="458" y2="470" stroke="#CE93D8" stroke-width="1.5" marker-end="url(#arr-purple)"/>
+  <text x="595" y="440" fill="#CE93D8" font-size="14" font-family="Arial" font-weight="bold">② TORQUE</text>
+  <text x="595" y="456" fill="#E1BEE7" font-size="11" font-family="Arial">TORQUES tab</text>
+  <text x="595" y="471" fill="#E1BEE7" font-size="11" font-family="Arial">Surface helper</text>
+  <text x="595" y="486" fill="#E1BEE7" font-size="11" font-family="Arial">Flat annular ring face of flange</text>
+  <text x="595" y="501" fill="#E1BEE7" font-size="11" font-family="Arial">Value: gearbox torque (N·mm)</text>
+
+  <!-- ③ Force label -->
+  <line x1="590" y1="560" x2="434" y2="548" stroke="#EF5350" stroke-width="1.5" marker-end="url(#arr-red)"/>
+  <text x="595" y="548" fill="#EF5350" font-size="14" font-family="Arial" font-weight="bold">③ FORCE</text>
+  <text x="595" y="564" fill="#FFCDD2" font-size="11" font-family="Arial">FORCES tab</text>
+  <text x="595" y="579" fill="#FFCDD2" font-size="11" font-family="Arial">Hole helper → bore wall</text>
+  <text x="595" y="594" fill="#FFCDD2" font-size="11" font-family="Arial">Direction: –Z (downward)</text>
+  <text x="595" y="609" fill="#FFCDD2" font-size="11" font-family="Arial">Value: -(mass × 9.81) N</text>
+
+  <!-- ================================ -->
+  <!-- GEARBOX indicator -->
+  <!-- ================================ -->
+  <line x1="198" y1="718" x2="542" y2="718" stroke="#444" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="278" y="722" width="184" height="32" rx="4" fill="#1e1e32" stroke="#555" stroke-width="1.5"/>
+  <text x="370" y="742" text-anchor="middle" fill="#777" font-size="11" font-family="Arial">GEARBOX — separate part, not yours</text>
+
+  <!-- ================================ -->
+  <!-- LEGEND -->
+  <!-- ================================ -->
+  <rect x="18" y="768" width="762" height="104" rx="8" fill="#0c1020" stroke="#2c3560" stroke-width="1.5"/>
+  <text x="399" y="789" text-anchor="middle" fill="#90CAF9" font-size="12" font-family="Arial" font-weight="bold">QUICK REFERENCE</text>
+  <rect x="36" y="799" width="14" height="14" rx="2" fill="#1B5E20" stroke="#4CAF50" stroke-width="1.5"/>
+  <text x="57" y="811" fill="#A5D6A7" font-size="11" font-family="Arial">① Fixed Support — SUPPORTS tab → Surface helper (top plate) + Fix Bolt Holes wizard</text>
+  <rect x="36" y="821" width="14" height="14" rx="2" fill="#6A1B9A" stroke="#CE93D8" stroke-width="1.5"/>
+  <text x="57" y="833" fill="#E1BEE7" font-size="11" font-family="Arial">② Torque — TORQUES tab → Surface helper → flat ring face of flange → gearbox rated output torque in N·mm</text>
+  <rect x="36" y="843" width="14" height="14" rx="2" fill="#B71C1C" stroke="#EF5350" stroke-width="1.5"/>
+  <text x="57" y="855" fill="#FFCDD2" font-size="11" font-family="Arial">③ Force — FORCES tab → Hole helper → inner bore wall → downward –Z → value: -(arm+payload) × 9.81 N</text>
+  <text x="399" y="868" text-anchor="middle" fill="#555" font-size="10" font-family="Arial">Tip: set Supports first, then Force, then Torque</text>
+</svg>

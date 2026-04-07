@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- Motor mount housing: box with bottom feet, motor bore -->
+
+  <!-- Housing body -->
+  <rect x="45" y="20" width="110" height="55" fill="#555555" stroke="#AAAAAA" stroke-width="1.5" rx="3"/>
+
+  <!-- Motor bore circle -->
+  <circle cx="100" cy="47" r="18" fill="#444444" stroke="#AAAAAA" stroke-width="1"/>
+
+  <!-- Left foot -->
+  <rect x="40" y="75" width="25" height="10" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+  <!-- Right foot -->
+  <rect x="135" y="75" width="25" height="10" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Fixed support highlight (green) on feet -->
+  <rect x="40" y="75" width="25" height="10" fill="#22AA44" opacity="0.35" stroke="#22AA44" stroke-width="1.5"/>
+  <rect x="135" y="75" width="25" height="10" fill="#22AA44" opacity="0.35" stroke="#22AA44" stroke-width="1.5"/>
+
+  <!-- Bolt holes in feet -->
+  <circle cx="52" cy="80" r="3" fill="#333333" stroke="#22AA44" stroke-width="1"/>
+  <circle cx="147" cy="80" r="3" fill="#333333" stroke="#22AA44" stroke-width="1"/>
+
+  <!-- Force arrow (red) - vibration sideways -->
+  <line x1="125" y1="47" x2="136" y2="47" stroke="#DD4444" stroke-width="2"/>
+  <polygon points="138,47 132,43 132,51" fill="#DD4444"/>
+
+  <!-- Torque curved arrow (blue) around bore -->
+  <path d="M 112,30 A 18,18 0 0,1 88,30" fill="none" stroke="#4488DD" stroke-width="2"/>
+  <polygon points="88,30 94,26 92,34" fill="#4488DD"/>
+
+  <!-- Ground line -->
+  <line x1="30" y1="92" x2="170" y2="92" stroke="#888888" stroke-width="1.5"/>
+  <line x1="42" y1="92" x2="35" y2="99" stroke="#888888" stroke-width="1"/>
+  <line x1="55" y1="92" x2="48" y2="99" stroke="#888888" stroke-width="1"/>
+  <line x1="137" y1="92" x2="130" y2="99" stroke="#888888" stroke-width="1"/>
+  <line x1="150" y1="92" x2="143" y2="99" stroke="#888888" stroke-width="1"/>
+
+  <!-- Labels -->
+  <text x="52" y="72" font-family="sans-serif" font-size="9" fill="#22AA44" text-anchor="middle">Fixed</text>
+  <text x="147" y="72" font-family="sans-serif" font-size="9" fill="#22AA44" text-anchor="middle">Fixed</text>
+  <text x="148" y="44" font-family="sans-serif" font-size="9" fill="#DD4444" text-anchor="start">10 N</text>
+  <text x="100" y="20" font-family="sans-serif" font-size="9" fill="#4488DD" text-anchor="middle">1 Nm</text>
+  <text x="100" y="110" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Motor Mount</text>
+
+</svg>

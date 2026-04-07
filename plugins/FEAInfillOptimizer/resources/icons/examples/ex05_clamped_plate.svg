@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- Clamped plate: flat rectangle, edges fixed, pressure on top face -->
+
+  <!-- Plate body (top-down isometric view) -->
+  <polygon points="40,40 100,20 160,40 100,60" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Thickness band -->
+  <polygon points="40,40 100,60 100,68 40,48" fill="#444444" stroke="#AAAAAA" stroke-width="1"/>
+  <polygon points="100,60 160,40 160,48 100,68" fill="#4A4A4A" stroke="#AAAAAA" stroke-width="1"/>
+
+  <!-- Edge highlights (green) - all four edges -->
+  <line x1="40" y1="40" x2="100" y2="20" stroke="#22AA44" stroke-width="3" opacity="0.7"/>
+  <line x1="100" y1="20" x2="160" y2="40" stroke="#22AA44" stroke-width="3" opacity="0.7"/>
+  <line x1="160" y1="40" x2="100" y2="60" stroke="#22AA44" stroke-width="3" opacity="0.7"/>
+  <line x1="100" y1="60" x2="40" y2="40" stroke="#22AA44" stroke-width="3" opacity="0.7"/>
+
+  <!-- Pressure arrows (red) pointing down on top face -->
+  <line x1="80" y1="18" x2="80" y2="30" stroke="#DD4444" stroke-width="1.5"/>
+  <polygon points="80,32 77,27 83,27" fill="#DD4444"/>
+  <line x1="100" y1="14" x2="100" y2="28" stroke="#DD4444" stroke-width="1.5"/>
+  <polygon points="100,30 97,25 103,25" fill="#DD4444"/>
+  <line x1="120" y1="18" x2="120" y2="30" stroke="#DD4444" stroke-width="1.5"/>
+  <polygon points="120,32 117,27 123,27" fill="#DD4444"/>
+
+  <!-- Stress region at center -->
+  <ellipse cx="100" cy="40" rx="15" ry="8" fill="none" stroke="#FFAA00" stroke-width="1.5" stroke-dasharray="3,2"/>
+
+  <!-- Labels -->
+  <text x="28" y="38" font-family="sans-serif" font-size="9" fill="#22AA44" text-anchor="end">Fixed edges</text>
+  <text x="100" y="10" font-family="sans-serif" font-size="10" fill="#DD4444" text-anchor="middle">Pressure</text>
+  <text x="100" y="90" font-family="sans-serif" font-size="9" fill="#FFAA00" text-anchor="middle">max stress at center</text>
+  <text x="100" y="110" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Clamped Plate</text>
+
+</svg>

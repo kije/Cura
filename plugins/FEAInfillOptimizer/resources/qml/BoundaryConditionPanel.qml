@@ -78,6 +78,11 @@ Item
         id: onboardingWizard
     }
 
+    Help.ExamplesGallery
+    {
+        id: examplesGallery
+    }
+
     // Show onboarding on first use
     Component.onCompleted:
     {
@@ -155,21 +160,40 @@ Item
                                     "4. Click 'Confirm and Optimize' to run analysis")
                             }
 
-                            UM.Label
+                            RowLayout
                             {
                                 Layout.fillWidth: true
-                                text: catalog.i18nc("@action", "Show Tutorial")
-                                font: UM.Theme.getFont("small")
-                                color: UM.Theme.getColor("primary")
+                                spacing: UM.Theme.getSize("default_margin").width
 
-                                MouseArea
+                                UM.Label
                                 {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked:
+                                    text: catalog.i18nc("@action", "Show Tutorial")
+                                    font: UM.Theme.getFont("small")
+                                    color: UM.Theme.getColor("primary")
+
+                                    MouseArea
                                     {
-                                        onboardingWizard.currentStep = 0
-                                        onboardingWizard.open()
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked:
+                                        {
+                                            onboardingWizard.currentStep = 0
+                                            onboardingWizard.open()
+                                        }
+                                    }
+                                }
+
+                                UM.Label
+                                {
+                                    text: catalog.i18nc("@action", "View Examples")
+                                    font: UM.Theme.getFont("small")
+                                    color: UM.Theme.getColor("primary")
+
+                                    MouseArea
+                                    {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: examplesGallery.open()
                                     }
                                 }
                             }

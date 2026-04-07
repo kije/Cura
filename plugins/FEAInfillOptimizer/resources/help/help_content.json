@@ -1,0 +1,156 @@
+{
+    "version": 1,
+    "entries": {
+        "D01": {
+            "title": "Fixed Supports",
+            "tooltip": "Faces that cannot move during analysis. Click to fix mounting points, screws, or resting surfaces.",
+            "guide": {
+                "image": "../icons/guide_support.svg",
+                "image_alt": "Diagram showing a block with its bottom face highlighted green, fixed to the ground with anchor triangles.",
+                "body": "Fixed supports prevent selected faces from moving in any direction during the simulation. They represent where your part is physically held, screwed down, or resting on a surface.\n\nAt least one support is required before running analysis. Supports and forces must be on different faces.",
+                "steps": [
+                    "Click faces where the part is held or mounted",
+                    "Each click adds a face to the support group",
+                    "Alt+click (Option on Mac) to deselect a face",
+                    "Use the Selection helper toolbar for multi-triangle surfaces"
+                ],
+                "tips": [
+                    "Use 'Surface' mode to select an entire flat face with one click",
+                    "Use 'Hole' mode to quickly select bolt hole interiors",
+                    "At minimum, fix one face. For stability, fix at least 3 non-coplanar points."
+                ]
+            }
+        },
+        "D02": {
+            "title": "Force Application",
+            "tooltip": "Apply loads (weight, push, pull) to faces. Set magnitude in Newtons.",
+            "guide": {
+                "image": "../icons/guide_force.svg",
+                "image_alt": "Diagram showing a block with red arrows on its top face indicating an applied downward force.",
+                "body": "Forces represent external loads acting on your part. Each force has a magnitude (in Newtons) and a direction.\n\nThe force is distributed across all selected faces. After selecting faces and setting the load, click 'Confirm Load' to create a named force group.",
+                "steps": [
+                    "Switch to the Forces tab",
+                    "Click faces where the load acts",
+                    "Set the load amount in Newtons (Tip: 1 kg = 10 N)",
+                    "Adjust direction using Fx/Fy/Fz fields if needed",
+                    "Click 'Confirm Load on Selected Faces'"
+                ],
+                "tips": [
+                    "Use 'Hole' mode to select bolt hole inner walls",
+                    "Default direction is along the face normal",
+                    "You can define multiple force groups for different load cases"
+                ]
+            }
+        },
+        "D03": {
+            "title": "Torque Application",
+            "tooltip": "Apply rotational loads (twisting) to faces. Set magnitude in Newton-meters.",
+            "guide": {
+                "image": "../icons/guide_torque.svg",
+                "image_alt": "Diagram showing a block with curved blue arrows indicating a rotational torque around an axis.",
+                "body": "Torques represent rotational loads (twisting forces) acting on your part. Each torque has a magnitude (in Nm) and an axis of rotation.\n\nThe torque axis defaults to the average surface normal of the selected faces. You can edit the axis direction after confirming.",
+                "steps": [
+                    "Switch to the Torques tab",
+                    "Click faces where the twist is applied",
+                    "Set the torque amount in Newton-meters",
+                    "Click 'Confirm Torque on Selected Faces'",
+                    "Optionally click 'Edit Axis' to adjust the rotation axis"
+                ],
+                "tips": [
+                    "Hand-tightened bolt: 1-5 Nm. Wrench-tightened: 10-50 Nm.",
+                    "Select the flange FACE for bolt-pattern torque, not the hole wall",
+                    "Drag the colored rings (Red=X, Green=Y, Blue=Z) to rotate the axis"
+                ]
+            }
+        },
+        "O01": {
+            "title": "Material Selection",
+            "tooltip": "Your printing material determines stiffness (E) and strength. Stiffer materials resist bending; stronger materials resist breaking.",
+            "guide": {
+                "body": "The material you select determines two key properties used in the analysis:\n\n- Young's Modulus (E): How stiff the material is. Higher E = less bending.\n- Yield Strength: The stress at which the material permanently deforms.\n\nThe analysis uses these values to compute stress and determine if the part is safe.",
+                "tips": [
+                    "PLA: Stiff but brittle (E=3000, yield=50 MPa)",
+                    "ABS: Less stiff, more ductile (E=2100, yield=35 MPa)",
+                    "PETG: Good all-rounder (E=2000, yield=42 MPa)",
+                    "Nylon: Flexible and strong (E=1400, yield=48 MPa)",
+                    "PC: Very strong, good impact (E=2200, yield=60 MPa)",
+                    "CF-Nylon: Very stiff (E=6500, yield=65 MPa)",
+                    "TPU 95A: Flexible elastomer - linear FEA results are approximate only"
+                ]
+            }
+        },
+        "O09": {
+            "title": "Infill Pattern",
+            "tooltip": "Determines how stiffness scales with density. Gyroid (recommended) is isotropic.",
+            "guide": {
+                "body": "Each infill pattern has a different scaling exponent that describes how stiffness changes with density:\n\n- Lines (exponent 1.0): Linear scaling. Double density = double stiffness.\n- Gyroid (exponent 1.6): Good balance. Isotropic (equal in all directions).\n- Grid (exponent 2.0): Quadratic. Needs 4x density to double stiffness.\n- Honeycomb (exponent 2.0): Similar to grid, strong in-plane.",
+                "tips": [
+                    "Gyroid: Best all-around choice for structural parts",
+                    "Lines/Triangles: Best when loads are primarily in-plane",
+                    "Avoid Concentric for structural parts (weak radial strength)",
+                    "Lightning: Not recommended for structural analysis"
+                ]
+            }
+        },
+        "O12": {
+            "title": "Safety Factor",
+            "tooltip": "Ratio of material strength to max allowed stress. 2.0x means the part can handle 2x the applied load.",
+            "guide": {
+                "body": "The safety factor divides the material's yield strength to get the 'design stress'. A higher safety factor means a more conservative (heavier) design.\n\nTypical values:\n- 1.5x: Lightweight, non-critical applications\n- 2.0x: General purpose (recommended)\n- 3.0x: Safety-critical or fatigue loading",
+                "tips": [
+                    "Use 3.0x for cyclic/vibration loads (fatigue margin)",
+                    "Use 1.5x only when weight savings are critical and loads are well-known",
+                    "The actual safety factor is shown in results after analysis"
+                ]
+            }
+        },
+        "O13": {
+            "title": "Mesh Quality",
+            "tooltip": "Controls the density of the tetrahedral mesh used for FEA.",
+            "guide": {
+                "body": "The mesh quality setting controls how finely the model is divided into tetrahedral elements:\n\n- Fast (coarse): ~5,000 elements. Quick but less accurate.\n- Balanced (medium): ~15,000 elements. Good tradeoff.\n- Precise (fine): ~50,000 elements. Most accurate but slower.",
+                "tips": [
+                    "Use Precise for thin-walled or geometrically complex parts",
+                    "Start with Balanced for most analyses",
+                    "If analysis fails with Precise, try Balanced first"
+                ]
+            }
+        },
+        "R01": {
+            "title": "Safety Verdict",
+            "tooltip": "Compares peak stress to material yield strength / safety factor.",
+            "guide": {
+                "body": "The verdict compares the maximum stress found in your model against the design stress limit (yield strength divided by your safety factor):\n\n- SAFE: Peak stress well below the limit. Part should survive the applied loads.\n- MARGINAL: Close to the limit. Consider increasing max infill or safety factor.\n- UNSAFE: Exceeds the limit. The part may fail. Redesign or increase infill.\n- CONSERVATIVE: Stress is very low. You could reduce infill to save material and print time.",
+                "tips": [
+                    "An 'unsafe' verdict doesn't mean instant failure - it means the safety margin is exceeded",
+                    "Check the stress map to see WHERE the high stress occurs",
+                    "Consider increasing infill only in the high-stress region"
+                ]
+            }
+        },
+        "R02": {
+            "title": "Max Stress (von Mises)",
+            "tooltip": "Peak von Mises equivalent stress in the model, in MPa.",
+            "guide": {
+                "body": "Von Mises stress combines all different stresses (tension, compression, shear) acting on a point into one equivalent value.\n\nIf the von Mises stress exceeds the material's yield strength divided by the safety factor, the part will deform permanently or break at that point.",
+                "tips": [
+                    "Compare this value to your material's yield strength",
+                    "The stress map shows where the peak occurs on the model",
+                    "Blue regions are low stress, yellow regions are high stress"
+                ]
+            }
+        },
+        "R06": {
+            "title": "Stress Map Visualization",
+            "tooltip": "Overlays a color map showing stress distribution. Dark purple = low, yellow = high (viridis gradient).",
+            "guide": {
+                "body": "The stress map overlays a colorblind-safe viridis gradient on your model:\n\n- Dark purple: Zero or very low stress\n- Blue/Green: Moderate stress\n- Yellow: Maximum stress\n\nCompare colored regions to your boundary conditions to verify the analysis makes physical sense. High stress should appear near load application points and geometric stress concentrators (sharp corners, thin sections).",
+                "tips": [
+                    "If high stress appears far from any loads, check your BC setup",
+                    "Stress concentrations at sharp internal corners are expected",
+                    "The color scale adjusts to the min/max stress range of each analysis"
+                ]
+            }
+        }
+    }
+}

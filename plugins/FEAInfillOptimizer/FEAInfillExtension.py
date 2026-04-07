@@ -94,6 +94,11 @@ class FEAInfillExtension(QObject, Extension):
         self._optimization_method = "heuristic"  # "heuristic" or "oc"
         self._volume_fraction = 50.0  # target volume % for OC method (displayed as %)
 
+        # Help system preferences
+        CuraApplication.getInstance().getPreferences().addPreference(
+            "fea_optimizer/onboarding_completed", False
+        )
+
         # Deferred initialization
         CuraApplication.getInstance().engineCreatedSignal.connect(self._onEngineCreated)
 
