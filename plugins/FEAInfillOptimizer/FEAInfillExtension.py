@@ -903,17 +903,26 @@ class FEAInfillExtension(QObject, Extension):
         job.progress.connect(self._onFEAProgress)
         JobQueue.getInstance().add(job)
 
+    _last_progress_time = 0.0
+
     def _onFEAProgress(self, progress: float) -> None:
         # Marshal to the main thread; this slot may be called from the
         # background Job thread via UM.Signal (C15: thread safety).
+        #
+        # THROTTLE: Only queue a callLater update at most every 500ms.
+        # Without throttling, rapid iterations (2s each) flood the main
+        # thread's event queue with callLater closures, freezing the UI.
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_progress_time < 0.5 and progress < 99:
+            return  # skip — too soon since last update
+        self._last_progress_time = now
+
         def _update() -> None:
-            import time as _time
             self._progress = progress
 
-            # Compute ETA from elapsed time and progress fraction
             elapsed = _time.monotonic() - getattr(self, "_analysis_start_time", _time.monotonic())
             eta_str = ""
-            # Only show ETA after 10% progress (enough data for meaningful estimate)
             if progress > 10 and progress < 100:
                 fraction = progress / 100.0
                 if fraction > 0:
