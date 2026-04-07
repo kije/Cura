@@ -117,11 +117,13 @@ class BCHighlightHandle(ToolHandle):
             for face_idx in pending_faces:
                 self._paint_face(mb, verts, indices, face_idx, yellow)
 
-        # Paint HOVER faces in ORANGE (preview of what would be selected)
+        # Paint HOVER faces with a subtle darkening effect — semi-transparent
+        # dark overlay that makes the face appear "shadowed" rather than using
+        # a bright highlight color.
         if hover_faces:
-            orange = Color(255, 160, 40, 160)
+            shadow = Color(0, 0, 0, 80)  # semi-transparent black = darkening
             for face_idx in hover_faces:
-                self._paint_face(mb, verts, indices, face_idx, orange)
+                self._paint_face(mb, verts, indices, face_idx, shadow)
 
         self.setSolidMesh(mb.build())
 
