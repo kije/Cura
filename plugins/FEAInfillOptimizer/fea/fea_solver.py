@@ -246,11 +246,11 @@ class LinearElasticitySolver:
 
             t = threading.Thread(target=_direct, daemon=True)
             t.start()
-            t.join(timeout=30.0)
+            t.join(timeout=60.0)
             use_direct = not (t.is_alive() or result[0] is None or exc[0] is not None)
 
             if not use_direct:
-                reason = "timeout (30s)" if t.is_alive() else str(exc[0])
+                reason = "timeout (60s)" if t.is_alive() else str(exc[0])
                 Logger.log("w", "FEA solve: spsolve %s — skipping spsolve for remaining "
                            "iterations, using CG directly", reason)
                 self._skip_spsolve = True
