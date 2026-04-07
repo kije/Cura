@@ -48,7 +48,13 @@ from .oc_update import oc_density_update
 from .stress_to_density import stress_to_density
 from .tetrahedralization import TetMesh
 
-_CONVERGENCE_TOL = 1e-3
+# Convergence tolerances — separate for heuristic vs OC.
+# Heuristic: density change < 0.1% means stress→density mapping stabilized.
+# OC: density change < 1% (standard SIMP literature, Sigmund 2001).
+#     Also checks compliance change < 0.1% for robust convergence.
+_CONVERGENCE_TOL_HEURISTIC = 1e-3   # max |Δρ| across all elements
+_CONVERGENCE_TOL_OC_DENSITY = 0.01  # max |Δρ| — OC oscillates more
+_CONVERGENCE_TOL_OC_COMPLIANCE = 1e-3  # |ΔC/C| — relative compliance change
 _DAMPING_INITIAL = 0.5
 _DAMPING_MIN = 0.2
 
@@ -488,8 +494,10 @@ class IterativeFEASolver:
             if progress_callback is not None:
                 progress_callback((iteration + 1) / max_iter)
 
-            if max_change < _CONVERGENCE_TOL:
+            if max_change < _CONVERGENCE_TOL_HEURISTIC:
                 converged = True
+                Logger.log("i", "FEA EasyFEA iter %d: converged (Δρ=%.4f)",
+                           iteration + 1, max_change)
                 break
 
         # Deregister the final simu so the mesh does not retain a stale ref.
@@ -561,6 +569,7 @@ class IterativeFEASolver:
         # Adaptive damping state
         damping = _DAMPING_INITIAL
         prev_max_change = float("inf")
+        prev_compliance = float("inf")
         oscillation_count = 0
 
         for iteration in range(max_iter):
@@ -639,6 +648,9 @@ class IterativeFEASolver:
             max_change = float(np.max(np.abs(density_new - density)))
             density = density_new
 
+            # Track compliance for OC convergence check
+            compliance = float(np.dot(force_vector, displacements))
+
             if max_change > prev_max_change:
                 oscillation_count += 1
                 if oscillation_count >= 2:
@@ -650,12 +662,33 @@ class IterativeFEASolver:
                 oscillation_count = 0
             prev_max_change = max_change
 
+            # Log compliance for monitoring
+            compliance_change = abs(compliance - prev_compliance) / max(abs(prev_compliance), 1e-30)
+            Logger.log("d", "FEA iter %d: max_change=%.4f, compliance=%.4f, "
+                       "compliance_change=%.6f",
+                       iteration + 1, max_change, compliance, compliance_change)
+            prev_compliance = compliance
+
             if progress_callback is not None:
                 progress_callback((iteration + 1) / max_iter)
 
-            if max_change < _CONVERGENCE_TOL:
-                converged = True
-                break
+            # Convergence check — different criteria for heuristic vs OC
+            if use_oc:
+                # OC: converged when BOTH density change < 1% AND
+                # compliance change < 0.1% (standard SIMP criterion)
+                if (max_change < _CONVERGENCE_TOL_OC_DENSITY and
+                        compliance_change < _CONVERGENCE_TOL_OC_COMPLIANCE):
+                    converged = True
+                    Logger.log("i", "FEA iter %d: OC converged (Δρ=%.4f, ΔC/C=%.6f)",
+                               iteration + 1, max_change, compliance_change)
+                    break
+            else:
+                # Heuristic: converged when density change < 0.1%
+                if max_change < _CONVERGENCE_TOL_HEURISTIC:
+                    converged = True
+                    Logger.log("i", "FEA iter %d: heuristic converged (Δρ=%.4f)",
+                               iteration + 1, max_change)
+                    break
 
         info: Dict[str, Any] = {
             "iterations": iteration + 1,
