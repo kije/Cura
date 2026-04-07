@@ -1,0 +1,8 @@
+{
+    "name": "Multi Build Plate",
+    "author": "Ultimaker",
+    "version": "1.0.0",
+    "description": "Enables multiple virtual build plates for organizing print jobs.",
+    "api": 8,
+    "i18n-catalog": "cura"
+}
