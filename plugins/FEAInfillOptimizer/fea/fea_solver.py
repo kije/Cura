@@ -39,6 +39,7 @@ class LinearElasticitySolver:
         self._B_all = None
         self._V_all = None
         self._valid = None
+        self._skip_spsolve = False  # set True after first spsolve timeout
 
     def _get_cached_B(self, tet_mesh: TetMesh):
         """Return cached (B_all, V_all, valid) for tet_mesh, recomputing on mesh change."""
@@ -229,23 +230,33 @@ class LinearElasticitySolver:
         import threading
         from UM.Logger import Logger
 
-        result = [None]
-        exc = [None]
+        # After the first spsolve timeout, skip it for subsequent calls
+        # to avoid wasting 30s per iteration on a matrix that SuperLU can't handle.
+        use_direct = not self._skip_spsolve
 
-        def _direct():
-            try:
-                result[0] = spla.spsolve(K, f)
-            except Exception as e:
-                exc[0] = e
+        if use_direct:
+            result = [None]
+            exc = [None]
 
-        # spsolve with timeout — SuperLU can hang on ill-conditioned K
-        t = threading.Thread(target=_direct, daemon=True)
-        t.start()
-        t.join(timeout=30.0)
+            def _direct():
+                try:
+                    result[0] = spla.spsolve(K, f)
+                except Exception as e:
+                    exc[0] = e
 
-        if t.is_alive() or result[0] is None or exc[0] is not None:
-            reason = "timeout (30s)" if t.is_alive() else str(exc[0])
-            Logger.log("w", "FEA solve: spsolve %s, falling back to CG iterative solver", reason)
+            t = threading.Thread(target=_direct, daemon=True)
+            t.start()
+            t.join(timeout=30.0)
+            use_direct = not (t.is_alive() or result[0] is None or exc[0] is not None)
+
+            if not use_direct:
+                reason = "timeout (30s)" if t.is_alive() else str(exc[0])
+                Logger.log("w", "FEA solve: spsolve %s — skipping spsolve for remaining "
+                           "iterations, using CG directly", reason)
+                self._skip_spsolve = True
+
+        if not use_direct:
+            Logger.log("d", "FEA solve: using CG iterative solver")
 
             # CPython cannot kill daemon threads.  The zombie spsolve thread
             # may keep references to the large K and f arrays.  Copy the
