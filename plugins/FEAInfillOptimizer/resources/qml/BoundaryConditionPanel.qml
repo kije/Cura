@@ -48,6 +48,8 @@ Item
     readonly property bool   stressOverlayVisible: toolProperties.getValue("StressOverlayVisible") === true || toolProperties.getValue("StressOverlayVisible") === "true"
     readonly property bool   hasFullResults:       toolProperties.getValue("HasFullResults")       === true || toolProperties.getValue("HasFullResults") === "true"
 
+    property bool _meshesApplied: false
+
     implicitWidth: 280 * screenScaleFactor
     // Use 80% of the application window height so the panel fills most of
     // the viewport without overflowing behind Cura's toolbars. Content scrolls.
@@ -96,6 +98,7 @@ Item
 
     ScrollView
     {
+        id: mainScrollView
         anchors.fill: parent
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
@@ -239,6 +242,8 @@ Item
                                 var mode = toolProperties.getValue("QuickSetupMode") ?? ""
                                 if (mode === "gravity_pick_bottom") return catalog.i18nc("@info", "Click the bottom face of your part (the face resting on the build plate or surface).")
                                 if (mode === "cantilever_pick_fixed") return catalog.i18nc("@info", "Click the face where the part is fixed/clamped (the end that doesn't move).")
+                                if (mode === "torque_set_axis") return catalog.i18nc("@info", "Position and rotate the cyan axis line to match the real rotation axis (shaft, hinge, bolt). Use Cura's Move/Rotate tools, then click 'Confirm Axis'.")
+                                if (mode === "torque_pick_faces") return catalog.i18nc("@info", "Click faces connected to the rotation axis, then click 'Confirm Torque'.")
                                 return ""
                             }
                         }
@@ -280,6 +285,68 @@ Item
                             valueFromText: function(t) { return Math.round(parseFloat(t) * 100) }
                         }
                         UM.Label { text: "mm"; font: UM.Theme.getFont("small") }
+                    }
+
+                    Cura.SecondaryButton
+                    {
+                        Layout.fillWidth: true
+                        text: catalog.i18nc("@action:button", "Torque: Set Rotation Axis")
+                        onClicked: UM.Controller.setProperty("QuickTorqueAxisStart", true)
+                    }
+
+                    // Torque axis confirm button (visible in torque_set_axis mode)
+                    Cura.PrimaryButton
+                    {
+                        Layout.fillWidth: true
+                        visible: (toolProperties.getValue("QuickSetupMode") ?? "") === "torque_set_axis"
+                        text: catalog.i18nc("@action:button", "Confirm Axis Position")
+                        onClicked: UM.Controller.setProperty("ConfirmTorqueAxis", true)
+                    }
+
+                    // Torque faces confirm row (visible in torque_pick_faces mode)
+                    ColumnLayout
+                    {
+                        Layout.fillWidth: true
+                        visible: (toolProperties.getValue("QuickSetupMode") ?? "") === "torque_pick_faces"
+                        spacing: UM.Theme.getSize("default_margin").height / 2
+
+                        RowLayout
+                        {
+                            Layout.fillWidth: true
+                            spacing: UM.Theme.getSize("default_margin").width / 2
+
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Torque (Nm):")
+                                font: UM.Theme.getFont("small")
+                            }
+
+                            SpinBox
+                            {
+                                id: torqueQuickMagSpinBox
+                                from: 1; to: 100000; value: 100; stepSize: 10
+                                onValueModified: UM.Controller.setProperty("TorqueMagnitude", value / 100.0)
+                                textFromValue: function(v) { return (v / 100.0).toFixed(2) }
+                                valueFromText: function(t) { return Math.round(parseFloat(t) * 100) }
+                            }
+                        }
+
+                        UM.Label
+                        {
+                            Layout.fillWidth: true
+                            text: catalog.i18nc("@info", "%1 faces selected").arg(
+                                Number(toolProperties.getValue("CurrentSelectionCount") ?? 0))
+                            font: UM.Theme.getFont("small")
+                            color: UM.Theme.getColor("text_inactive")
+                        }
+
+                        Cura.PrimaryButton
+                        {
+                            Layout.fillWidth: true
+                            text: catalog.i18nc("@action:button", "Confirm Torque")
+                            enabled: Number(toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+                            onClicked: UM.Controller.setProperty("ConfirmTorqueFaces", true)
+                        }
                     }
 
                     // Hover preview toggle
@@ -500,6 +567,8 @@ Item
                                                         UM.Controller.setProperty("ActiveSupportIndex", modelData.index)
                                                         UM.Controller.setProperty("DeleteActiveSupport", true)
                                                     }
+                                                    Accessible.role: Accessible.Button
+                                                    Accessible.name: catalog.i18nc("@a11y", "Delete")
                                                 }
                                             }
                                         }
@@ -771,12 +840,13 @@ Item
                                 {
                                     id: forceXField
                                     Layout.fillWidth: true
-                                    text: bcPanel.forceX.toFixed(1)
+                                    text: isNaN(bcPanel.forceX) ? "0.0" : bcPanel.forceX.toFixed(1)
                                     readOnly: bcPanel.currentMode === "rotate"
                                     font.pointSize: UM.Theme.getFont("small").pointSize
                                     validator: DoubleValidator { decimals: 1 }
                                     onEditingFinished:
                                         UM.Controller.setProperty("ForceX", parseFloat(text) || 0.0)
+                                    Accessible.name: catalog.i18nc("@a11y", "Force X component")
                                 }
 
                                 UM.Label { text: "Fy:"; font: UM.Theme.getFont("small") }
@@ -784,12 +854,13 @@ Item
                                 {
                                     id: forceYField
                                     Layout.fillWidth: true
-                                    text: bcPanel.forceY.toFixed(1)
+                                    text: isNaN(bcPanel.forceY) ? "0.0" : bcPanel.forceY.toFixed(1)
                                     readOnly: bcPanel.currentMode === "rotate"
                                     font.pointSize: UM.Theme.getFont("small").pointSize
                                     validator: DoubleValidator { decimals: 1 }
                                     onEditingFinished:
                                         UM.Controller.setProperty("ForceY", parseFloat(text) || 0.0)
+                                    Accessible.name: catalog.i18nc("@a11y", "Force Y component")
                                 }
 
                                 UM.Label { text: "Fz:"; font: UM.Theme.getFont("small") }
@@ -797,12 +868,13 @@ Item
                                 {
                                     id: forceZField
                                     Layout.fillWidth: true
-                                    text: bcPanel.forceZ.toFixed(1)
+                                    text: isNaN(bcPanel.forceZ) ? "0.0" : bcPanel.forceZ.toFixed(1)
                                     readOnly: bcPanel.currentMode === "rotate"
                                     font.pointSize: UM.Theme.getFont("small").pointSize
                                     validator: DoubleValidator { decimals: 1 }
                                     onEditingFinished:
                                         UM.Controller.setProperty("ForceZ", parseFloat(text) || 0.0)
+                                    Accessible.name: catalog.i18nc("@a11y", "Force Z component")
                                 }
                             }
 
@@ -875,6 +947,8 @@ Item
                                                         UM.Controller.setProperty("ActiveForceIndex", modelData.index)
                                                         UM.Controller.setProperty("DeleteActiveForce", true)
                                                     }
+                                                    Accessible.role: Accessible.Button
+                                                    Accessible.name: catalog.i18nc("@a11y", "Delete")
                                                 }
                                             }
                                         }
@@ -1303,6 +1377,8 @@ Item
                                                     {
                                                         anchors.fill: parent
                                                         onClicked: UM.Controller.setProperty("DeleteTorqueGroup", modelData.index)
+                                                        Accessible.role: Accessible.Button
+                                                        Accessible.name: catalog.i18nc("@a11y", "Delete")
                                                     }
                                                 }
                                             }
@@ -1529,7 +1605,14 @@ Item
                         text: toolProperties.getValue("MaterialSummary") ?? ""
                         visible: text !== ""
                         font: UM.Theme.getFont("small")
-                        color: UM.Theme.getColor("text_inactive")
+                        color: {
+                            var s = text
+                            if (s.indexOf("not valid") >= 0 || s.indexOf("Hyperelastic") >= 0)
+                                return UM.Theme.getColor("error")
+                            if (s.indexOf("Brittle") >= 0 || s.indexOf("overestimate") >= 0)
+                                return UM.Theme.getColor("warning")
+                            return UM.Theme.getColor("text_inactive")
+                        }
                         wrapMode: Text.WordWrap
                     }
 
@@ -1783,23 +1866,23 @@ Item
                             rowSpacing: UM.Theme.getSize("default_margin").height / 4
 
                             UM.Label { text: catalog.i18nc("@label", "Min infill (%)"); font: UM.Theme.getFont("small") }
-                            SpinBox { from: 5; to: 90; value: 10; stepSize: 5; Layout.fillWidth: true
+                            SpinBox { from: 5; to: 90; value: toolProperties.getValue("MinDensity") ?? 10; stepSize: 5; Layout.fillWidth: true
                                 onValueModified: UM.Controller.setProperty("MinDensity", value) }
 
                             UM.Label { text: catalog.i18nc("@label", "Max infill (%)"); font: UM.Theme.getFont("small") }
-                            SpinBox { from: 10; to: 100; value: 80; stepSize: 5; Layout.fillWidth: true
+                            SpinBox { from: 10; to: 100; value: toolProperties.getValue("MaxDensity") ?? 80; stepSize: 5; Layout.fillWidth: true
                                 onValueModified: UM.Controller.setProperty("MaxDensity", value) }
 
                             UM.Label { text: catalog.i18nc("@label", "Density steps"); font: UM.Theme.getFont("small") }
-                            SpinBox { from: 2; to: 20; value: 5; stepSize: 1; Layout.fillWidth: true
+                            SpinBox { from: 2; to: 20; value: toolProperties.getValue("NumZones") ?? 5; stepSize: 1; Layout.fillWidth: true
                                 onValueModified: UM.Controller.setProperty("NumZones", value) }
 
                             UM.Label { text: catalog.i18nc("@label", "Analysis passes"); font: UM.Theme.getFont("small") }
-                            SpinBox { from: 1; to: 50; value: 20; stepSize: 1; Layout.fillWidth: true
+                            SpinBox { from: 1; to: 50; value: toolProperties.getValue("MaxIterations") ?? 20; stepSize: 1; Layout.fillWidth: true
                                 onValueModified: UM.Controller.setProperty("MaxIterations", value) }
 
                             UM.Label { text: catalog.i18nc("@label", "Layer bonding (%)"); font: UM.Theme.getFont("small") }
-                            SpinBox { from: 10; to: 100; value: 50; stepSize: 5; Layout.fillWidth: true
+                            SpinBox { from: 10; to: 100; value: toolProperties.getValue("BondingCoeff") ?? 50; stepSize: 5; Layout.fillWidth: true
                                 onValueModified: UM.Controller.setProperty("BondingCoeff", value) }
 
                             UM.Label { text: catalog.i18nc("@label", "Optimization"); font: UM.Theme.getFont("small") }
@@ -1872,7 +1955,8 @@ Item
                     {
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Run Analysis")
-                        enabled: !!toolProperties.getValue("DepsAvailable")
+                        enabled: !!toolProperties.getValue("DepsAvailable") &&
+                                 (toolProperties.getValue("MaterialSummary") ?? "").indexOf("not valid") < 0
                         onClicked: UM.Controller.setProperty("RunAnalysis", true)
                     }
 
@@ -1970,6 +2054,52 @@ Item
                         onClicked: UM.Controller.setProperty("CancelAnalysis", true)
                     }
 
+                    // Iteration counter — visible during solver phase
+                    UM.Label
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel.analysisProgress > 29 && bcPanel.analysisProgress <= 90
+                        text: {
+                            var iter = Math.max(1, Math.floor((bcPanel.analysisProgress - 30) / 12) + 1)
+                            var maxIter = toolProperties.getValue("MaxIterations") ?? 20
+                            return catalog.i18nc("@info", "Iteration %1 of %2").arg(iter).arg(maxIter)
+                        }
+                        font: UM.Theme.getFont("default")
+                        color: UM.Theme.getColor("text_medium")
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+
+                    // BC summary for context while waiting
+                    Rectangle
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel.supportListModel.length > 0 || bcPanel.forceListModel.length > 0
+                        height: visible ? bcSummaryRunning.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        color: UM.Theme.getColor("main_background")
+                        radius: UM.Theme.getSize("default_radius").width
+                        border.color: UM.Theme.getColor("lining")
+                        border.width: UM.Theme.getSize("default_lining").width
+
+                        UM.Label
+                        {
+                            id: bcSummaryRunning
+                            anchors
+                            {
+                                left: parent.left; right: parent.right
+                                verticalCenter: parent.verticalCenter
+                                margins: UM.Theme.getSize("default_margin").width / 2
+                            }
+                            text: catalog.i18nc("@info", "%1 support(s) \u00b7 %2 force(s) \u00b7 %3 torque(s)")
+                                .arg(bcPanel.supportListModel.length)
+                                .arg(bcPanel.forceListModel.length)
+                                .arg(bcPanel.torqueListModel.length)
+                            font: UM.Theme.getFont("small")
+                            color: UM.Theme.getColor("text_medium")
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+
                     Item { height: UM.Theme.getSize("default_margin").height }
                 }  // runningColumn
             }  // RUNNING phase Item
@@ -1982,6 +2112,11 @@ Item
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "review"
                 Layout.preferredHeight: visible ? reviewColumn.implicitHeight : 0
+                onVisibleChanged:
+                {
+                    if (visible) mainScrollView.contentItem.contentY = 0
+                    else bcPanel._meshesApplied = false
+                }
 
                 ColumnLayout
                 {
@@ -2228,7 +2363,21 @@ Item
                         Layout.fillWidth: true
                         text: catalog.i18nc("@action:button", "Apply Optimized Infill")
                         enabled: bcPanel.hasResults && bcPanel.hasFullResults
-                        onClicked: UM.Controller.setProperty("ApplyModifierMeshes", true)
+                        onClicked:
+                        {
+                            UM.Controller.setProperty("ApplyModifierMeshes", true)
+                            bcPanel._meshesApplied = true
+                        }
+                    }
+
+                    UM.Label
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel._meshesApplied
+                        text: catalog.i18nc("@info", "\u2713 Infill zones applied. Check Cura\u2019s scene list.")
+                        color: UM.Theme.getColor("success")
+                        font: UM.Theme.getFont("small")
+                        wrapMode: Text.WordWrap
                     }
 
                     // Secondary actions
@@ -2255,6 +2404,51 @@ Item
                         }
                     }
 
+                    // Colorbar legend — visible when stress overlay is active
+                    ColumnLayout
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel.stressOverlayVisible && bcPanel.hasFullResults
+                        spacing: 2
+
+                        Rectangle
+                        {
+                            Layout.fillWidth: true
+                            height: 12 * screenScaleFactor
+                            radius: 3 * screenScaleFactor
+                            gradient: Gradient
+                            {
+                                orientation: Gradient.Horizontal
+                                GradientStop { position: 0.0;  color: "#440154" }
+                                GradientStop { position: 0.25; color: "#31688e" }
+                                GradientStop { position: 0.5;  color: "#35b779" }
+                                GradientStop { position: 0.75; color: "#90d743" }
+                                GradientStop { position: 1.0;  color: "#fde725" }
+                            }
+                        }
+
+                        RowLayout
+                        {
+                            Layout.fillWidth: true
+
+                            UM.Label
+                            {
+                                text: bcPanel.minStress.toFixed(1) + " MPa"
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            UM.Label
+                            {
+                                text: bcPanel.maxStress.toFixed(1) + " MPa"
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                            }
+                        }
+                    }
+
                     RowLayout
                     {
                         Layout.fillWidth: true
@@ -2263,14 +2457,14 @@ Item
                         Cura.SecondaryButton
                         {
                             Layout.fillWidth: true
-                            text: catalog.i18nc("@action:button", "Edit Boundary Conditions")
+                            text: catalog.i18nc("@action:button", "Edit BCs")
                             onClicked: UM.Controller.setProperty("GoBackToDefine", true)
                         }
 
                         Cura.SecondaryButton
                         {
                             Layout.fillWidth: true
-                            text: catalog.i18nc("@action:button", "Edit Analysis Settings")
+                            text: catalog.i18nc("@action:button", "Edit Settings")
                             onClicked: UM.Controller.setProperty("GoBackToOptimize", true)
                         }
                     }

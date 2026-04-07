@@ -2,6 +2,7 @@
 # Released under the terms of the LGPLv3 or higher.
 
 import math
+import threading
 from typing import Any, Callable, Dict
 
 import numpy
@@ -51,6 +52,11 @@ class FEASolveJob(Job):
         self._bc_decorator = bc_decorator
         self._material = material
         self._config = config
+        self._cancel_event = threading.Event()
+
+    def requestCancel(self) -> None:
+        """Signal the solver to stop at the next iteration boundary."""
+        self._cancel_event.set()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -133,6 +139,7 @@ class FEASolveJob(Job):
                 config=self._config,
                 progress_callback=_solver_progress_cb,
                 surface_mesh=surface_mesh,
+                cancel_check=lambda: self._cancel_event.is_set(),
             )
             iterations = info["iterations"]
             converged = info["converged"]

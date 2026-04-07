@@ -43,6 +43,14 @@ Item
                 helpContentManager.openPopover(guideId, helpIcon)
             }
         }
+
+        Keys.onReturnPressed:
+        {
+            if (guideId !== "" && helpContentManager)
+            {
+                helpContentManager.openPopover(guideId, helpIcon)
+            }
+        }
     }
 
     ToolTip

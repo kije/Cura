@@ -105,6 +105,7 @@ class IterativeFEASolver:
         config: Dict[str, Any],
         progress_callback: Optional[Callable[[float], None]] = None,
         surface_mesh: Any = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Run the fixed-point density iteration.
 
@@ -178,6 +179,16 @@ class IterativeFEASolver:
                 stacklevel=2,
             )
 
+        # OOM guard: reject meshes that would exhaust memory during assembly
+        n_elems = tet_mesh.elements.shape[0]
+        if n_elems > 500_000:
+            raise ValueError(
+                f"Mesh has {n_elems} elements (>500K). Use 'Fast' or 'Balanced' "
+                "mesh quality to reduce element count."
+            )
+        if n_elems > 200_000:
+            Logger.log("w", "FEA: Large mesh (%d elements) — analysis may be slow and memory-intensive", n_elems)
+
         opt_method = str(config.get("optimization_method", "heuristic"))
         use_easyfea = _EASYFEA_AVAILABLE and bool(tet_mesh.msh_path) and os.path.exists(tet_mesh.msh_path)
 
@@ -190,14 +201,14 @@ class IterativeFEASolver:
             Logger.log("i", "FEA solve: using EasyFEA solver (msh=%s)", tet_mesh.msh_path)
             return self._solve_easyfea(
                 tet_mesh, boundary_conditions, material, config,
-                progress_callback, surface_mesh,
+                progress_callback, surface_mesh, cancel_check,
             )
         else:
             Logger.log("i", "FEA solve: using scipy solver (EasyFEA available=%s, opt=%s)",
                        _EASYFEA_AVAILABLE, opt_method)
             return self._solve_scipy(
                 tet_mesh, boundary_conditions, material, config,
-                progress_callback, surface_mesh,
+                progress_callback, surface_mesh, cancel_check,
             )
 
     # ------------------------------------------------------------------
@@ -212,6 +223,7 @@ class IterativeFEASolver:
         config: Dict[str, Any],
         progress_callback: Optional[Callable[[float], None]],
         surface_mesh: Any,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Fixed-point iteration using EasyFEA as the FEA kernel."""
         import threading as _threading
@@ -291,6 +303,10 @@ class IterativeFEASolver:
         _prev_simu: Optional[Any] = None
 
         for iteration in range(max_iter):
+            if cancel_check and cancel_check():
+                Logger.log("i", "FEA EasyFEA: cancelled by user at iteration %d", iteration + 1)
+                break
+
             _iter_t = _time.monotonic()
 
             # --- Step 1: homogenize (per-element) --------------------------
@@ -308,7 +324,7 @@ class IterativeFEASolver:
                 dim=3,
                 El=E_xy,
                 Et=E_t_base,
-                Gl=G_base,
+                Gl=bonding_coeff * G_base,
                 vl=nu,
                 vt=nu_t,
             )
@@ -530,6 +546,7 @@ class IterativeFEASolver:
         config: Dict[str, Any],
         progress_callback: Optional[Callable[[float], None]],
         surface_mesh: Any,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Fixed-point iteration using the custom scipy FEA kernel."""
         import time as _time
@@ -573,6 +590,10 @@ class IterativeFEASolver:
         oscillation_count = 0
 
         for iteration in range(max_iter):
+            if cancel_check and cancel_check():
+                Logger.log("i", "FEA scipy: cancelled by user at iteration %d", iteration + 1)
+                break
+
             _iter_start = _time.monotonic()
             n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
             E_eff_arr = material.E_xy * np.power(density, n_exp)
@@ -587,12 +608,18 @@ class IterativeFEASolver:
                 tet_mesh, E_eff_arr, nu_arr, bonding_coeff=bonding_coeff
             )
             _t2 = _time.monotonic()
+            if progress_callback is not None:
+                progress_callback((iteration + 0.2) / max_iter)
             Logger.log("d", "FEA iter %d: starting BCs...", iteration + 1)
             K, f = fea_solver.apply_boundary_conditions(K, force_vector.copy(), fixed_nodes)
             _t3 = _time.monotonic()
+            if progress_callback is not None:
+                progress_callback((iteration + 0.3) / max_iter)
             Logger.log("d", "FEA iter %d: starting solve...", iteration + 1)
             displacements = fea_solver.solve(K, f)
             _t4 = _time.monotonic()
+            if progress_callback is not None:
+                progress_callback((iteration + 0.7) / max_iter)
 
             # Use Tsai-Hill failure criterion for anisotropic materials,
             # von Mises for isotropic.  The failure index is converted back
@@ -609,6 +636,8 @@ class IterativeFEASolver:
                     bonding_coeff=bonding_coeff,
                 )
             _t5 = _time.monotonic()
+            if progress_callback is not None:
+                progress_callback((iteration + 0.9) / max_iter)
             Logger.log("d", "FEA iter %d: assemble=%.1fs, BCs=%.1fs, solve=%.1fs, stress=%.1fs",
                        iteration + 1, _t2 - _t1, _t3 - _t2, _t4 - _t3, _t5 - _t4)
 
@@ -995,7 +1024,11 @@ def _build_force_vector(bc, tet_mesh: TetMesh, surface_mesh: Any = None) -> np.n
 
             # Compute center of all torque nodes
             node_positions = np.array([tet_mesh.nodes[tn] for tn in tet_nodes_in_group_t])
-            center = node_positions.mean(axis=0)
+            if torque_group.torque_center is not None:
+                tc = torque_group.torque_center
+                center = np.array([float(tc.x), float(tc.y), float(tc.z)])
+            else:
+                center = node_positions.mean(axis=0)
 
             # Pre-compute perpendicular distances for rigid-body rotation model.
             # Physical model: F_i = lambda * r_perp_i (rigid body angular disp)

@@ -62,6 +62,8 @@ def _recheckDeps(self):
 
 The same zombie pattern exists in the EasyFEA path: `_solve_worker` thread (`iterative_solver.py` ~line 405) with a 120s timeout. If the EasyFEA solve times out, that thread also continues running.
 
+**Severity escalation (from test review):** In OC/SIMP optimization with 20 iterations, each iteration calls `solve()`. If spsolve times out on a nearly-singular system, every iteration spawns a zombie thread. A 20-iteration OC solve could create **20 concurrent zombie spsolve threads**, each holding the full stiffness matrix in memory. Additionally, the 120s EasyFEA timeout over 20 iterations means a global worst-case of **40 minutes** of blocking with no global timeout.
+
 **Reentrancy/correctness concern (from physics review):** If the user triggers a second analysis while a zombie spsolve thread is still running, both threads may simultaneously access scipy/LAPACK internals. Some LAPACK implementations (especially OpenBLAS) are not reentrant — concurrent calls can produce wrong numerical results or segfault.
 
 **Reproduction:** Run analysis on a 500K+ element mesh. Let spsolve timeout, triggering CG fallback. The spsolve thread continues in background (observe via `threading.enumerate()`). Start a second analysis before the zombie finishes.
@@ -71,6 +73,8 @@ The same zombie pattern exists in the EasyFEA path: `_solve_worker` thread (`ite
 2. Use `scipy.sparse.linalg.splu` (factorize) + forward/back-solve (interruptible at factor stage)
 3. Accept the zombie but add a process-level memory watchdog that kills the thread's subprocess
 4. At minimum: guard against concurrent analyses by refusing to start a new solve while a zombie thread from a previous solve is still alive (check `threading.enumerate()` for active solver threads)
+5. Add a global solve timeout for the entire OC iteration loop (e.g., 10 minutes) in addition to per-solve timeouts
+6. Track zombie thread count per analysis; abort OC iteration if zombie count exceeds threshold (e.g., 3)
 
 ---
 
@@ -427,6 +431,7 @@ except (KeyError, TypeError, ValueError) as e:
 | ui-ux-expert | UX-29: `parseFloat(text) \|\| fallback` silently substitutes 100 N for "0" or empty input — no visual feedback. | Complements MED-2: backend `isfinite()` guards + QML visual rejection are two layers of same defense. |
 | code-quality-expert | CQ-8 signal multi-connect, CQ-18 no cancel propagation, CQ-11 upgraded to Medium (MED-4), CQ-32 added (LOW-4). | Documented as CRIT-1, CRIT-2, MED-4, LOW-4. |
 | performance-expert | OOM assembly, unthrottled metadata handler, zombie spsolve. | Documented as CRIT-4, HIGH-6, CRIT-3. |
+| test-expert | 20-iteration OC can spawn 20 zombie spsolve threads; 120s x 20 = 40 min worst-case; CG fallback path has zero test coverage. | Escalates CRIT-3 severity; adds fix recommendations 5-6. |
 
 ---
 

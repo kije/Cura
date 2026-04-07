@@ -39,7 +39,7 @@ def _face_normal(verts, indices, face_idx) -> np.ndarray:
     e2 = v2 - v0
     n = np.cross(e1, e2)
     length = np.linalg.norm(n)
-    return n / length if length > 1e-12 else np.array([0, 1, 0])
+    return n / length if length > 1e-12 else np.array([0.0, 0.0, 0.0])
 
 
 def _face_centroid(verts, indices, face_idx) -> np.ndarray:
@@ -82,6 +82,8 @@ def gravity_from_face(
     """
     # Get the normal of the clicked face — this is the "down" direction
     down_normal = _face_normal(verts, indices, bottom_face_idx)
+    if np.linalg.norm(down_normal) < 1e-12:
+        return {"fixed_faces": [], "force_groups": []}
 
     # Project all face centroids along this normal
     n_faces = len(indices) if indices is not None else len(verts) // 3
@@ -214,6 +216,8 @@ def cantilever(
 
     # Get fixed face normal and centroid
     fixed_normal = _face_normal(verts, indices, fixed_face_idx)
+    if np.linalg.norm(fixed_normal) < 1e-12:
+        return {"fixed_faces": fixed_faces, "force_groups": []}
     fixed_centroid = _face_centroid(verts, indices, fixed_face_idx)
 
     # Find the face most opposite (furthest along the fixed face's normal)

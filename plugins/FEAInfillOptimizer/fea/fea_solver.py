@@ -34,6 +34,20 @@ class LinearElasticitySolver:
         vm = solver.compute_element_stress(tet_mesh, u, E_arr, nu_arr)
     """
 
+    def __init__(self) -> None:
+        self._B_cache_key = None
+        self._B_all = None
+        self._V_all = None
+        self._valid = None
+
+    def _get_cached_B(self, tet_mesh: TetMesh):
+        """Return cached (B_all, V_all, valid) for tet_mesh, recomputing on mesh change."""
+        key = id(tet_mesh)
+        if self._B_cache_key != key:
+            self._B_all, self._V_all, self._valid = _strain_displacement_matrices_vectorized(tet_mesh)
+            self._B_cache_key = key
+        return self._B_all, self._V_all, self._valid
+
     # ------------------------------------------------------------------
     # Stiffness assembly
     # ------------------------------------------------------------------
@@ -79,62 +93,8 @@ class LinearElasticitySolver:
 
         use_aniso = bonding_coeff < 1.0
 
-        # Vectorized assembly: compute ALL element stiffness matrices at once
-        # using numpy broadcasting. ~50-100x faster than the Python loop.
-
-        # 1. Gather element vertex coordinates: (M, 4, 3)
-        elem_nodes = nodes[elements]  # (M, 4, 3)
-        x0 = elem_nodes[:, 0, :]  # (M, 3)
-        x1 = elem_nodes[:, 1, :]
-        x2 = elem_nodes[:, 2, :]
-        x3 = elem_nodes[:, 3, :]
-
-        # 2. Jacobian: edge vectors (M, 3, 3), rows = edges
-        J = np.stack([x1 - x0, x2 - x0, x3 - x0], axis=1)  # (M, 3, 3)
-        detJ = np.linalg.det(J)  # (M,)
-        V = np.abs(detJ) / 6.0   # (M,)
-
-        # Skip degenerate elements
-        max_edge = np.max(np.linalg.norm(
-            np.stack([x1-x0, x2-x0, x3-x0, x2-x1, x3-x1, x3-x2], axis=1),
-            axis=2), axis=1)  # (M,)
-        degen_threshold = (max_edge ** 3) * 1e-10
-        valid = np.abs(detJ) >= degen_threshold
-        valid &= V > 0
-
-        # 3. Shape function gradients: dN/dx = dN/dxi @ J^{-1}
-        # Reference gradients for linear tet (constant per element):
-        # N0 = 1 - xi - eta - zeta; N1 = xi; N2 = eta; N3 = zeta
-        dN_ref = np.array([
-            [-1.0, -1.0, -1.0],
-            [ 1.0,  0.0,  0.0],
-            [ 0.0,  1.0,  0.0],
-            [ 0.0,  0.0,  1.0],
-        ], dtype=np.float64)  # (4, 3)
-
-        # For degenerate elements, use identity Jacobian to avoid singular inverse
-        J_safe = J.copy()
-        J_safe[~valid] = np.eye(3)
-        J_inv = np.linalg.inv(J_safe)  # (M, 3, 3)
-        # dN_xyz[m, i, j] = sum_k dN_ref[i,k] * J_inv[m,k,j]
-        dN_xyz = np.einsum("ik,mkj->mij", dN_ref, J_inv)  # (M, 4, 3)
-
-        # 4. Build B matrices: (M, 6, 12)
-        B_all = np.zeros((n_elems, 6, 12), dtype=np.float64)
-        for i in range(4):
-            col = i * 3
-            bx = dN_xyz[:, i, 0]  # (M,)
-            by = dN_xyz[:, i, 1]
-            bz = dN_xyz[:, i, 2]
-            B_all[:, 0, col + 0] = bx      # eps_xx
-            B_all[:, 1, col + 1] = by      # eps_yy
-            B_all[:, 2, col + 2] = bz      # eps_zz
-            B_all[:, 3, col + 0] = by      # gamma_xy
-            B_all[:, 3, col + 1] = bx
-            B_all[:, 4, col + 1] = bz      # gamma_yz
-            B_all[:, 4, col + 2] = by
-            B_all[:, 5, col + 0] = bz      # gamma_xz
-            B_all[:, 5, col + 2] = bx
+        # Get B matrices, volumes, and validity mask (cached per mesh identity)
+        B_all, V, valid = self._get_cached_B(tet_mesh)
 
         # 5. Build D matrices: (M, 6, 6) or (6, 6) if uniform nu
         if use_aniso:
@@ -304,11 +264,17 @@ class LinearElasticitySolver:
             reason = "timeout (30s)" if t.is_alive() else str(exc[0])
             Logger.log("w", "FEA solve: spsolve %s, falling back to CG iterative solver", reason)
 
+            # CPython cannot kill daemon threads.  The zombie spsolve thread
+            # may keep references to the large K and f arrays.  Copy the
+            # inputs for CG so the zombie doesn't pin shared memory.
+            K_cg = K.copy()
+            f_cg = f.copy()
+
             # CG with Jacobi preconditioner — won't hang, bounded iterations
-            diag = K.diagonal().copy()
+            diag = K_cg.diagonal().copy()
             diag[diag == 0] = 1.0
             M_inv = sp.diags(1.0 / diag)
-            u, info = spla.cg(K, f, M=M_inv, tol=1e-8, maxiter=5000)
+            u, info = spla.cg(K_cg, f_cg, M=M_inv, tol=1e-8, maxiter=5000)
             if info != 0:
                 Logger.log("w", "FEA solve: CG info=%d (partial convergence)", info)
         else:
@@ -363,8 +329,8 @@ class LinearElasticitySolver:
 
         use_aniso = bonding_coeff < 1.0
 
-        # Vectorized: compute B matrices and volumes for ALL elements at once
-        B_all, V_all, valid = _strain_displacement_matrices_vectorized(tet_mesh)
+        # Get B matrices and volumes (cached per mesh identity)
+        B_all, V_all, valid = self._get_cached_B(tet_mesh)
 
         # Build D matrices (M, 6, 6) — reuses same logic as assemble_stiffness_matrix
         D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)
@@ -430,8 +396,8 @@ class LinearElasticitySolver:
         import time as _time
         _t0 = _time.monotonic()
 
-        # Vectorized: compute B matrices and volumes for ALL elements at once
-        B_all, V_all, valid = _strain_displacement_matrices_vectorized(tet_mesh)
+        # Get B matrices and volumes (cached per mesh identity)
+        B_all, V_all, valid = self._get_cached_B(tet_mesh)
 
         # Build D matrices (M, 6, 6)
         D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)
@@ -488,8 +454,8 @@ class LinearElasticitySolver:
 
         use_tsai_hill = bonding_coeff < 0.95
 
-        # Vectorized: compute B matrices and volumes for ALL elements at once
-        B_all, V_all, valid = _strain_displacement_matrices_vectorized(tet_mesh)
+        # Get B matrices and volumes (cached per mesh identity)
+        B_all, V_all, valid = self._get_cached_B(tet_mesh)
 
         # Build D matrices (M, 6, 6)
         D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)

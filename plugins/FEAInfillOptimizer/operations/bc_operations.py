@@ -109,12 +109,14 @@ class AddTorqueGroupOperation(Operation):
     """Undoable add of a torque group (appended to end of list)."""
 
     def __init__(self, decorator, face_indices, torque_axis: Vector,
-                 torque_magnitude: float):
+                 torque_magnitude: float, torque_center=None):
         super().__init__()
         self._decorator = decorator
         self._face_indices = list(face_indices)
         self._torque_axis = Vector(torque_axis.x, torque_axis.y, torque_axis.z)
         self._torque_magnitude = torque_magnitude
+        self._torque_center = (Vector(torque_center.x, torque_center.y, torque_center.z)
+                               if torque_center is not None else None)
 
     def undo(self):
         groups = self._decorator.getTorqueGroups()
@@ -123,7 +125,8 @@ class AddTorqueGroupOperation(Operation):
 
     def redo(self):
         self._decorator.addTorqueGroup(
-            self._face_indices, self._torque_axis, self._torque_magnitude
+            self._face_indices, self._torque_axis, self._torque_magnitude,
+            self._torque_center
         )
 
 
@@ -139,12 +142,15 @@ class RemoveTorqueGroupOperation(Operation):
         self._torque_axis = Vector(group.torque_axis.x, group.torque_axis.y,
                                    group.torque_axis.z)
         self._torque_magnitude = group.torque_magnitude
+        self._torque_center = (Vector(group.torque_center.x, group.torque_center.y,
+                                      group.torque_center.z)
+                               if group.torque_center is not None else None)
 
     def undo(self):
         self._decorator._torque_groups.insert(
             self._index,
             TorqueGroup(self._face_indices, self._torque_axis,
-                        self._torque_magnitude)
+                        self._torque_magnitude, self._torque_center)
         )
 
     def redo(self):
@@ -172,6 +178,51 @@ class UpdateTorqueAxisOperation(Operation):
 
     def redo(self):
         self._decorator.updateTorqueAxis(self._index, self._new_axis)
+
+
+class UpdateForceDirectionOperation(Operation):
+    """Undoable update of a force group's direction/magnitude vector.
+
+    The force is mutated in-place during drag; this operation receives both
+    the old (pre-drag) and new (post-drag) forces so undo/redo work correctly.
+    Note: ``redo()`` is called automatically by ``push()``, but the force is
+    already set during drag — the redo is idempotent.
+    """
+
+    def __init__(self, decorator, index: int, old_force: Vector, new_force: Vector):
+        super().__init__()
+        self._decorator = decorator
+        self._index = index
+        self._old_force = Vector(old_force.x, old_force.y, old_force.z)
+        self._new_force = Vector(new_force.x, new_force.y, new_force.z)
+
+    def undo(self):
+        if 0 <= self._index < len(self._decorator._force_groups):
+            self._decorator._force_groups[self._index].force = self._old_force
+
+    def redo(self):
+        if 0 <= self._index < len(self._decorator._force_groups):
+            self._decorator._force_groups[self._index].force = self._new_force
+
+
+class UpdateTorqueMagnitudeOperation(Operation):
+    """Undoable update of a torque group's magnitude."""
+
+    def __init__(self, decorator, index: int, old_magnitude: float,
+                 new_magnitude: float):
+        super().__init__()
+        self._decorator = decorator
+        self._index = index
+        self._old_magnitude = old_magnitude
+        self._new_magnitude = new_magnitude
+
+    def undo(self):
+        if 0 <= self._index < len(self._decorator._torque_groups):
+            self._decorator._torque_groups[self._index].torque_magnitude = self._old_magnitude
+
+    def redo(self):
+        if 0 <= self._index < len(self._decorator._torque_groups):
+            self._decorator._torque_groups[self._index].torque_magnitude = self._new_magnitude
 
 
 class ClearAllBCsOperation(Operation):

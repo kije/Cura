@@ -180,6 +180,8 @@ class FEAInfillExtension(QObject, Extension):
         except Exception:
             Logger.logException("d", "FEA Infill: Failed to sync infill pattern from Cura")
 
+    _signals_connected = False
+
     def _onEngineCreated(self) -> None:
         plugin_path = PluginRegistry.getInstance().getPluginPath("FEAInfillOptimizer")
         if plugin_path:
@@ -199,14 +201,34 @@ class FEAInfillExtension(QObject, Extension):
 
             self._recheckDeps()
 
+        # Connect signals exactly once (guard prevents multi-connect on retries)
+        if not self._signals_connected:
+            self._signals_connected = True
+
+            app = CuraApplication.getInstance()
+
+            # Restore BCs when files are loaded
+            app.fileLoaded.connect(self._restoreBCsFromScene)
+            app.fileCompleted.connect(self._restoreBCsFromScene)
+            if hasattr(app, "workspaceLoaded"):
+                app.workspaceLoaded.connect(self._restoreBCsFromScene)
+
+            # Scene changes — BC metadata and orphaned overlay cleanup
+            app.getController().getScene().sceneChanged.connect(self._onSceneNodeMayHaveBCMetadata)
+            app.getController().getScene().sceneChanged.connect(self._cleanupOrphanedOverlays)
+
+            # Sync BC data to node.metadata before save
+            app.getOutputDeviceManager().writeStarted.connect(self._syncAllBCsToMetadata)
+
+            # Sync material and infill pattern from Cura's active profile
+            machine_manager = app.getMachineManager()
+            if machine_manager is not None:
+                machine_manager.activeMaterialChanged.connect(self._syncMaterialFromCura)
+                machine_manager.activeQualityChanged.connect(self._syncInfillPatternFromCura)
+
         # Sync material and infill pattern from Cura's active profile
         self._syncMaterialFromCura()
         self._syncInfillPatternFromCura()
-        app = CuraApplication.getInstance()
-        machine_manager = app.getMachineManager()
-        if machine_manager is not None:
-            machine_manager.activeMaterialChanged.connect(self._syncMaterialFromCura)
-            machine_manager.activeQualityChanged.connect(self._syncInfillPatternFromCura)
 
     _recheck_count = 0
 
@@ -230,26 +252,7 @@ class FEAInfillExtension(QObject, Extension):
                        "These must be installed manually into Cura's Python environment "
                        "or bundled in the plugin's _vendor/ directory.", missing)
 
-        # Connect to signals for BC persistence in 3MF project files.
-        app = CuraApplication.getInstance()
-
-        # Restore BCs when files are loaded.  We connect to multiple signals
-        # because the timing differs between STL imports and workspace loads.
-        app.fileLoaded.connect(self._restoreBCsFromScene)
-        app.fileCompleted.connect(self._restoreBCsFromScene)
-        if hasattr(app, "workspaceLoaded"):
-            app.workspaceLoaded.connect(self._restoreBCsFromScene)
-
-        # Also listen for scene changes — nodes may get metadata restored
-        # asynchronously during workspace loading, and stress overlays may
-        # need cleanup when models are deleted.
-        app.getController().getScene().sceneChanged.connect(self._onSceneNodeMayHaveBCMetadata)
-        app.getController().getScene().sceneChanged.connect(self._cleanupOrphanedOverlays)
-
-        # Sync BC data to node.metadata before save.  writeStarted fires
-        # right before the 3MF writer serialises nodes, so our metadata
-        # will be picked up by savitar_node.setSetting().
-        app.getOutputDeviceManager().writeStarted.connect(self._syncAllBCsToMetadata)
+        # Signal connections are handled in _onEngineCreated() with a guard flag.
 
     _BC_METADATA_KEY = "fea_infill_boundary_conditions"
     _SETTINGS_METADATA_KEY = "fea_infill_settings"
@@ -333,6 +336,7 @@ class FEAInfillExtension(QObject, Extension):
                     pass
 
     _last_overlay_cleanup = 0.0
+    _last_bc_metadata_check = 0.0
 
     def _cleanupOrphanedOverlays(self, *args) -> None:
         """Remove stress overlays whose parent model was deleted.
@@ -357,7 +361,14 @@ class FEAInfillExtension(QObject, Extension):
         Connected to sceneChanged — fires for each node as it's added/modified.
         This catches nodes that get their metadata restored asynchronously
         during workspace loading (after workspaceLoaded has already fired).
+        Throttled to at most once per second since sceneChanged fires very
+        frequently (mouse moves, rendering updates, etc.).
         """
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_bc_metadata_check < 1.0:
+            return
+        self._last_bc_metadata_check = now
         if node is None or not isinstance(node, CuraSceneNode):
             return
         try:
@@ -522,6 +533,9 @@ class FEAInfillExtension(QObject, Extension):
     def cancelAnalysis(self) -> None:
         """Cancel any running analysis and return to OPTIMIZE phase."""
         self._cancel_requested = True
+        # Signal the active job's cancel event so the solver stops promptly
+        if hasattr(self, "_active_job") and self._active_job is not None:
+            self._active_job.requestCancel()
         self._phase = "optimize"
         self._analysis_status = "idle"
         self._progress = 0.0
@@ -922,6 +936,7 @@ class FEAInfillExtension(QObject, Extension):
         job = FEASolveJob(node, bc_decorator, material, config)
         job.finished.connect(self._onFEAFinished)
         job.progress.connect(self._onFEAProgress)
+        self._active_job = job
         JobQueue.getInstance().add(job)
 
     _last_progress_time = 0.0
@@ -959,8 +974,19 @@ class FEAInfillExtension(QObject, Extension):
             elif progress <= 30:
                 self._analysis_stage = "Building volume mesh..." + eta_str
             elif progress <= 90:
-                iteration = max(1, int((progress - 30) / 12) + 1)
-                self._analysis_stage = "Solving FEA (iteration %d)...%s" % (iteration, eta_str)
+                fea_frac = (progress - 30.0) / 60.0  # 0.0–1.0 within FEA phase
+                iter_float = fea_frac * max(1, self._max_iterations)
+                iter_num = max(1, int(iter_float) + 1)
+                sub_frac = iter_float - int(iter_float)
+                if sub_frac <= 0.2:
+                    sub_label = "Assembling stiffness"
+                elif sub_frac <= 0.3:
+                    sub_label = "Applying BCs"
+                elif sub_frac <= 0.7:
+                    sub_label = "Solving linear system"
+                else:
+                    sub_label = "Computing stress"
+                self._analysis_stage = "FEA iter %d — %s...%s" % (iter_num, sub_label, eta_str)
             elif progress <= 95:
                 self._analysis_stage = "Discretizing density..."
             else:

@@ -57,7 +57,13 @@ def create_all_modifier_meshes(
         density_pct = density * 100.0
 
         node = CuraSceneNode()
-        node.setName(f"FEA Zone ({density_pct:.0f}%)")
+        if density_pct < 40:
+            zone_label = "Low"
+        elif density_pct < 65:
+            zone_label = "Medium"
+        else:
+            zone_label = "High"
+        node.setName(f"FEA Zone: {zone_label} ({density_pct:.0f}%)")
         node.setSelectable(True)
         node.setMeshData(mesh_data)
         node.setCalculateBoundingBox(True)

@@ -39,25 +39,34 @@ class TorqueGroup:
     """
 
     def __init__(self, face_indices: List[int], torque_axis: Vector,
-                 torque_magnitude: float) -> None:
+                 torque_magnitude: float,
+                 torque_center: Optional[Vector] = None) -> None:
         self.face_indices = list(face_indices)
         self.torque_axis = torque_axis      # unit direction vector of the axis
         self.torque_magnitude = torque_magnitude  # Nm
+        self.torque_center = torque_center  # None = use centroid (legacy)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "face_indices": self.face_indices,
             "torque_axis": [self.torque_axis.x, self.torque_axis.y, self.torque_axis.z],
             "torque_magnitude": self.torque_magnitude
         }
+        if self.torque_center is not None:
+            d["torque_center"] = [self.torque_center.x, self.torque_center.y,
+                                  self.torque_center.z]
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "TorqueGroup":
+        tc = data.get("torque_center")
+        torque_center = Vector(tc[0], tc[1], tc[2]) if tc is not None else None
         return cls(
             face_indices=data["face_indices"],
             torque_axis=Vector(data["torque_axis"][0], data["torque_axis"][1],
                                data["torque_axis"][2]),
-            torque_magnitude=data["torque_magnitude"]
+            torque_magnitude=data["torque_magnitude"],
+            torque_center=torque_center
         )
 
 
@@ -121,8 +130,10 @@ class FEABoundaryConditionDecorator(SceneNodeDecorator):
         return self._torque_groups
 
     def addTorqueGroup(self, face_indices: List[int], torque_axis: Vector,
-                       torque_magnitude: float) -> None:
-        self._torque_groups.append(TorqueGroup(face_indices, torque_axis, torque_magnitude))
+                       torque_magnitude: float,
+                       torque_center: Optional[Vector] = None) -> None:
+        self._torque_groups.append(TorqueGroup(face_indices, torque_axis,
+                                               torque_magnitude, torque_center))
 
     def removeTorqueGroup(self, index: int) -> None:
         if 0 <= index < len(self._torque_groups):
@@ -132,6 +143,11 @@ class FEABoundaryConditionDecorator(SceneNodeDecorator):
         """Update the torque axis direction for a torque group at the given index."""
         if 0 <= index < len(self._torque_groups):
             self._torque_groups[index].torque_axis = new_axis
+
+    def updateTorqueCenter(self, index: int, new_center: Optional[Vector]) -> None:
+        """Update the torque center (point on axis line) for a torque group."""
+        if 0 <= index < len(self._torque_groups):
+            self._torque_groups[index].torque_center = new_center
 
     def clearTorqueGroups(self) -> None:
         self._torque_groups.clear()
@@ -209,7 +225,9 @@ class FEABoundaryConditionDecorator(SceneNodeDecorator):
         copy._torque_groups = [
             TorqueGroup(list(tg.face_indices),
                         Vector(tg.torque_axis.x, tg.torque_axis.y, tg.torque_axis.z),
-                        tg.torque_magnitude)
+                        tg.torque_magnitude,
+                        Vector(tg.torque_center.x, tg.torque_center.y, tg.torque_center.z)
+                        if tg.torque_center is not None else None)
             for tg in self._torque_groups
         ]
         copy._material_name = self._material_name

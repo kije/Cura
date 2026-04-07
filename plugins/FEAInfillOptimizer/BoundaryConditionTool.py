@@ -51,6 +51,8 @@ from .operations.bc_operations import (
     RemoveTorqueGroupOperation,
     ClearAllBCsOperation,
     UpdateTorqueAxisOperation,
+    UpdateForceDirectionOperation,
+    UpdateTorqueMagnitudeOperation,
 )
 from .visualization.bc_highlight import BCHighlightHandle
 from .visualization.force_direction_handle import (
@@ -59,6 +61,7 @@ from .visualization.force_direction_handle import (
     compute_face_normal,
     rotate_vector,
 )
+from .visualization.torque_axis_placement import TorqueAxisPlacementNode
 
 try:
     from .fea.face_group_analyzer import (
@@ -101,6 +104,7 @@ class BoundaryConditionTool(Tool):
         self._rotating_group_index = -1
         self._rotate_drag_active = False
         self._rotate_angle = 0.0
+        self._force_direction_before_drag: Optional[Vector] = None  # force at drag start for undo
 
         # Active list selection indices (-1 = none selected)
         self._active_support_index = -1
@@ -144,8 +148,14 @@ class BoundaryConditionTool(Tool):
         self._centroid_cache_transform_bytes = None
 
         # Quick setup state
-        self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed"
+        self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed",
+        #                              "torque_set_axis", "torque_pick_faces"
         self._quick_setup_hole_diameter = 8.0  # mm
+
+        # Torque quick setup: axis placement node and captured axis data
+        self._torque_axis_node: Optional[TorqueAxisPlacementNode] = None
+        self._torque_captured_position: Optional[Vector] = None
+        self._torque_captured_direction: Optional[Vector] = None
 
         # BC overlay
         scene_root = self._controller.getScene().getRoot()
@@ -175,6 +185,7 @@ class BoundaryConditionTool(Tool):
             "ClearFixedFaces", "ClearForceGroups",
             "OpenOptimizeDialog",
             "QuickGravityStart", "QuickMountHoles", "QuickCantileverStart",
+            "QuickTorqueAxisStart", "ConfirmTorqueAxis", "ConfirmTorqueFaces",
             "QuickSetupMode", "QuickHoleDiameter",
             "TorqueMagnitude", "ConfirmTorqueGroup",
             "TorqueListModel", "DeleteTorqueGroup",
@@ -386,6 +397,147 @@ class BoundaryConditionTool(Tool):
             self._quick_setup_mode = "cantilever_pick_fixed"
             self.propertyChanged.emit()
 
+    def getQuickTorqueAxisStart(self) -> bool:
+        return False
+
+    def setQuickTorqueAxisStart(self, value) -> None:
+        """Enter 'set axis' mode for torque quick setup."""
+        if not value:
+            return
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return
+
+        # Create the axis placement node at the model's bounding box center
+        bbox = selected.getBoundingBox()
+        if bbox:
+            center = Vector(bbox.center.x, bbox.center.y, bbox.center.z)
+            diag = math.sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
+            axis_length = max(20.0, diag * 0.8)
+        else:
+            center = Vector(0, 0, 0)
+            axis_length = 100.0
+
+        scene_root = self._controller.getScene().getRoot()
+        # Remove any existing axis node
+        self._remove_torque_axis_node()
+
+        self._torque_axis_node = TorqueAxisPlacementNode(parent=scene_root,
+                                                          length=axis_length)
+        self._torque_axis_node.setPosition(center)
+
+        # Select the axis node so Cura's transform gizmos appear on it
+        Selection.clear()
+        Selection.add(self._torque_axis_node)
+
+        self._quick_setup_mode = "torque_set_axis"
+        self._current_face_selection.clear()
+        self.propertyChanged.emit()
+
+    def getConfirmTorqueAxis(self) -> bool:
+        return False
+
+    def setConfirmTorqueAxis(self, value) -> None:
+        """Capture axis position + direction, then move to face-picking."""
+        if not value or self._quick_setup_mode != "torque_set_axis":
+            return
+        if self._torque_axis_node is None:
+            return
+
+        # Capture position and direction from the placement node
+        self._torque_captured_position = self._torque_axis_node.get_axis_position()
+        self._torque_captured_direction = self._torque_axis_node.get_axis_direction()
+
+        # Remove the placement node from scene
+        self._remove_torque_axis_node()
+
+        # Re-select the model so face picking works
+        selected = Selection.getSelectedObject(0)
+        if selected is None or isinstance(selected, TorqueAxisPlacementNode):
+            # Find the CuraSceneNode that was previously selected
+            Selection.clear()
+            scene_root = self._controller.getScene().getRoot()
+            for child in scene_root.getChildren():
+                if isinstance(child, CuraSceneNode) and not child.callDecoration("isNonPrintingMesh"):
+                    Selection.add(child)
+                    break
+
+        # Switch to face-picking mode
+        self._quick_setup_mode = "torque_pick_faces"
+        self._mode = MODE_TORQUE
+        self._current_face_selection.clear()
+        self.propertyChanged.emit()
+
+    def getConfirmTorqueFaces(self) -> bool:
+        return False
+
+    def setConfirmTorqueFaces(self, value) -> None:
+        """Create the torque group with the captured axis and selected faces."""
+        if not value or self._quick_setup_mode != "torque_pick_faces":
+            return
+        if not self._current_face_selection:
+            return
+        if self._torque_captured_direction is None:
+            return
+
+        selected = Selection.getSelectedObject(0)
+        if selected is None:
+            return
+
+        bc = self._get_or_create_bc(selected)
+        AddTorqueGroupOperation(
+            bc, list(self._current_face_selection),
+            self._torque_captured_direction,
+            self._torque_magnitude,
+            self._torque_captured_position
+        ).push()
+
+        # Clean up
+        self._current_face_selection.clear()
+        self._quick_setup_mode = ""
+        self._torque_captured_position = None
+        self._torque_captured_direction = None
+
+        # Enter torque edit mode on the new group
+        group_index = len(bc.getTorqueGroups()) - 1
+        self._editing_torque_index = group_index
+        self._mode = MODE_TORQUE_EDIT
+
+        # Show rotation rings at the torque centroid
+        mesh_data = selected.getMeshData()
+        if mesh_data is not None:
+            verts = mesh_data.getVertices()
+            indices = mesh_data.getIndices()
+            if verts is not None:
+                transform = selected.getWorldTransformation().getData()
+                verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
+                verts_world = (transform @ verts_h.T).T[:, :3]
+                centroid = compute_face_centroid(
+                    verts_world, indices, bc.getTorqueGroups()[group_index].face_indices
+                )
+                bbox = selected.getBoundingBox()
+                if bbox:
+                    diag = math.sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
+                    scale = max(0.1, diag / 80.0)
+                else:
+                    scale = 1.0
+                self._force_handle.show_at(
+                    centroid, scale=scale,
+                    axis_direction=self._torque_captured_direction
+                    if self._torque_captured_direction else None,
+                )
+
+        self.propertyChanged.emit()
+        self._update_highlights()
+
+    def _remove_torque_axis_node(self) -> None:
+        """Remove the torque axis placement node from the scene."""
+        if self._torque_axis_node is not None:
+            parent = self._torque_axis_node.getParent()
+            if parent is not None:
+                parent.removeChild(self._torque_axis_node)
+            self._torque_axis_node = None
+
     def getQuickMountHoles(self) -> bool:
         return False
 
@@ -424,6 +576,11 @@ class BoundaryConditionTool(Tool):
         """
         if not self._quick_setup_mode:
             return False
+
+        # In torque_set_axis mode, the user is positioning the axis node —
+        # don't handle face clicks on the model
+        if self._quick_setup_mode == "torque_set_axis":
+            return True  # consume click so it doesn't select faces
 
         mesh_data = node.getMeshData()
         if mesh_data is None:
@@ -1062,11 +1219,13 @@ class BoundaryConditionTool(Tool):
         if old_mag < 1e-9:
             return
         scale = new_mag / old_mag
-        fg.force = Vector(fg.force.x * scale, fg.force.y * scale, fg.force.z * scale)
+        old_force = Vector(fg.force.x, fg.force.y, fg.force.z)
+        new_force = Vector(fg.force.x * scale, fg.force.y * scale, fg.force.z * scale)
+        UpdateForceDirectionOperation(bc, index, old_force, new_force).push()
 
-        self._force_x = fg.force.x
-        self._force_y = fg.force.y
-        self._force_z = fg.force.z
+        self._force_x = new_force.x
+        self._force_y = new_force.y
+        self._force_z = new_force.z
         self._force_magnitude = new_mag
 
         self.propertyChanged.emit()
@@ -1095,7 +1254,8 @@ class BoundaryConditionTool(Tool):
         if index < 0 or index >= len(groups):
             return
 
-        groups[index].torque_magnitude = new_mag
+        old_mag = groups[index].torque_magnitude
+        UpdateTorqueMagnitudeOperation(bc, index, old_mag, new_mag).push()
         self._torque_magnitude = new_mag
         self.propertyChanged.emit()
         self._update_highlights()
@@ -1165,6 +1325,10 @@ class BoundaryConditionTool(Tool):
         if event.type == Event.ToolDeactivateEvent:
             self._bc_highlight.clear()
             self._force_handle.hide()
+            self._remove_torque_axis_node()
+            self._quick_setup_mode = ""
+            self._torque_captured_position = None
+            self._torque_captured_direction = None
             self._centroid_cache = None  # free memory
             self._rotating_group_index = -1
             self._editing_torque_index = -1
@@ -1328,6 +1492,18 @@ class BoundaryConditionTool(Tool):
                 self.setDragStart(event.x, event.y)
                 self._rotate_drag_active = True
                 self._rotate_angle = 0.0
+
+                # Capture force direction before drag for undo
+                selected = Selection.getSelectedObject(0)
+                if selected is not None:
+                    bc = selected.callDecoration("getBoundaryConditions")
+                    if bc is not None:
+                        groups = bc.getForceGroups()
+                        if 0 <= self._rotating_group_index < len(groups):
+                            fg = groups[self._rotating_group_index]
+                            self._force_direction_before_drag = Vector(
+                                fg.force.x, fg.force.y, fg.force.z
+                            )
                 return True
             return False
 
@@ -1399,6 +1575,21 @@ class BoundaryConditionTool(Tool):
             self.setDragPlane(None)
             self.setLockedAxis(ToolHandle.NoAxis)
             self._rotate_angle = 0.0
+
+            # Push an undo operation for the completed drag
+            selected = Selection.getSelectedObject(0)
+            if selected is not None and self._force_direction_before_drag is not None:
+                bc = selected.callDecoration("getBoundaryConditions")
+                if bc is not None:
+                    groups = bc.getForceGroups()
+                    if 0 <= self._rotating_group_index < len(groups):
+                        fg = groups[self._rotating_group_index]
+                        UpdateForceDirectionOperation(
+                            bc, self._rotating_group_index,
+                            self._force_direction_before_drag, fg.force
+                        ).push()
+            self._force_direction_before_drag = None
+
             self.propertyChanged.emit()
             return True
 
