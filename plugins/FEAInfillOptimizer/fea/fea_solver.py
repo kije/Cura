@@ -112,7 +112,10 @@ class LinearElasticitySolver:
             [ 0.0,  0.0,  1.0],
         ], dtype=np.float64)  # (4, 3)
 
-        J_inv = np.linalg.inv(J)  # (M, 3, 3)
+        # For degenerate elements, use identity Jacobian to avoid singular inverse
+        J_safe = J.copy()
+        J_safe[~valid] = np.eye(3)
+        J_inv = np.linalg.inv(J_safe)  # (M, 3, 3)
         # dN_xyz[m, i, j] = sum_k dN_ref[i,k] * J_inv[m,k,j]
         dN_xyz = np.einsum("ik,mkj->mij", dN_ref, J_inv)  # (M, 4, 3)
 
@@ -269,6 +272,10 @@ class LinearElasticitySolver:
     def solve(self, K: sp.csr_matrix, f: np.ndarray) -> np.ndarray:
         """Solve the linear system K u = f for nodal displacements u.
 
+        Uses spsolve (SuperLU) with a 30s timeout. Falls back to CG
+        iterative solver if SuperLU stalls on ill-conditioned matrices
+        (common in SIMP optimization with extreme density ratios).
+
         Args:
             K: Assembled, BC-applied stiffness matrix (CSR), shape (ndof, ndof).
             f: Force vector, shape (ndof,).
@@ -276,7 +283,37 @@ class LinearElasticitySolver:
         Returns:
             Displacement vector u, shape (ndof,), same units as f/K implies.
         """
-        u = spla.spsolve(K, f)
+        import threading
+        from UM.Logger import Logger
+
+        result = [None]
+        exc = [None]
+
+        def _direct():
+            try:
+                result[0] = spla.spsolve(K, f)
+            except Exception as e:
+                exc[0] = e
+
+        # spsolve with timeout — SuperLU can hang on ill-conditioned K
+        t = threading.Thread(target=_direct, daemon=True)
+        t.start()
+        t.join(timeout=30.0)
+
+        if t.is_alive() or result[0] is None or exc[0] is not None:
+            reason = "timeout (30s)" if t.is_alive() else str(exc[0])
+            Logger.log("w", "FEA solve: spsolve %s, falling back to CG iterative solver", reason)
+
+            # CG with Jacobi preconditioner — won't hang, bounded iterations
+            diag = K.diagonal().copy()
+            diag[diag == 0] = 1.0
+            M_inv = sp.diags(1.0 / diag)
+            u, info = spla.cg(K, f, M=M_inv, tol=1e-8, maxiter=5000)
+            if info != 0:
+                Logger.log("w", "FEA solve: CG info=%d (partial convergence)", info)
+        else:
+            u = result[0]
+
         if not np.isfinite(u).all():
             raise RuntimeError(
                 "FEA solve produced non-finite displacements. "

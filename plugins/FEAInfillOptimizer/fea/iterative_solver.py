@@ -567,6 +567,9 @@ class IterativeFEASolver:
             _iter_start = _time.monotonic()
             n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
             E_eff_arr = material.E_xy * np.power(density, n_exp)
+            # Floor at 1% of full E to prevent extreme ill-conditioning
+            # in SIMP OC where some elements approach rho_min
+            E_eff_arr = np.maximum(E_eff_arr, material.E_xy * 0.01)
             nu_arr = np.full(n_elems, material.nu, dtype=np.float64)
             _t1 = _time.monotonic()
             Logger.log("d", "FEA iter %d: homogenize=%.3fs", iteration + 1, _t1 - _iter_start)
