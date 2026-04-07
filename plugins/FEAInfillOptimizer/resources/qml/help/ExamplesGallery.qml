@@ -22,26 +22,43 @@ Dialog
     property string searchQuery: ""
     property string selectedCategory: "all"
     property string selectedExampleId: ""
+    property bool _loaded: false
 
-    // Load examples from JSON (async to avoid "Invalid state" errors)
-    Component.onCompleted:
-    {
-        var xhr = new XMLHttpRequest()
-        var url = Qt.resolvedUrl("../../help/examples.json")
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState === XMLHttpRequest.DONE) {
-                if (xhr.status === 200 || xhr.status === 0) {
-                    try {
-                        var data = JSON.parse(xhr.responseText)
-                        examples = data.examples || []
-                    } catch (e) {
-                        console.warn("ExamplesGallery: Failed to parse examples.json:", e)
+    // Load examples on first open (not onCompleted — Dialog context may
+    // not be ready at creation time, and Qt.resolvedUrl can fail).
+    onVisibleChanged: {
+        if (visible && !_loaded) {
+            _loadExamples()
+        }
+    }
+
+    function _loadExamples() {
+        // Try multiple URL patterns since resolvedUrl behavior varies
+        var urls = [
+            Qt.resolvedUrl("../../help/examples.json"),
+            Qt.resolvedUrl("../help/examples.json"),
+            Qt.resolvedUrl("../../../resources/help/examples.json"),
+        ]
+
+        for (var u = 0; u < urls.length; u++) {
+            try {
+                var xhr = new XMLHttpRequest()
+                xhr.open("GET", urls[u], false)  // sync is OK here — only on first open
+                xhr.send()
+                if ((xhr.status === 200 || xhr.status === 0) && xhr.responseText) {
+                    var data = JSON.parse(xhr.responseText)
+                    if (data.examples && data.examples.length > 0) {
+                        examples = data.examples
+                        _loaded = true
+                        console.log("ExamplesGallery: loaded", examples.length, "examples from", urls[u])
+                        return
                     }
                 }
+            } catch (e) {
+                // try next URL
             }
         }
-        xhr.open("GET", url)
-        xhr.send()
+        console.warn("ExamplesGallery: Could not load examples.json from any path")
     }
 
     // Filtered examples list
