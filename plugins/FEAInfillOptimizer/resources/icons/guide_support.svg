@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- Isometric-style block: top face, left face, right face -->
+
+  <!-- Right face (darker) -->
+  <polygon points="130,30 160,46 160,80 130,64" fill="#444444" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Left face (medium) -->
+  <polygon points="70,30 130,30 130,64 70,64" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Top face (lightest) -->
+  <polygon points="70,30 130,30 160,46 100,46" fill="#666666" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Fixed bottom surface highlight (green) on left face bottom edge -->
+  <polygon points="70,64 130,64 160,80 100,80" fill="#22AA44" opacity="0.35" stroke="#22AA44" stroke-width="1.5"/>
+
+  <!-- Ground line -->
+  <line x1="50" y1="92" x2="180" y2="92" stroke="#888888" stroke-width="1.5"/>
+
+  <!-- Hatching under the bottom face — angled lines suggesting fixed ground -->
+  <line x1="72" y1="92" x2="60" y2="104" stroke="#888888" stroke-width="1.2"/>
+  <line x1="85" y1="92" x2="73" y2="104" stroke="#888888" stroke-width="1.2"/>
+  <line x1="98" y1="92" x2="86" y2="104" stroke="#888888" stroke-width="1.2"/>
+  <line x1="111" y1="92" x2="99" y2="104" stroke="#888888" stroke-width="1.2"/>
+  <line x1="124" y1="92" x2="112" y2="104" stroke="#888888" stroke-width="1.2"/>
+  <line x1="137" y1="92" x2="125" y2="104" stroke="#888888" stroke-width="1.2"/>
+  <line x1="150" y1="92" x2="138" y2="104" stroke="#888888" stroke-width="1.2"/>
+  <line x1="163" y1="92" x2="151" y2="104" stroke="#888888" stroke-width="1.2"/>
+
+  <!-- Small anchor triangles pointing down from bottom surface corners -->
+  <polygon points="85,80 93,92 77,92" fill="#22AA44" opacity="0.75"/>
+  <polygon points="130,80 138,92 122,92" fill="#22AA44" opacity="0.75"/>
+
+  <!-- "Fixed" label -->
+  <text x="100" y="114" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Fixed Support</text>
+
+</svg>

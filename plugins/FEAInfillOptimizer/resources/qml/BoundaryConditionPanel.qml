@@ -46,7 +46,7 @@ Item
     readonly property bool   stressOverlayVisible: toolProperties.getValue("StressOverlayVisible") === true || toolProperties.getValue("StressOverlayVisible") === "true"
 
     implicitWidth: 280 * screenScaleFactor
-    implicitHeight: 600 * screenScaleFactor
+    implicitHeight: Math.min(600 * screenScaleFactor, (parent ? parent.height * 0.8 : 600 * screenScaleFactor))
 
     UM.I18nCatalog { id: catalog; name: "cura" }
 
@@ -181,93 +181,6 @@ Item
                         UM.Label { text: "mm"; font: UM.Theme.getFont("small") }
                     }
 
-                    // ── Mode selector ─────────────────────────────────────
-                    UM.Label
-                    {
-                        text: catalog.i18nc("@label", "What are you marking?")
-                        font: UM.Theme.getFont("medium_bold")
-                    }
-
-                    RowLayout
-                    {
-                        spacing: UM.Theme.getSize("default_margin").width / 2
-
-                        UM.ToolbarButton
-                        {
-                            id: fixedModeButton
-                            checkable: true
-                            checked: bcPanel.currentMode === "fixed"
-                            text: catalog.i18nc("@action:button", "Support / Mount")
-                            toolItem: UM.ColorImage
-                            {
-                                source: Qt.resolvedUrl("../icons/mount.svg")
-                                color: UM.Theme.getColor("icon")
-                                width: UM.Theme.getSize("button_icon").width
-                                height: UM.Theme.getSize("button_icon").height
-                            }
-                            onClicked: UM.Controller.setProperty("Mode", "fixed")
-                        }
-
-                        UM.ToolbarButton
-                        {
-                            id: forceModeButton
-                            checkable: true
-                            checked: bcPanel.currentMode === "force"
-                            text: catalog.i18nc("@action:button", "Apply Load")
-                            toolItem: UM.ColorImage
-                            {
-                                source: Qt.resolvedUrl("../icons/force.svg")
-                                color: UM.Theme.getColor("icon")
-                                width: UM.Theme.getSize("button_icon").width
-                                height: UM.Theme.getSize("button_icon").height
-                            }
-                            onClicked: UM.Controller.setProperty("Mode", "force")
-                        }
-
-                        UM.ToolbarButton
-                        {
-                            id: torqueModeButton
-                            checkable: true
-                            checked: bcPanel.currentMode === "torque"
-                            text: catalog.i18nc("@action:button", "Torque")
-                            toolItem: UM.ColorImage
-                            {
-                                source: Qt.resolvedUrl("../icons/torque.svg")
-                                color: UM.Theme.getColor("icon")
-                                width: UM.Theme.getSize("button_icon").width
-                                height: UM.Theme.getSize("button_icon").height
-                            }
-                            onClicked: UM.Controller.setProperty("Mode", "torque")
-                        }
-                    }
-
-                    UM.Label
-                    {
-                        Layout.fillWidth: true
-                        wrapMode: Text.WordWrap
-                        font: UM.Theme.getFont("small")
-                        color: UM.Theme.getColor("text_medium")
-                        text: {
-                            if (bcPanel.currentMode === "fixed")
-                                return catalog.i18nc("@info", "Click faces where the part is held, screwed down, or resting on a surface.")
-                            if (bcPanel.currentMode === "torque")
-                                return catalog.i18nc("@info", "Click faces where a rotational load (twist) is applied. Then set the torque amount below.")
-                            if (bcPanel.currentMode === "rotate")
-                                return catalog.i18nc("@info", "Drag the rotation rings to adjust force direction.")
-                            if (bcPanel.currentMode === "torque_edit")
-                                return catalog.i18nc("@info", "Drag the rotation rings to adjust the torque axis direction.")
-                            return catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
-                        }
-                    }
-
-                    UM.Label
-                    {
-                        Layout.fillWidth: true
-                        font: UM.Theme.getFont("small")
-                        color: UM.Theme.getColor("text_inactive")
-                        text: catalog.i18nc("@info", "Click: select face | Alt+click (Option on Mac): toggle face")
-                    }
-
                     // Hover preview toggle
                     CheckBox
                     {
@@ -278,755 +191,1022 @@ Item
                         onClicked: UM.Controller.setProperty("HoverPreviewEnabled", checked)
                     }
 
-                    // ── Rotate mode indicator ─────────────────────────────
-                    Rectangle
+                    // ── Tabbed BC definition (Supports / Forces / Torques) ─
+                    TabBar
                     {
+                        id: bcTabBar
                         Layout.fillWidth: true
-                        visible: bcPanel.currentMode === "rotate"
-                        height: visible ? rotateModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
-                        color: Qt.rgba(UM.Theme.getColor("primary").r, UM.Theme.getColor("primary").g, UM.Theme.getColor("primary").b, 0.15)
-                        radius: UM.Theme.getSize("default_radius").width
 
-                        UM.Label
+                        onCurrentIndexChanged:
                         {
-                            id: rotateModeLabel
-                            anchors
-                            {
-                                left: parent.left
-                                right: parent.right
-                                verticalCenter: parent.verticalCenter
-                                margins: UM.Theme.getSize("default_margin").width
-                            }
-                            wrapMode: Text.WordWrap
-                            color: UM.Theme.getColor("text")
-                            text: catalog.i18nc("@info", "Drag the rings to adjust direction. Click 'Support / Mount' or 'Apply Load' to exit.")
+                            if (currentIndex === 0) UM.Controller.setProperty("Mode", "fixed")
+                            else if (currentIndex === 1) UM.Controller.setProperty("Mode", "force")
+                            else if (currentIndex === 2) UM.Controller.setProperty("Mode", "torque")
                         }
+
+                        TabButton { text: catalog.i18nc("@tab", "Supports"); width: implicitWidth }
+                        TabButton { text: catalog.i18nc("@tab", "Forces");   width: implicitWidth }
+                        TabButton { text: catalog.i18nc("@tab", "Torques");  width: implicitWidth }
                     }
 
-                    // ── Torque axis edit mode indicator ─────────────────
-                    Rectangle
+                    StackLayout
                     {
                         Layout.fillWidth: true
-                        visible: bcPanel.currentMode === "torque_edit"
-                        height: visible ? torqueEditColumn.implicitHeight + UM.Theme.getSize("default_margin").height : 0
-                        color: Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.15)
-                        radius: UM.Theme.getSize("default_radius").width
+                        currentIndex: bcTabBar.currentIndex
 
+                        // ── Tab 0: Supports ───────────────────────────────
                         ColumnLayout
                         {
-                            id: torqueEditColumn
-                            anchors
-                            {
-                                left: parent.left
-                                right: parent.right
-                                verticalCenter: parent.verticalCenter
-                                margins: UM.Theme.getSize("default_margin").width
-                            }
                             spacing: UM.Theme.getSize("default_margin").height / 2
 
+                            // Instruction text
                             UM.Label
                             {
                                 Layout.fillWidth: true
                                 wrapMode: Text.WordWrap
-                                color: UM.Theme.getColor("text")
-                                font: UM.Theme.getFont("small_bold")
-                                text: catalog.i18nc("@info", "Editing Torque Axis — Drag the rings to rotate the axis direction")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_medium")
+                                text: catalog.i18nc("@info", "Click faces where the part is held, screwed down, or resting on a surface.")
                             }
 
                             UM.Label
                             {
                                 Layout.fillWidth: true
                                 font: UM.Theme.getFont("small")
-                                color: UM.Theme.getColor("text_medium")
-                                text: {
-                                    var idx = bcPanel.activeTorqueIdx
-                                    if (idx >= 0 && idx < bcPanel.torqueListModel.length) {
-                                        var tg = bcPanel.torqueListModel[idx]
-                                        return catalog.i18nc("@info", "Current axis: [%1, %2, %3]")
-                                            .arg(tg.axisX !== undefined ? tg.axisX.toFixed(3) : "?")
-                                            .arg(tg.axisY !== undefined ? tg.axisY.toFixed(3) : "?")
-                                            .arg(tg.axisZ !== undefined ? tg.axisZ.toFixed(3) : "?")
+                                color: UM.Theme.getColor("text_inactive")
+                                text: catalog.i18nc("@info", "Click: select face | Alt+click (Option on Mac): toggle face")
+                            }
+
+                            // Selection helper
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Selection helper")
+                                font: UM.Theme.getFont("medium_bold")
+                            }
+
+                            RowLayout
+                            {
+                                spacing: UM.Theme.getSize("default_margin").width / 4
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "single"
+                                    text: catalog.i18nc("@option", "Single")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_single.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
                                     }
-                                    return ""
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "single")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "flat"
+                                    text: catalog.i18nc("@option", "Surface")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_surface.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "flat")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "hole"
+                                    text: catalog.i18nc("@option", "Hole")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_hole.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "hole")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "cylinder"
+                                    text: catalog.i18nc("@option", "Cylinder")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_cylinder.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "cylinder")
+                                }
+                            }
+
+                            // Supports list
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Supports")
+                                font: UM.Theme.getFont("medium_bold")
+                            }
+
+                            Column
+                            {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Repeater
+                                {
+                                    model: bcPanel.supportListModel
+
+                                    Rectangle
+                                    {
+                                        width: defineColumn.width
+                                        height: supportRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
+                                        color: bcPanel.activeSupportIdx === modelData.index
+                                            ? UM.Theme.getColor("primary")
+                                            : UM.Theme.getColor("main_background")
+                                        border.color: UM.Theme.getColor("lining")
+                                        border.width: UM.Theme.getSize("default_lining").width
+                                        radius: UM.Theme.getSize("default_radius").width
+
+                                        RowLayout
+                                        {
+                                            anchors.fill: parent
+                                            anchors.margins: UM.Theme.getSize("default_margin").width / 2
+
+                                            UM.Label
+                                            {
+                                                id: supportRowLabel
+                                                Layout.fillWidth: true
+                                                text: modelData.label
+                                                color: UM.Theme.getColor("text")
+                                                elide: Text.ElideRight
+                                            }
+
+                                            UM.ColorImage
+                                            {
+                                                source: UM.Theme.getIcon("Cancel")
+                                                color: UM.Theme.getColor("text_medium")
+                                                width: UM.Theme.getSize("small_button_icon").width
+                                                height: width
+
+                                                MouseArea
+                                                {
+                                                    anchors.fill: parent
+                                                    onClicked:
+                                                    {
+                                                        UM.Controller.setProperty("ActiveSupportIndex", modelData.index)
+                                                        UM.Controller.setProperty("DeleteActiveSupport", true)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        MouseArea
+                                        {
+                                            anchors.fill: parent
+                                            z: -1
+                                            onClicked: UM.Controller.setProperty("ActiveSupportIndex", modelData.index)
+                                        }
+                                    }
+                                }
+
+                                UM.Label
+                                {
+                                    visible: bcPanel.supportListModel.length === 0
+                                    width: defineColumn.width
+                                    text: catalog.i18nc("@info", "No supports defined. Click faces where the part is held.")
+                                    wrapMode: Text.WordWrap
+                                    font: UM.Theme.getFont("small")
+                                    color: UM.Theme.getColor("text_inactive")
+                                }
+                            }
+                        }  // Tab 0: Supports
+
+                        // ── Tab 1: Forces ─────────────────────────────────
+                        ColumnLayout
+                        {
+                            spacing: UM.Theme.getSize("default_margin").height / 2
+
+                            // Instruction text
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_medium")
+                                text: bcPanel.currentMode === "rotate"
+                                    ? catalog.i18nc("@info", "Drag the rotation rings to adjust force direction.")
+                                    : catalog.i18nc("@info", "Click faces where a force or weight pushes/pulls. Then set the load amount below.")
+                            }
+
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                                text: catalog.i18nc("@info", "Click: select face | Alt+click (Option on Mac): toggle face")
+                            }
+
+                            // Rotate mode indicator
+                            Rectangle
+                            {
+                                Layout.fillWidth: true
+                                visible: bcPanel.currentMode === "rotate"
+                                height: visible ? rotateModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                color: Qt.rgba(UM.Theme.getColor("primary").r, UM.Theme.getColor("primary").g, UM.Theme.getColor("primary").b, 0.15)
+                                radius: UM.Theme.getSize("default_radius").width
+
+                                UM.Label
+                                {
+                                    id: rotateModeLabel
+                                    anchors
+                                    {
+                                        left: parent.left
+                                        right: parent.right
+                                        verticalCenter: parent.verticalCenter
+                                        margins: UM.Theme.getSize("default_margin").width
+                                    }
+                                    wrapMode: Text.WordWrap
+                                    color: UM.Theme.getColor("text")
+                                    text: catalog.i18nc("@info", "Drag the rings to adjust direction. Click 'Support / Mount' or 'Apply Load' to exit.")
+                                }
+                            }
+
+                            // Selection helper
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Selection helper")
+                                font: UM.Theme.getFont("medium_bold")
+                            }
+
+                            RowLayout
+                            {
+                                spacing: UM.Theme.getSize("default_margin").width / 4
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "single"
+                                    text: catalog.i18nc("@option", "Single")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_single.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "single")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "flat"
+                                    text: catalog.i18nc("@option", "Surface")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_surface.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "flat")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "hole"
+                                    text: catalog.i18nc("@option", "Hole")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_hole.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "hole")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "cylinder"
+                                    text: catalog.i18nc("@option", "Cylinder")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_cylinder.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "cylinder")
+                                }
+                            }
+
+                            // Edit mode banner
+                            Rectangle
+                            {
+                                Layout.fillWidth: true
+                                visible: defineColumn.isForceEditMode
+                                height: visible ? editForceBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.2)
+                                radius: UM.Theme.getSize("default_radius").width
+
+                                RowLayout
+                                {
+                                    id: editForceBannerRow
+                                    anchors
+                                    {
+                                        left: parent.left; right: parent.right
+                                        verticalCenter: parent.verticalCenter
+                                        margins: UM.Theme.getSize("default_margin").width / 2
+                                    }
+
+                                    UM.Label
+                                    {
+                                        Layout.fillWidth: true
+                                        text: catalog.i18nc("@info", "Editing Force %1").arg(defineColumn.editingForceIndex + 1)
+                                        color: UM.Theme.getColor("warning")
+                                        font: UM.Theme.getFont("small_bold")
+                                    }
+
+                                    UM.ColorImage
+                                    {
+                                        source: UM.Theme.getIcon("Cancel")
+                                        color: UM.Theme.getColor("warning")
+                                        width: UM.Theme.getSize("small_button_icon").width
+                                        height: width
+                                        MouseArea
+                                        {
+                                            anchors.fill: parent
+                                            onClicked:
+                                            {
+                                                defineColumn.editingForceIndex = -1
+                                                UM.Controller.setProperty("ActiveForceIndex", -1)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Force settings
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Load Amount")
+                                font: UM.Theme.getFont("medium_bold")
+                            }
+
+                            RowLayout
+                            {
+                                Layout.fillWidth: true
+                                spacing: UM.Theme.getSize("default_margin").width / 2
+
+                                TextField
+                                {
+                                    id: magnitudeField
+                                    Layout.fillWidth: true
+                                    validator: DoubleValidator { bottom: 0; decimals: 1 }
+                                    property real backendMagnitude: Number(toolProperties.getValue("ForceMagnitude") ?? 100)
+                                    onBackendMagnitudeChanged: { if (!activeFocus) text = backendMagnitude.toFixed(1) }
+                                    Component.onCompleted: text = backendMagnitude.toFixed(1)
+                                    onEditingFinished:
+                                        UM.Controller.setProperty("ForceMagnitude", parseFloat(text) || 100.0)
+                                }
+
+                                UM.Label { text: "N" }
+                            }
+
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                text: catalog.i18nc("@info", "Tip: 1 kg weight \u2248 10 N. A finger push \u2248 20\u201350 N.")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                                wrapMode: Text.WordWrap
+                            }
+
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Direction (advanced)")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_medium")
+                            }
+
+                            GridLayout
+                            {
+                                Layout.fillWidth: true
+                                columns: 2
+                                columnSpacing: UM.Theme.getSize("default_margin").width
+                                rowSpacing: UM.Theme.getSize("default_margin").height / 4
+
+                                UM.Label { text: "Fx:"; font: UM.Theme.getFont("small") }
+                                TextField
+                                {
+                                    id: forceXField
+                                    Layout.fillWidth: true
+                                    text: bcPanel.forceX.toFixed(1)
+                                    readOnly: bcPanel.currentMode === "rotate"
+                                    font.pointSize: UM.Theme.getFont("small").pointSize
+                                    validator: DoubleValidator { decimals: 1 }
+                                    onEditingFinished:
+                                        UM.Controller.setProperty("ForceX", parseFloat(text) || 0.0)
+                                }
+
+                                UM.Label { text: "Fy:"; font: UM.Theme.getFont("small") }
+                                TextField
+                                {
+                                    id: forceYField
+                                    Layout.fillWidth: true
+                                    text: bcPanel.forceY.toFixed(1)
+                                    readOnly: bcPanel.currentMode === "rotate"
+                                    font.pointSize: UM.Theme.getFont("small").pointSize
+                                    validator: DoubleValidator { decimals: 1 }
+                                    onEditingFinished:
+                                        UM.Controller.setProperty("ForceY", parseFloat(text) || 0.0)
+                                }
+
+                                UM.Label { text: "Fz:"; font: UM.Theme.getFont("small") }
+                                TextField
+                                {
+                                    id: forceZField
+                                    Layout.fillWidth: true
+                                    text: bcPanel.forceZ.toFixed(1)
+                                    readOnly: bcPanel.currentMode === "rotate"
+                                    font.pointSize: UM.Theme.getFont("small").pointSize
+                                    validator: DoubleValidator { decimals: 1 }
+                                    onEditingFinished:
+                                        UM.Controller.setProperty("ForceZ", parseFloat(text) || 0.0)
+                                }
+                            }
+
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@info", "Magnitude: %1 N").arg(
+                                    Math.sqrt(
+                                        bcPanel.forceX * bcPanel.forceX +
+                                        bcPanel.forceY * bcPanel.forceY +
+                                        bcPanel.forceZ * bcPanel.forceZ
+                                    ).toFixed(2)
+                                )
+                                color: UM.Theme.getColor("text_medium")
+                                font: UM.Theme.getFont("small")
+                            }
+
+                            // Forces list
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Forces")
+                                font: UM.Theme.getFont("medium_bold")
+                            }
+
+                            Column
+                            {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Repeater
+                                {
+                                    model: bcPanel.forceListModel
+
+                                    Rectangle
+                                    {
+                                        width: defineColumn.width
+                                        height: forceRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
+                                        color: bcPanel.activeForceIdx === modelData.index
+                                            ? UM.Theme.getColor("primary")
+                                            : UM.Theme.getColor("main_background")
+                                        border.color: UM.Theme.getColor("lining")
+                                        border.width: UM.Theme.getSize("default_lining").width
+                                        radius: UM.Theme.getSize("default_radius").width
+
+                                        RowLayout
+                                        {
+                                            anchors.fill: parent
+                                            anchors.margins: UM.Theme.getSize("default_margin").width / 2
+
+                                            UM.Label
+                                            {
+                                                id: forceRowLabel
+                                                Layout.fillWidth: true
+                                                text: modelData.label
+                                                color: UM.Theme.getColor("text")
+                                                elide: Text.ElideRight
+                                            }
+
+                                            UM.ColorImage
+                                            {
+                                                source: UM.Theme.getIcon("Cancel")
+                                                color: UM.Theme.getColor("text_medium")
+                                                width: UM.Theme.getSize("small_button_icon").width
+                                                height: width
+
+                                                MouseArea
+                                                {
+                                                    anchors.fill: parent
+                                                    onClicked:
+                                                    {
+                                                        UM.Controller.setProperty("ActiveForceIndex", modelData.index)
+                                                        UM.Controller.setProperty("DeleteActiveForce", true)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        MouseArea
+                                        {
+                                            anchors.fill: parent
+                                            z: -1
+                                            onClicked:
+                                            {
+                                                UM.Controller.setProperty("ActiveForceIndex", modelData.index)
+                                                defineColumn.editingForceIndex = modelData.index
+                                                defineColumn.editingTorqueIndex = -1
+                                            }
+                                        }
+                                    }
+                                }
+
+                                UM.Label
+                                {
+                                    visible: bcPanel.forceListModel.length === 0
+                                    width: defineColumn.width
+                                    text: catalog.i18nc("@info", "No forces defined. Select faces, then confirm.")
+                                    wrapMode: Text.WordWrap
+                                    font: UM.Theme.getFont("small")
+                                    color: UM.Theme.getColor("text_inactive")
+                                }
+                            }
+
+                            // Confirm load
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                visible: !defineColumn.isForceEditMode
+                                wrapMode: Text.WordWrap
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_medium")
+                                text: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+                                    ? catalog.i18nc("@info", "%1 face(s) selected. Click 'Confirm Load' to save, or click more faces to add. Alt+click to deselect.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
+                                    : catalog.i18nc("@info", "Click faces where the load acts. Each click adds to selection. Alt+click to deselect.")
+                            }
+
+                            Cura.PrimaryButton
+                            {
+                                Layout.fillWidth: true
+                                text: defineColumn.isForceEditMode
+                                    ? catalog.i18nc("@action:button", "Apply Changes")
+                                    : catalog.i18nc("@action:button", "Confirm Load on Selected Faces")
+                                enabled: defineColumn.isForceEditMode || (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+                                onClicked:
+                                {
+                                    if (defineColumn.isForceEditMode)
+                                    {
+                                        var payload = JSON.stringify({
+                                            "index": defineColumn.editingForceIndex,
+                                            "magnitude": parseFloat(magnitudeField.text) || 100.0
+                                        })
+                                        UM.Controller.setProperty("UpdateForceAtIndex", payload)
+                                        defineColumn.editingForceIndex = -1
+                                        UM.Controller.setProperty("ActiveForceIndex", -1)
+                                    }
+                                    else
+                                    {
+                                        UM.Controller.setProperty("ConfirmForceGroup", true)
+                                    }
                                 }
                             }
 
                             Cura.SecondaryButton
                             {
                                 Layout.fillWidth: true
-                                text: catalog.i18nc("@action:button", "Done Editing Axis")
+                                visible: defineColumn.isForceEditMode
+                                text: catalog.i18nc("@action:button", "Cancel Edit")
                                 onClicked:
                                 {
-                                    UM.Controller.setProperty("ActiveTorqueIndex", -1)
-                                    defineColumn.editingTorqueIndex = -1
+                                    defineColumn.editingForceIndex = -1
+                                    UM.Controller.setProperty("ActiveForceIndex", -1)
                                 }
                             }
-                        }
-                    }
+                        }  // Tab 1: Forces
 
-                    // ── Selection helper ──────────────────────────────────
-                    UM.Label
-                    {
-                        text: catalog.i18nc("@label", "Selection helper")
-                        font: UM.Theme.getFont("medium_bold")
-                    }
-
-                    RowLayout
-                    {
-                        spacing: UM.Theme.getSize("default_margin").width / 4
-
-                        UM.ToolbarButton
+                        // ── Tab 2: Torques ────────────────────────────────
+                        ColumnLayout
                         {
-                            checkable: true
-                            checked: bcPanel.selectionMode === "single"
-                            text: catalog.i18nc("@option", "Single")
-                            toolItem: UM.ColorImage
+                            spacing: UM.Theme.getSize("default_margin").height / 2
+
+                            // Instruction text
+                            UM.Label
                             {
-                                source: Qt.resolvedUrl("../icons/select_single.svg")
-                                color: UM.Theme.getColor("icon")
-                                width: UM.Theme.getSize("button_icon").width
-                                height: UM.Theme.getSize("button_icon").height
-                            }
-                            onClicked: UM.Controller.setProperty("SelectionMode", "single")
-                        }
-
-                        UM.ToolbarButton
-                        {
-                            checkable: true
-                            checked: bcPanel.selectionMode === "flat"
-                            text: catalog.i18nc("@option", "Surface")
-                            toolItem: UM.ColorImage
-                            {
-                                source: Qt.resolvedUrl("../icons/select_surface.svg")
-                                color: UM.Theme.getColor("icon")
-                                width: UM.Theme.getSize("button_icon").width
-                                height: UM.Theme.getSize("button_icon").height
-                            }
-                            onClicked: UM.Controller.setProperty("SelectionMode", "flat")
-                        }
-
-                        UM.ToolbarButton
-                        {
-                            checkable: true
-                            checked: bcPanel.selectionMode === "hole"
-                            text: catalog.i18nc("@option", "Hole")
-                            toolItem: UM.ColorImage
-                            {
-                                source: Qt.resolvedUrl("../icons/select_hole.svg")
-                                color: UM.Theme.getColor("icon")
-                                width: UM.Theme.getSize("button_icon").width
-                                height: UM.Theme.getSize("button_icon").height
-                            }
-                            onClicked: UM.Controller.setProperty("SelectionMode", "hole")
-                        }
-
-                        UM.ToolbarButton
-                        {
-                            checkable: true
-                            checked: bcPanel.selectionMode === "cylinder"
-                            text: catalog.i18nc("@option", "Cylinder")
-                            toolItem: UM.ColorImage
-                            {
-                                source: Qt.resolvedUrl("../icons/select_cylinder.svg")
-                                color: UM.Theme.getColor("icon")
-                                width: UM.Theme.getSize("button_icon").width
-                                height: UM.Theme.getSize("button_icon").height
-                            }
-                            onClicked: UM.Controller.setProperty("SelectionMode", "cylinder")
-                        }
-                    }
-
-                    // ── Supports list ─────────────────────────────────────
-                    UM.Label
-                    {
-                        text: catalog.i18nc("@label", "Supports")
-                        font: UM.Theme.getFont("medium_bold")
-                    }
-
-                    Column
-                    {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Repeater
-                        {
-                            model: bcPanel.supportListModel
-
-                            Rectangle
-                            {
-                                width: defineColumn.width
-                                height: supportRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
-                                color: bcPanel.activeSupportIdx === modelData.index
-                                    ? UM.Theme.getColor("primary")
-                                    : UM.Theme.getColor("main_background")
-                                border.color: UM.Theme.getColor("lining")
-                                border.width: UM.Theme.getSize("default_lining").width
-                                radius: UM.Theme.getSize("default_radius").width
-
-                                RowLayout
-                                {
-                                    anchors.fill: parent
-                                    anchors.margins: UM.Theme.getSize("default_margin").width / 2
-
-                                    UM.Label
-                                    {
-                                        id: supportRowLabel
-                                        Layout.fillWidth: true
-                                        text: modelData.label
-                                        color: UM.Theme.getColor("text")
-                                        elide: Text.ElideRight
-                                    }
-
-                                    UM.ColorImage
-                                    {
-                                        source: UM.Theme.getIcon("Cancel")
-                                        color: UM.Theme.getColor("text_medium")
-                                        width: UM.Theme.getSize("small_button_icon").width
-                                        height: width
-
-                                        MouseArea
-                                        {
-                                            anchors.fill: parent
-                                            onClicked:
-                                            {
-                                                UM.Controller.setProperty("ActiveSupportIndex", modelData.index)
-                                                UM.Controller.setProperty("DeleteActiveSupport", true)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                MouseArea
-                                {
-                                    anchors.fill: parent
-                                    z: -1
-                                    onClicked: UM.Controller.setProperty("ActiveSupportIndex", modelData.index)
-                                }
-                            }
-                        }
-
-                        UM.Label
-                        {
-                            visible: bcPanel.supportListModel.length === 0
-                            width: defineColumn.width
-                            text: catalog.i18nc("@info", "No supports defined. Switch to Support / Mount mode and click faces.")
-                            wrapMode: Text.WordWrap
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_inactive")
-                        }
-                    }
-
-                    // ── Forces list ───────────────────────────────────────
-                    UM.Label
-                    {
-                        text: catalog.i18nc("@label", "Forces")
-                        font: UM.Theme.getFont("medium_bold")
-                    }
-
-                    Column
-                    {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Repeater
-                        {
-                            model: bcPanel.forceListModel
-
-                            Rectangle
-                            {
-                                width: defineColumn.width
-                                height: forceRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
-                                color: bcPanel.activeForceIdx === modelData.index
-                                    ? UM.Theme.getColor("primary")
-                                    : UM.Theme.getColor("main_background")
-                                border.color: UM.Theme.getColor("lining")
-                                border.width: UM.Theme.getSize("default_lining").width
-                                radius: UM.Theme.getSize("default_radius").width
-
-                                RowLayout
-                                {
-                                    anchors.fill: parent
-                                    anchors.margins: UM.Theme.getSize("default_margin").width / 2
-
-                                    UM.Label
-                                    {
-                                        id: forceRowLabel
-                                        Layout.fillWidth: true
-                                        text: modelData.label
-                                        color: UM.Theme.getColor("text")
-                                        elide: Text.ElideRight
-                                    }
-
-                                    UM.ColorImage
-                                    {
-                                        source: UM.Theme.getIcon("Cancel")
-                                        color: UM.Theme.getColor("text_medium")
-                                        width: UM.Theme.getSize("small_button_icon").width
-                                        height: width
-
-                                        MouseArea
-                                        {
-                                            anchors.fill: parent
-                                            onClicked:
-                                            {
-                                                UM.Controller.setProperty("ActiveForceIndex", modelData.index)
-                                                UM.Controller.setProperty("DeleteActiveForce", true)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                MouseArea
-                                {
-                                    anchors.fill: parent
-                                    z: -1
-                                    onClicked:
-                                    {
-                                        UM.Controller.setProperty("ActiveForceIndex", modelData.index)
-                                        defineColumn.editingForceIndex = modelData.index
-                                        defineColumn.editingTorqueIndex = -1
-                                    }
-                                }
-                            }
-                        }
-
-                        UM.Label
-                        {
-                            visible: bcPanel.forceListModel.length === 0
-                            width: defineColumn.width
-                            text: catalog.i18nc("@info", "No forces defined. Switch to Apply Load mode, select faces, then confirm.")
-                            wrapMode: Text.WordWrap
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_inactive")
-                        }
-                    }
-
-                    // ── Torques list ──────────────────────────────────────
-                    UM.Label
-                    {
-                        text: catalog.i18nc("@label", "Torques")
-                        font: UM.Theme.getFont("medium_bold")
-                    }
-
-                    Column
-                    {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Repeater
-                        {
-                            model: bcPanel.torqueListModel
-
-                            Rectangle
-                            {
-                                width: defineColumn.width
-                                height: torqueRowLayout.implicitHeight + UM.Theme.getSize("default_margin").height
-                                color: bcPanel.activeTorqueIdx === modelData.index
-                                    ? Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.5)
-                                    : defineColumn.editingTorqueIndex === modelData.index
-                                        ? UM.Theme.getColor("primary")
-                                        : UM.Theme.getColor("main_background")
-                                border.color: UM.Theme.getColor("lining")
-                                border.width: UM.Theme.getSize("default_lining").width
-                                radius: UM.Theme.getSize("default_radius").width
-
-                                ColumnLayout
-                                {
-                                    id: torqueRowLayout
-                                    anchors.fill: parent
-                                    anchors.margins: UM.Theme.getSize("default_margin").width / 2
-                                    spacing: 2
-
-                                    RowLayout
-                                    {
-                                        Layout.fillWidth: true
-
-                                        UM.Label
-                                        {
-                                            id: torqueRowLabel
-                                            Layout.fillWidth: true
-                                            text: modelData.label
-                                            color: UM.Theme.getColor("text")
-                                            elide: Text.ElideRight
-                                        }
-
-                                        UM.Label
-                                        {
-                                            text: catalog.i18nc("@action", "Edit Axis")
-                                            font: UM.Theme.getFont("small")
-                                            color: UM.Theme.getColor("primary")
-
-                                            MouseArea
-                                            {
-                                                anchors.fill: parent
-                                                onClicked:
-                                                {
-                                                    defineColumn.editingForceIndex = -1
-                                                    UM.Controller.setProperty("ActiveForceIndex", -1)
-                                                    UM.Controller.setProperty("ActiveTorqueIndex", modelData.index)
-                                                }
-                                            }
-                                        }
-
-                                        UM.ColorImage
-                                        {
-                                            source: UM.Theme.getIcon("Cancel")
-                                            color: UM.Theme.getColor("text_medium")
-                                            width: UM.Theme.getSize("small_button_icon").width
-                                            height: width
-
-                                            MouseArea
-                                            {
-                                                anchors.fill: parent
-                                                onClicked: UM.Controller.setProperty("DeleteTorqueGroup", modelData.index)
-                                            }
-                                        }
-                                    }
-
-                                    // Show axis values inline when this torque is being edited
-                                    UM.Label
-                                    {
-                                        visible: bcPanel.activeTorqueIdx === modelData.index
-                                        Layout.fillWidth: true
-                                        font: UM.Theme.getFont("small")
-                                        color: UM.Theme.getColor("text_medium")
-                                        text: catalog.i18nc("@info", "Axis: [%1, %2, %3]")
-                                            .arg(modelData.axisX !== undefined ? modelData.axisX.toFixed(3) : "?")
-                                            .arg(modelData.axisY !== undefined ? modelData.axisY.toFixed(3) : "?")
-                                            .arg(modelData.axisZ !== undefined ? modelData.axisZ.toFixed(3) : "?")
-                                    }
-                                }
-
-                                MouseArea
-                                {
-                                    anchors.fill: parent
-                                    z: -1
-                                    onClicked:
-                                    {
-                                        defineColumn.editingTorqueIndex = modelData.index
-                                        defineColumn.editingForceIndex = -1
-                                        UM.Controller.setProperty("ActiveForceIndex", -1)
-                                    }
-                                }
-                            }
-                        }
-
-                        UM.Label
-                        {
-                            visible: bcPanel.torqueListModel.length === 0
-                            width: defineColumn.width
-                            text: catalog.i18nc("@info", "No torques defined. Switch to Torque mode, select faces, then confirm.")
-                            wrapMode: Text.WordWrap
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_inactive")
-                        }
-                    }
-
-                    // ── Edit mode banner ───────────────────────────────────
-                    Rectangle
-                    {
-                        Layout.fillWidth: true
-                        visible: defineColumn.isForceEditMode || defineColumn.isTorqueEditMode
-                        height: visible ? editBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
-                        color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.2)
-                        radius: UM.Theme.getSize("default_radius").width
-
-                        RowLayout
-                        {
-                            id: editBannerRow
-                            anchors
-                            {
-                                left: parent.left; right: parent.right
-                                verticalCenter: parent.verticalCenter
-                                margins: UM.Theme.getSize("default_margin").width / 2
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_medium")
+                                text: bcPanel.currentMode === "torque_edit"
+                                    ? catalog.i18nc("@info", "Drag the rotation rings to adjust the torque axis direction.")
+                                    : catalog.i18nc("@info", "Click faces where a rotational load (twist) is applied. Then set the torque amount below.")
                             }
 
                             UM.Label
                             {
                                 Layout.fillWidth: true
-                                text: {
-                                    if (defineColumn.isForceEditMode)
-                                        return catalog.i18nc("@info", "Editing Force %1").arg(defineColumn.editingForceIndex + 1)
-                                    if (defineColumn.isTorqueEditMode)
-                                        return catalog.i18nc("@info", "Editing Torque %1").arg(defineColumn.editingTorqueIndex + 1)
-                                    return ""
-                                }
-                                color: UM.Theme.getColor("warning")
-                                font: UM.Theme.getFont("small_bold")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                                text: catalog.i18nc("@info", "Click: select face | Alt+click (Option on Mac): toggle face")
                             }
 
-                            UM.ColorImage
+                            // Torque axis edit mode indicator
+                            Rectangle
                             {
-                                source: UM.Theme.getIcon("Cancel")
-                                color: UM.Theme.getColor("warning")
-                                width: UM.Theme.getSize("small_button_icon").width
-                                height: width
-                                MouseArea
+                                Layout.fillWidth: true
+                                visible: bcPanel.currentMode === "torque_edit"
+                                height: visible ? torqueEditColumn.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                color: Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.15)
+                                radius: UM.Theme.getSize("default_radius").width
+
+                                ColumnLayout
                                 {
-                                    anchors.fill: parent
-                                    onClicked:
+                                    id: torqueEditColumn
+                                    anchors
                                     {
-                                        defineColumn.editingForceIndex = -1
-                                        defineColumn.editingTorqueIndex = -1
-                                        UM.Controller.setProperty("ActiveForceIndex", -1)
-                                        UM.Controller.setProperty("ActiveTorqueIndex", -1)
+                                        left: parent.left
+                                        right: parent.right
+                                        verticalCenter: parent.verticalCenter
+                                        margins: UM.Theme.getSize("default_margin").width
+                                    }
+                                    spacing: UM.Theme.getSize("default_margin").height / 2
+
+                                    UM.Label
+                                    {
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WordWrap
+                                        color: UM.Theme.getColor("text")
+                                        font: UM.Theme.getFont("small_bold")
+                                        text: catalog.i18nc("@info", "Editing Torque Axis — Drag the rings to rotate the axis direction")
+                                    }
+
+                                    UM.Label
+                                    {
+                                        Layout.fillWidth: true
+                                        font: UM.Theme.getFont("small")
+                                        color: UM.Theme.getColor("text_medium")
+                                        text: {
+                                            var idx = bcPanel.activeTorqueIdx
+                                            if (idx >= 0 && idx < bcPanel.torqueListModel.length) {
+                                                var tg = bcPanel.torqueListModel[idx]
+                                                return catalog.i18nc("@info", "Current axis: [%1, %2, %3]")
+                                                    .arg(tg.axisX !== undefined ? tg.axisX.toFixed(3) : "?")
+                                                    .arg(tg.axisY !== undefined ? tg.axisY.toFixed(3) : "?")
+                                                    .arg(tg.axisZ !== undefined ? tg.axisZ.toFixed(3) : "?")
+                                            }
+                                            return ""
+                                        }
+                                    }
+
+                                    Cura.SecondaryButton
+                                    {
+                                        Layout.fillWidth: true
+                                        text: catalog.i18nc("@action:button", "Done Editing Axis")
+                                        onClicked:
+                                        {
+                                            UM.Controller.setProperty("ActiveTorqueIndex", -1)
+                                            defineColumn.editingTorqueIndex = -1
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }
 
-                    // ── Force settings (force + rotate mode + force edit mode) ──
-                    ColumnLayout
-                    {
-                        Layout.fillWidth: true
-                        spacing: UM.Theme.getSize("default_margin").height / 2
-                        visible: bcPanel.currentMode === "force" || bcPanel.currentMode === "rotate" || defineColumn.isForceEditMode
-
-                        UM.Label
-                        {
-                            text: catalog.i18nc("@label", "Load Amount")
-                            font: UM.Theme.getFont("medium_bold")
-                        }
-
-                        RowLayout
-                        {
-                            Layout.fillWidth: true
-                            spacing: UM.Theme.getSize("default_margin").width / 2
-
-                            TextField
+                            // Selection helper
+                            UM.Label
                             {
-                                id: magnitudeField
+                                text: catalog.i18nc("@label", "Selection helper")
+                                font: UM.Theme.getFont("medium_bold")
+                            }
+
+                            RowLayout
+                            {
+                                spacing: UM.Theme.getSize("default_margin").width / 4
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "single"
+                                    text: catalog.i18nc("@option", "Single")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_single.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "single")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "flat"
+                                    text: catalog.i18nc("@option", "Surface")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_surface.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "flat")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "hole"
+                                    text: catalog.i18nc("@option", "Hole")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_hole.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "hole")
+                                }
+
+                                UM.ToolbarButton
+                                {
+                                    checkable: true
+                                    checked: bcPanel.selectionMode === "cylinder"
+                                    text: catalog.i18nc("@option", "Cylinder")
+                                    toolItem: UM.ColorImage
+                                    {
+                                        source: Qt.resolvedUrl("../icons/select_cylinder.svg")
+                                        color: UM.Theme.getColor("icon")
+                                        width: UM.Theme.getSize("button_icon").width
+                                        height: UM.Theme.getSize("button_icon").height
+                                    }
+                                    onClicked: UM.Controller.setProperty("SelectionMode", "cylinder")
+                                }
+                            }
+
+                            // Edit mode banner
+                            Rectangle
+                            {
                                 Layout.fillWidth: true
-                                validator: DoubleValidator { bottom: 0; decimals: 1 }
-                                property real backendMagnitude: Number(toolProperties.getValue("ForceMagnitude") ?? 100)
-                                onBackendMagnitudeChanged: { if (!activeFocus) text = backendMagnitude.toFixed(1) }
-                                Component.onCompleted: text = backendMagnitude.toFixed(1)
-                                onEditingFinished:
-                                    UM.Controller.setProperty("ForceMagnitude", parseFloat(text) || 100.0)
+                                visible: defineColumn.isTorqueEditMode
+                                height: visible ? editTorqueBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.2)
+                                radius: UM.Theme.getSize("default_radius").width
+
+                                RowLayout
+                                {
+                                    id: editTorqueBannerRow
+                                    anchors
+                                    {
+                                        left: parent.left; right: parent.right
+                                        verticalCenter: parent.verticalCenter
+                                        margins: UM.Theme.getSize("default_margin").width / 2
+                                    }
+
+                                    UM.Label
+                                    {
+                                        Layout.fillWidth: true
+                                        text: catalog.i18nc("@info", "Editing Torque %1").arg(defineColumn.editingTorqueIndex + 1)
+                                        color: UM.Theme.getColor("warning")
+                                        font: UM.Theme.getFont("small_bold")
+                                    }
+
+                                    UM.ColorImage
+                                    {
+                                        source: UM.Theme.getIcon("Cancel")
+                                        color: UM.Theme.getColor("warning")
+                                        width: UM.Theme.getSize("small_button_icon").width
+                                        height: width
+                                        MouseArea
+                                        {
+                                            anchors.fill: parent
+                                            onClicked:
+                                            {
+                                                defineColumn.editingTorqueIndex = -1
+                                                UM.Controller.setProperty("ActiveTorqueIndex", -1)
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
-                            UM.Label { text: "N" }
-                        }
-
-                        UM.Label
-                        {
-                            Layout.fillWidth: true
-                            text: catalog.i18nc("@info", "Tip: 1 kg weight \u2248 10 N. A finger push \u2248 20\u201350 N.")
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_inactive")
-                            wrapMode: Text.WordWrap
-                        }
-
-                        UM.Label
-                        {
-                            text: catalog.i18nc("@label", "Direction (advanced)")
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_medium")
-                        }
-
-                        GridLayout
-                        {
-                            Layout.fillWidth: true
-                            columns: 2
-                            columnSpacing: UM.Theme.getSize("default_margin").width
-                            rowSpacing: UM.Theme.getSize("default_margin").height / 4
-
-                            UM.Label { text: "Fx:"; font: UM.Theme.getFont("small") }
-                            TextField
+                            // Torque settings
+                            UM.Label
                             {
-                                id: forceXField
+                                text: catalog.i18nc("@label", "Torque Amount")
+                                font: UM.Theme.getFont("medium_bold")
+                            }
+
+                            RowLayout
+                            {
                                 Layout.fillWidth: true
-                                text: bcPanel.forceX.toFixed(1)
-                                readOnly: bcPanel.currentMode === "rotate"
-                                font.pointSize: UM.Theme.getFont("small").pointSize
-                                validator: DoubleValidator { decimals: 1 }
-                                onEditingFinished:
-                                    UM.Controller.setProperty("ForceX", parseFloat(text) || 0.0)
+                                spacing: UM.Theme.getSize("default_margin").width / 2
+
+                                TextField
+                                {
+                                    id: torqueMagnitudeField
+                                    Layout.fillWidth: true
+                                    text: Number(toolProperties.getValue("TorqueMagnitude") ?? 1).toFixed(2)
+                                    validator: DoubleValidator { bottom: 0; decimals: 2 }
+                                    onEditingFinished: UM.Controller.setProperty("TorqueMagnitude", parseFloat(text) || 1.0)
+                                }
+                                UM.Label { text: "Nm" }
                             }
 
-                            UM.Label { text: "Fy:"; font: UM.Theme.getFont("small") }
-                            TextField
+                            UM.Label
                             {
-                                id: forceYField
                                 Layout.fillWidth: true
-                                text: bcPanel.forceY.toFixed(1)
-                                readOnly: bcPanel.currentMode === "rotate"
-                                font.pointSize: UM.Theme.getFont("small").pointSize
-                                validator: DoubleValidator { decimals: 1 }
-                                onEditingFinished:
-                                    UM.Controller.setProperty("ForceY", parseFloat(text) || 0.0)
+                                text: catalog.i18nc("@info", "Tip: Hand-tightened bolt \u2248 1-5 Nm. Wrench-tightened \u2248 10-50 Nm.")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                                wrapMode: Text.WordWrap
                             }
 
-                            UM.Label { text: "Fz:"; font: UM.Theme.getFont("small") }
-                            TextField
+                            UM.Label
                             {
-                                id: forceZField
                                 Layout.fillWidth: true
-                                text: bcPanel.forceZ.toFixed(1)
-                                readOnly: bcPanel.currentMode === "rotate"
-                                font.pointSize: UM.Theme.getFont("small").pointSize
-                                validator: DoubleValidator { decimals: 1 }
-                                onEditingFinished:
-                                    UM.Controller.setProperty("ForceZ", parseFloat(text) || 0.0)
+                                visible: !defineColumn.isTorqueEditMode && (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+                                text: catalog.i18nc("@info", "%1 face(s) selected for torque. The torque axis will be the average surface normal.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_medium")
+                                wrapMode: Text.WordWrap
                             }
-                        }
 
-                        UM.Label
-                        {
-                            text: catalog.i18nc("@info", "Magnitude: %1 N").arg(
-                                Math.sqrt(
-                                    bcPanel.forceX * bcPanel.forceX +
-                                    bcPanel.forceY * bcPanel.forceY +
-                                    bcPanel.forceZ * bcPanel.forceZ
-                                ).toFixed(2)
-                            )
-                            color: UM.Theme.getColor("text_medium")
-                            font: UM.Theme.getFont("small")
-                        }
-                    }
-
-                    // ── Confirm load button (force mode / force edit mode) ─
-                    UM.Label
-                    {
-                        Layout.fillWidth: true
-                        visible: bcPanel.currentMode === "force" && !defineColumn.isForceEditMode
-                        wrapMode: Text.WordWrap
-                        font: UM.Theme.getFont("small")
-                        color: UM.Theme.getColor("text_medium")
-                        text: (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
-                            ? catalog.i18nc("@info", "%1 face(s) selected. Click 'Confirm Load' to save, or click more faces to add. Alt+click to deselect.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
-                            : catalog.i18nc("@info", "Click faces where the load acts. Each click adds to selection. Alt+click to deselect.")
-                    }
-
-                    Cura.PrimaryButton
-                    {
-                        Layout.fillWidth: true
-                        visible: bcPanel.currentMode === "force" || defineColumn.isForceEditMode
-                        text: defineColumn.isForceEditMode
-                            ? catalog.i18nc("@action:button", "Apply Changes")
-                            : catalog.i18nc("@action:button", "Confirm Load on Selected Faces")
-                        enabled: defineColumn.isForceEditMode || (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
-                        onClicked:
-                        {
-                            if (defineColumn.isForceEditMode)
+                            // Torques list
+                            UM.Label
                             {
-                                var payload = JSON.stringify({
-                                    "index": defineColumn.editingForceIndex,
-                                    "magnitude": parseFloat(magnitudeField.text) || 100.0
-                                })
-                                UM.Controller.setProperty("UpdateForceAtIndex", payload)
-                                defineColumn.editingForceIndex = -1
-                                UM.Controller.setProperty("ActiveForceIndex", -1)
+                                text: catalog.i18nc("@label", "Torques")
+                                font: UM.Theme.getFont("medium_bold")
                             }
-                            else
+
+                            Column
                             {
-                                UM.Controller.setProperty("ConfirmForceGroup", true)
-                            }
-                        }
-                    }
-
-                    Cura.SecondaryButton
-                    {
-                        Layout.fillWidth: true
-                        visible: defineColumn.isForceEditMode
-                        text: catalog.i18nc("@action:button", "Cancel Edit")
-                        onClicked:
-                        {
-                            defineColumn.editingForceIndex = -1
-                            defineColumn.editingTorqueIndex = -1
-                            UM.Controller.setProperty("ActiveForceIndex", -1)
-                        }
-                    }
-
-                    // ── Torque settings (torque mode + torque edit mode) ───
-                    ColumnLayout
-                    {
-                        Layout.fillWidth: true
-                        spacing: UM.Theme.getSize("default_margin").height / 2
-                        visible: bcPanel.currentMode === "torque" || defineColumn.isTorqueEditMode
-
-                        UM.Label
-                        {
-                            text: catalog.i18nc("@label", "Torque Amount")
-                            font: UM.Theme.getFont("medium_bold")
-                        }
-
-                        RowLayout
-                        {
-                            Layout.fillWidth: true
-                            spacing: UM.Theme.getSize("default_margin").width / 2
-
-                            TextField
-                            {
-                                id: torqueMagnitudeField
                                 Layout.fillWidth: true
-                                text: Number(toolProperties.getValue("TorqueMagnitude") ?? 1).toFixed(2)
-                                validator: DoubleValidator { bottom: 0; decimals: 2 }
-                                onEditingFinished: UM.Controller.setProperty("TorqueMagnitude", parseFloat(text) || 1.0)
+                                spacing: 2
+
+                                Repeater
+                                {
+                                    model: bcPanel.torqueListModel
+
+                                    Rectangle
+                                    {
+                                        width: defineColumn.width
+                                        height: torqueRowLayout.implicitHeight + UM.Theme.getSize("default_margin").height
+                                        color: bcPanel.activeTorqueIdx === modelData.index
+                                            ? Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.5)
+                                            : defineColumn.editingTorqueIndex === modelData.index
+                                                ? UM.Theme.getColor("primary")
+                                                : UM.Theme.getColor("main_background")
+                                        border.color: UM.Theme.getColor("lining")
+                                        border.width: UM.Theme.getSize("default_lining").width
+                                        radius: UM.Theme.getSize("default_radius").width
+
+                                        ColumnLayout
+                                        {
+                                            id: torqueRowLayout
+                                            anchors.fill: parent
+                                            anchors.margins: UM.Theme.getSize("default_margin").width / 2
+                                            spacing: 2
+
+                                            RowLayout
+                                            {
+                                                Layout.fillWidth: true
+
+                                                UM.Label
+                                                {
+                                                    id: torqueRowLabel
+                                                    Layout.fillWidth: true
+                                                    text: modelData.label
+                                                    color: UM.Theme.getColor("text")
+                                                    elide: Text.ElideRight
+                                                }
+
+                                                UM.Label
+                                                {
+                                                    text: catalog.i18nc("@action", "Edit Axis")
+                                                    font: UM.Theme.getFont("small")
+                                                    color: UM.Theme.getColor("primary")
+
+                                                    MouseArea
+                                                    {
+                                                        anchors.fill: parent
+                                                        onClicked:
+                                                        {
+                                                            defineColumn.editingForceIndex = -1
+                                                            UM.Controller.setProperty("ActiveForceIndex", -1)
+                                                            UM.Controller.setProperty("ActiveTorqueIndex", modelData.index)
+                                                        }
+                                                    }
+                                                }
+
+                                                UM.ColorImage
+                                                {
+                                                    source: UM.Theme.getIcon("Cancel")
+                                                    color: UM.Theme.getColor("text_medium")
+                                                    width: UM.Theme.getSize("small_button_icon").width
+                                                    height: width
+
+                                                    MouseArea
+                                                    {
+                                                        anchors.fill: parent
+                                                        onClicked: UM.Controller.setProperty("DeleteTorqueGroup", modelData.index)
+                                                    }
+                                                }
+                                            }
+
+                                            // Show axis values inline when this torque is being edited
+                                            UM.Label
+                                            {
+                                                visible: bcPanel.activeTorqueIdx === modelData.index
+                                                Layout.fillWidth: true
+                                                font: UM.Theme.getFont("small")
+                                                color: UM.Theme.getColor("text_medium")
+                                                text: catalog.i18nc("@info", "Axis: [%1, %2, %3]")
+                                                    .arg(modelData.axisX !== undefined ? modelData.axisX.toFixed(3) : "?")
+                                                    .arg(modelData.axisY !== undefined ? modelData.axisY.toFixed(3) : "?")
+                                                    .arg(modelData.axisZ !== undefined ? modelData.axisZ.toFixed(3) : "?")
+                                            }
+                                        }
+
+                                        MouseArea
+                                        {
+                                            anchors.fill: parent
+                                            z: -1
+                                            onClicked:
+                                            {
+                                                defineColumn.editingTorqueIndex = modelData.index
+                                                defineColumn.editingForceIndex = -1
+                                                UM.Controller.setProperty("ActiveForceIndex", -1)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                UM.Label
+                                {
+                                    visible: bcPanel.torqueListModel.length === 0
+                                    width: defineColumn.width
+                                    text: catalog.i18nc("@info", "No torques defined. Select faces, then confirm.")
+                                    wrapMode: Text.WordWrap
+                                    font: UM.Theme.getFont("small")
+                                    color: UM.Theme.getColor("text_inactive")
+                                }
                             }
-                            UM.Label { text: "Nm" }
-                        }
 
-                        UM.Label
-                        {
-                            Layout.fillWidth: true
-                            text: catalog.i18nc("@info", "Tip: Hand-tightened bolt \u2248 1-5 Nm. Wrench-tightened \u2248 10-50 Nm.")
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_inactive")
-                            wrapMode: Text.WordWrap
-                        }
-
-                        UM.Label
-                        {
-                            Layout.fillWidth: true
-                            visible: !defineColumn.isTorqueEditMode && (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
-                            text: catalog.i18nc("@info", "%1 face(s) selected for torque. The torque axis will be the average surface normal.").arg(toolProperties.getValue("CurrentSelectionCount") ?? 0)
-                            font: UM.Theme.getFont("small")
-                            color: UM.Theme.getColor("text_medium")
-                            wrapMode: Text.WordWrap
-                        }
-                    }
-
-                    Cura.PrimaryButton
-                    {
-                        Layout.fillWidth: true
-                        visible: bcPanel.currentMode === "torque" || defineColumn.isTorqueEditMode
-                        text: defineColumn.isTorqueEditMode
-                            ? catalog.i18nc("@action:button", "Apply Changes")
-                            : catalog.i18nc("@action:button", "Confirm Torque on Selected Faces")
-                        enabled: defineColumn.isTorqueEditMode || (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
-                        onClicked:
-                        {
-                            if (defineColumn.isTorqueEditMode)
+                            // Confirm torque
+                            Cura.PrimaryButton
                             {
-                                var payload = JSON.stringify({
-                                    "index": defineColumn.editingTorqueIndex,
-                                    "magnitude": parseFloat(torqueMagnitudeField.text) || 1.0
-                                })
-                                UM.Controller.setProperty("UpdateTorqueAtIndex", payload)
-                                defineColumn.editingTorqueIndex = -1
+                                Layout.fillWidth: true
+                                text: defineColumn.isTorqueEditMode
+                                    ? catalog.i18nc("@action:button", "Apply Changes")
+                                    : catalog.i18nc("@action:button", "Confirm Torque on Selected Faces")
+                                enabled: defineColumn.isTorqueEditMode || (toolProperties.getValue("CurrentSelectionCount") ?? 0) > 0
+                                onClicked:
+                                {
+                                    if (defineColumn.isTorqueEditMode)
+                                    {
+                                        var payload = JSON.stringify({
+                                            "index": defineColumn.editingTorqueIndex,
+                                            "magnitude": parseFloat(torqueMagnitudeField.text) || 1.0
+                                        })
+                                        UM.Controller.setProperty("UpdateTorqueAtIndex", payload)
+                                        defineColumn.editingTorqueIndex = -1
+                                    }
+                                    else
+                                    {
+                                        UM.Controller.setProperty("ConfirmTorqueGroup", true)
+                                    }
+                                }
                             }
-                            else
-                            {
-                                UM.Controller.setProperty("ConfirmTorqueGroup", true)
-                            }
-                        }
-                    }
 
-                    Cura.SecondaryButton
-                    {
-                        Layout.fillWidth: true
-                        visible: defineColumn.isTorqueEditMode
-                        text: catalog.i18nc("@action:button", "Cancel Edit")
-                        onClicked:
-                        {
-                            defineColumn.editingForceIndex = -1
-                            defineColumn.editingTorqueIndex = -1
-                            UM.Controller.setProperty("ActiveForceIndex", -1)
-                            UM.Controller.setProperty("ActiveTorqueIndex", -1)
-                        }
-                    }
+                            Cura.SecondaryButton
+                            {
+                                Layout.fillWidth: true
+                                visible: defineColumn.isTorqueEditMode
+                                text: catalog.i18nc("@action:button", "Cancel Edit")
+                                onClicked:
+                                {
+                                    defineColumn.editingForceIndex = -1
+                                    defineColumn.editingTorqueIndex = -1
+                                    UM.Controller.setProperty("ActiveForceIndex", -1)
+                                    UM.Controller.setProperty("ActiveTorqueIndex", -1)
+                                }
+                            }
+                        }  // Tab 2: Torques
+
+                    }  // StackLayout
 
                     // ── Confirm and Optimize button ───────────────────────
                     Item { height: UM.Theme.getSize("default_margin").height }
@@ -1146,6 +1326,16 @@ Item
                             return idx >= 0 ? idx : 0
                         }
                         onCurrentTextChanged: UM.Controller.setProperty("MaterialName", currentText)
+                    }
+
+                    UM.Label
+                    {
+                        Layout.fillWidth: true
+                        text: toolProperties.getValue("MaterialSummary") ?? ""
+                        visible: text !== ""
+                        font: UM.Theme.getFont("small")
+                        color: UM.Theme.getColor("text_inactive")
+                        wrapMode: Text.WordWrap
                     }
 
                     UM.Label

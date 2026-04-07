@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- Cylinder body shown as isometric-ish shape -->
+
+  <!-- Cylinder body rectangle -->
+  <rect x="55" y="34" width="90" height="52" fill="#555555" stroke="#AAAAAA" stroke-width="1.5" rx="2"/>
+
+  <!-- Left ellipse cap -->
+  <ellipse cx="55" cy="60" rx="14" ry="26" fill="#444444" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Right ellipse cap (torque-applied face, highlighted) -->
+  <ellipse cx="145" cy="60" rx="14" ry="26" fill="#4488DD" opacity="0.30" stroke="#4488DD" stroke-width="2"/>
+
+  <!-- Axis line (dashed) through center -->
+  <line x1="30" y1="60" x2="172" y2="60" stroke="#888888" stroke-width="1.2" stroke-dasharray="5,4"/>
+
+  <!-- Curved torque arrow around the right cap — arc sweeping counter-clockwise -->
+  <!-- Arc from top-right, sweeping around to the right, arrowhead at bottom -->
+  <!-- Top of arc start point approx (162, 38), sweeping to (162, 82) -->
+  <path d="M 162,38 A 24,24 0 0 1 162,82"
+        fill="none" stroke="#4488DD" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Arrowhead at the bottom end of the arc (pointing down-left along tangent) -->
+  <polygon points="162,82 155,76 168,74" fill="#4488DD"/>
+
+  <!-- Second curved arrow (outer, slightly larger, opposite arc for visual clarity) -->
+  <path d="M 168,44 A 30,30 0 0 1 168,76"
+        fill="none" stroke="#4488DD" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- T label -->
+  <text x="178" y="58" font-family="sans-serif" font-size="13" font-weight="bold" fill="#4488DD" text-anchor="middle">T</text>
+
+  <!-- Small dot on axis at right face to show rotation center -->
+  <circle cx="145" cy="60" r="3" fill="#4488DD"/>
+
+  <!-- "Applied Torque" label -->
+  <text x="100" y="114" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Applied Torque</text>
+
+</svg>

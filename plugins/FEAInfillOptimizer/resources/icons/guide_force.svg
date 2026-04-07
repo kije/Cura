@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+
+  <!-- Cantilever beam: fixed on left, free end on right -->
+
+  <!-- Fixed-end hatching (left wall) -->
+  <rect x="20" y="28" width="6" height="64" fill="#666666" stroke="#AAAAAA" stroke-width="1.5"/>
+  <line x1="14" y1="28" x2="26" y2="28" stroke="#888888" stroke-width="1.5"/>
+  <line x1="14" y1="92" x2="26" y2="92" stroke="#888888" stroke-width="1.5"/>
+  <line x1="14" y1="34" x2="22" y2="26" stroke="#888888" stroke-width="1.2"/>
+  <line x1="14" y1="46" x2="22" y2="38" stroke="#888888" stroke-width="1.2"/>
+  <line x1="14" y1="58" x2="22" y2="50" stroke="#888888" stroke-width="1.2"/>
+  <line x1="14" y1="70" x2="22" y2="62" stroke="#888888" stroke-width="1.2"/>
+  <line x1="14" y1="82" x2="22" y2="74" stroke="#888888" stroke-width="1.2"/>
+  <line x1="14" y1="94" x2="22" y2="86" stroke="#888888" stroke-width="1.2"/>
+
+  <!-- Beam body — horizontal rectangular block -->
+  <!-- Right face -->
+  <polygon points="148,42 162,50 162,76 148,68" fill="#444444" stroke="#AAAAAA" stroke-width="1.5"/>
+  <!-- Top face -->
+  <polygon points="26,34 148,34 162,42 48,42" fill="#666666" stroke="#AAAAAA" stroke-width="1.5"/>
+  <!-- Front face -->
+  <polygon points="26,34 26,68 48,76 148,76 148,68 148,76 26,68" fill="#555555" stroke="#AAAAAA" stroke-width="0"/>
+  <polygon points="26,34 148,34 148,68 26,68" fill="#555555" stroke="#AAAAAA" stroke-width="1.5"/>
+
+  <!-- Force-applied surface on right end — highlighted -->
+  <polygon points="148,34 162,42 162,76 148,68" fill="#DD4444" opacity="0.35" stroke="#DD4444" stroke-width="1.5"/>
+
+  <!-- Force arrows pointing leftward into right face (F applied from right) -->
+  <!-- Arrow 1 (top) -->
+  <line x1="190" y1="50" x2="164" y2="50" stroke="#DD4444" stroke-width="2.5"/>
+  <polygon points="164,50 172,46 172,54" fill="#DD4444"/>
+  <!-- Arrow 2 (bottom) -->
+  <line x1="190" y1="66" x2="164" y2="66" stroke="#DD4444" stroke-width="2.5"/>
+  <polygon points="164,66 172,62 172,70" fill="#DD4444"/>
+
+  <!-- F label -->
+  <text x="186" y="44" font-family="sans-serif" font-size="12" font-weight="bold" fill="#DD4444" text-anchor="middle">F</text>
+
+  <!-- "Applied Force" label -->
+  <text x="100" y="114" font-family="sans-serif" font-size="11" fill="#CCCCCC" text-anchor="middle">Applied Force</text>
+
+</svg>
