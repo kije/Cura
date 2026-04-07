@@ -18,9 +18,9 @@ Item
     UM.I18nCatalog { id: catalog; name: "cura" }
 
     // States: 1=READY, 2=PROCESSING, 3=ERROR
-    property var currentState: UM.Controller.properties.getValue("State")
-    property var hasTexture: UM.Controller.properties.getValue("HasTexture")
-    property var hasUnconfirmedChanges: UM.Controller.properties.getValue("HasUnconfirmedChanges")
+    property var currentState: UM.Controller.properties.getValue("State") ?? 1
+    property var hasTexture: UM.Controller.properties.getValue("HasTexture") ?? false
+    property var hasUnconfirmedChanges: UM.Controller.properties.getValue("HasUnconfirmedChanges") ?? false
 
     ScrollView
     {
@@ -99,7 +99,7 @@ Item
                     catalog.i18nc("@item:inlistbox", "Spherical"),
                     catalog.i18nc("@item:inlistbox", "Planar")
                 ]
-                currentIndex: UM.Controller.properties.getValue("ProjectionMode")
+                currentIndex: UM.Controller.properties.getValue("ProjectionMode") ?? 0
                 onCurrentIndexChanged: UM.Controller.setProperty("ProjectionMode", currentIndex)
             }
 
@@ -143,7 +143,7 @@ Item
                     from: -5.0
                     to: 5.0
                     stepSize: 0.1
-                    value: UM.Controller.properties.getValue("Amplitude")
+                    value: UM.Controller.properties.getValue("Amplitude") ?? 1.0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -175,7 +175,7 @@ Item
                     from: 0.1
                     to: 20.0
                     stepSize: 0.1
-                    value: UM.Controller.properties.getValue("ScaleU")
+                    value: UM.Controller.properties.getValue("ScaleU") ?? 1.0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -207,7 +207,7 @@ Item
                     from: 0.1
                     to: 20.0
                     stepSize: 0.1
-                    value: UM.Controller.properties.getValue("ScaleV")
+                    value: UM.Controller.properties.getValue("ScaleV") ?? 1.0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -239,7 +239,7 @@ Item
                     from: -10.0
                     to: 10.0
                     stepSize: 0.1
-                    value: UM.Controller.properties.getValue("OffsetU")
+                    value: UM.Controller.properties.getValue("OffsetU") ?? 0.0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -271,7 +271,7 @@ Item
                     from: -10.0
                     to: 10.0
                     stepSize: 0.1
-                    value: UM.Controller.properties.getValue("OffsetV")
+                    value: UM.Controller.properties.getValue("OffsetV") ?? 0.0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -303,7 +303,7 @@ Item
                     from: 0
                     to: 360
                     stepSize: 1
-                    value: UM.Controller.properties.getValue("Rotation")
+                    value: UM.Controller.properties.getValue("Rotation") ?? 0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -344,7 +344,7 @@ Item
                     from: 0
                     to: 4
                     stepSize: 1
-                    value: UM.Controller.properties.getValue("SubdivisionLevel")
+                    value: UM.Controller.properties.getValue("SubdivisionLevel") ?? 1
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -370,7 +370,7 @@ Item
             UM.Label
             {
                 id: vertexEstimateLabel
-                property var estVerts: UM.Controller.properties.getValue("EstimatedVertices")
+                property var estVerts: UM.Controller.properties.getValue("EstimatedVertices") ?? 0
                 text:
                 {
                     if (estVerts > 1000000)
@@ -415,7 +415,7 @@ Item
                     from: 0
                     to: 90
                     stepSize: 1
-                    value: UM.Controller.properties.getValue("MaskAngle")
+                    value: UM.Controller.properties.getValue("MaskAngle") ?? 0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -455,7 +455,7 @@ Item
                     from: 0
                     to: 20
                     stepSize: 1
-                    value: UM.Controller.properties.getValue("Smoothing")
+                    value: UM.Controller.properties.getValue("Smoothing") ?? 0
                     onPressedChanged: function(pressed)
                     {
                         if (!pressed)
@@ -517,7 +517,7 @@ Item
             {
                 visible: currentState === 3
                 width: parent.width
-                text: UM.Controller.properties.getValue("ErrorMessage") || ""
+                text: UM.Controller.properties.getValue("ErrorMessage") ?? ""
                 color: UM.Theme.getColor("error")
                 wrapMode: Text.WordWrap
             }
@@ -530,21 +530,21 @@ Item
                 Cura.PrimaryButton
                 {
                     text: catalog.i18nc("@action:button", "Confirm")
-                    enabled: hasUnconfirmedChanges && currentState !== 2
+                    enabled: hasUnconfirmedChanges == true && currentState !== 2
                     onClicked: UM.Controller.triggerAction("confirmDisplacement")
                 }
 
                 Cura.SecondaryButton
                 {
                     text: catalog.i18nc("@action:button", "Revert")
-                    enabled: hasUnconfirmedChanges && currentState !== 2
+                    enabled: hasUnconfirmedChanges == true && currentState !== 2
                     onClicked: UM.Controller.triggerAction("revertDisplacement")
                 }
             }
 
             UM.Label
             {
-                visible: hasUnconfirmedChanges
+                visible: hasUnconfirmedChanges == true
                 text: catalog.i18nc("@label", "Preview active. Confirm to keep, or close tool to revert.")
                 color: UM.Theme.getColor("text_inactive")
             }
