@@ -57,8 +57,8 @@ class BumpMeshTool(Tool):
         self._mask_angle: float = 0.0
         self._smoothing: int = 0
 
-        # State
-        self._state: int = BumpMeshTool.State.NO_SELECTION
+        # State (default to READY since tool panel only shows when a model is selected)
+        self._state: int = BumpMeshTool.State.READY
         self._error_message: str = ""
         self._displacement_job: Optional[DisplacementJob] = None
         # WeakKeyDictionary: entries auto-removed when node is garbage-collected
@@ -358,13 +358,10 @@ class BumpMeshTool(Tool):
 
     def _onSelectionChanged(self) -> None:
         """Update state when selection changes."""
-        node = self._getSelectedNode()
-        if node is not None and self._state != BumpMeshTool.State.PROCESSING:
+        if self._state != BumpMeshTool.State.PROCESSING:
             self._state = BumpMeshTool.State.READY
             self._error_message = ""
-        elif node is None:
-            self._state = BumpMeshTool.State.NO_SELECTION
-        self.propertyChanged.emit()
+            self.propertyChanged.emit()
 
     @staticmethod
     def _imageToNumpyGrayscale(img: QImage) -> numpy.ndarray:

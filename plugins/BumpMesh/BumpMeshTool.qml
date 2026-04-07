@@ -24,7 +24,7 @@ Item
     {
         id: mainColumn
         spacing: UM.Theme.getSize("default_margin").height
-        visible: (currentState === 1 || currentState === 3)
+        visible: currentState !== 2
 
         // === Section: Displacement Map ===
         UM.Label
@@ -555,20 +555,4 @@ Item
         }
     }
 
-    // === No selection message ===
-    Rectangle
-    {
-        id: noSelectionOverlay
-        anchors.fill: parent
-        color: UM.Theme.getColor("main_background")
-        visible: currentState === 0
-
-        UM.Label
-        {
-            anchors.fill: parent
-            text: catalog.i18nc("@label", "Select a single model to apply displacement")
-            verticalAlignment: Text.AlignVCenter
-            horizontalAlignment: Text.AlignHCenter
-        }
-    }
 }
