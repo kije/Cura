@@ -23,25 +23,25 @@ Dialog
     property string selectedCategory: "all"
     property string selectedExampleId: ""
 
-    // Load examples from JSON
+    // Load examples from JSON (async to avoid "Invalid state" errors)
     Component.onCompleted:
     {
         var xhr = new XMLHttpRequest()
         var url = Qt.resolvedUrl("../../help/examples.json")
-        xhr.open("GET", url, false)
-        xhr.send()
-        if (xhr.status === 200 || xhr.status === 0)
-        {
-            try
-            {
-                var data = JSON.parse(xhr.responseText)
-                examples = data.examples || []
-            }
-            catch (e)
-            {
-                console.warn("ExamplesGallery: Failed to parse examples.json:", e)
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE) {
+                if (xhr.status === 200 || xhr.status === 0) {
+                    try {
+                        var data = JSON.parse(xhr.responseText)
+                        examples = data.examples || []
+                    } catch (e) {
+                        console.warn("ExamplesGallery: Failed to parse examples.json:", e)
+                    }
+                }
             }
         }
+        xhr.open("GET", url)
+        xhr.send()
     }
 
     // Filtered examples list

@@ -39,9 +39,6 @@ Popup
         }
     }
 
-    Accessible.role: Accessible.Dialog
-    Accessible.name: title
-
     ScrollView
     {
         anchors.fill: parent

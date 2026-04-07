@@ -47,6 +47,7 @@ Item
 
     ToolTip
     {
+        id: helpTooltip
         visible: iconMouseArea.containsMouse && tooltipText !== ""
         text: tooltipText
         delay: 500
@@ -63,9 +64,9 @@ Item
 
         contentItem: Text
         {
-            text: parent.text
+            text: helpTooltip.text
             font: UM.Theme.getFont("small")
-            color: UM.Theme.getColor("tooltip_text")
+            color: UM.Theme.getColor("text")
             wrapMode: Text.WordWrap
         }
     }

@@ -21,26 +21,24 @@ QtObject
     {
         var xhr = new XMLHttpRequest()
         var url = Qt.resolvedUrl("../../help/help_content.json")
-        xhr.open("GET", url, false)
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE) {
+                if (xhr.status === 200 || xhr.status === 0) {
+                    try {
+                        var data = JSON.parse(xhr.responseText)
+                        entries = data.entries || {}
+                        examples = data.examples || {}
+                        loaded = true
+                    } catch (e) {
+                        console.warn("HelpContent: Failed to parse help_content.json:", e)
+                    }
+                } else {
+                    console.warn("HelpContent: Failed to load help_content.json, status:", xhr.status)
+                }
+            }
+        }
+        xhr.open("GET", url)
         xhr.send()
-        if (xhr.status === 200 || xhr.status === 0)
-        {
-            try
-            {
-                var data = JSON.parse(xhr.responseText)
-                entries = data.entries || {}
-                examples = data.examples || {}
-                loaded = true
-            }
-            catch (e)
-            {
-                console.warn("HelpContent: Failed to parse help_content.json:", e)
-            }
-        }
-        else
-        {
-            console.warn("HelpContent: Failed to load help_content.json, status:", xhr.status)
-        }
     }
 
     function getTooltip(entryId)

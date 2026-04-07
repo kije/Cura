@@ -79,10 +79,6 @@ Popup
         radius: UM.Theme.getSize("default_radius").width
     }
 
-    Accessible.role: Accessible.Dialog
-    Accessible.name: catalog.i18nc("@title", "Getting Started") + ", " +
-        catalog.i18nc("@info", "Step %1 of %2").arg(currentStep + 1).arg(totalSteps)
-
     ColumnLayout
     {
         anchors.fill: parent
