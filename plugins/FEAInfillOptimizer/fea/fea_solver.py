@@ -197,6 +197,8 @@ class LinearElasticitySolver:
         - ``f[d]`` is set to 0.
 
         This preserves the symmetric positive-definite structure of K.
+        Uses vectorized CSR operations instead of per-DOF LIL zeroing,
+        which is O(nnz) total instead of O(n_fixed × ndof).
 
         Args:
             K: Global stiffness matrix (CSR), modified in-place (copy made).
@@ -206,18 +208,59 @@ class LinearElasticitySolver:
         Returns:
             Tuple of (modified K, modified f).
         """
-        K = K.tolil()
+        import time as _time
+        _t0 = _time.monotonic()
+
         f = f.copy()
 
-        for node_idx in fixed_nodes:
-            for d in range(3):
-                dof = int(node_idx) * 3 + d
-                K[dof, :] = 0.0
-                K[:, dof] = 0.0
-                K[dof, dof] = 1.0
-                f[dof] = 0.0
+        # Build fixed DOF set: each node has 3 DOFs
+        fixed_dofs = np.repeat(fixed_nodes.astype(np.int64) * 3, 3) + np.tile(
+            np.arange(3, dtype=np.int64), len(fixed_nodes)
+        )
 
-        return K.tocsr(), f
+        # Zero force for fixed DOFs
+        f[fixed_dofs] = 0.0
+
+        # Vectorized CSR BC application:
+        # 1. Zero rows for fixed DOFs (fast: CSR row slicing is O(nnz_row))
+        # 2. Zero columns by exploiting symmetry: K = K^T, so also zero
+        #    rows in K^T, then transpose back.
+        # 3. Set diagonal to 1.
+
+        K = K.copy().tocsr()
+
+        # Create a boolean mask for fixed DOFs
+        n_dof = K.shape[0]
+        is_fixed = np.zeros(n_dof, dtype=bool)
+        is_fixed[fixed_dofs] = True
+
+        # Zero rows: build boolean mask over K.data for all entries in fixed rows.
+        # For CSR, entries for row i are K.data[indptr[i]:indptr[i+1]].
+        # Vectorized via a row-label array: assign each data entry its row index,
+        # then mask entries whose row is in the fixed set.
+        # np.repeat(row_indices, row_lengths) creates the row label per data entry.
+        row_lengths = np.diff(K.indptr)  # (ndof,)
+        data_row_labels = np.repeat(np.arange(n_dof), row_lengths)  # (nnz,)
+        row_data_mask = is_fixed[data_row_labels]
+        K.data[row_data_mask] = 0.0
+
+        # Zero columns: multiply each entry K[i,j] by 0 if j is fixed
+        col_mask = is_fixed[K.indices]
+        K.data[col_mask] = 0.0
+
+        # Set diagonal to 1 for fixed DOFs — use diagonal vector directly
+        # instead of tolil() conversion which is extremely slow for large matrices
+        K.eliminate_zeros()
+        diag = K.diagonal()
+        diag[fixed_dofs] = 1.0
+        K.setdiag(diag)
+
+        _t1 = _time.monotonic()
+        from UM.Logger import Logger
+        Logger.log("d", "FEA apply_boundary_conditions: vectorized %.3fs (%d fixed DOFs)",
+                   _t1 - _t0, len(fixed_dofs))
+
+        return K, f
 
     # ------------------------------------------------------------------
     # Solve
@@ -278,46 +321,39 @@ class LinearElasticitySolver:
         Returns:
             Equivalent stress per element, shape (M,), same pressure unit as E.
         """
-        nodes = tet_mesh.nodes
-        elements = tet_mesh.elements
-        n_elems = elements.shape[0]
-        vm_stress = np.zeros(n_elems, dtype=np.float64)
+        import time as _time
+        _t0 = _time.monotonic()
 
         use_aniso = bonding_coeff < 1.0
 
-        for e_idx, (elem, E, nu) in enumerate(
-            zip(elements, E_per_element, nu_per_element)
-        ):
-            n0, n1, n2, n3 = int(elem[0]), int(elem[1]), int(elem[2]), int(elem[3])
-            x0, x1, x2, x3 = nodes[n0], nodes[n1], nodes[n2], nodes[n3]
+        # Vectorized: compute B matrices and volumes for ALL elements at once
+        B_all, V_all, valid = _strain_displacement_matrices_vectorized(tet_mesh)
 
-            B, V = _strain_displacement_matrix(x0, x1, x2, x3)
-            if V <= 0.0:
-                continue
+        # Build D matrices (M, 6, 6) — reuses same logic as assemble_stiffness_matrix
+        D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)
 
-            # Gather element nodal displacements (12,)
-            dof_indices = np.array(
-                [n0 * 3, n0 * 3 + 1, n0 * 3 + 2,
-                 n1 * 3, n1 * 3 + 1, n1 * 3 + 2,
-                 n2 * 3, n2 * 3 + 1, n2 * 3 + 2,
-                 n3 * 3, n3 * 3 + 1, n3 * 3 + 2],
-                dtype=np.int64,
-            )
-            u_e = displacements[dof_indices]  # (12,)
+        # Gather element displacements: (M, 12)
+        u_e_all = _gather_element_displacements(tet_mesh.elements, displacements)
 
-            if use_aniso:
-                D = build_constitutive_matrix_from_bonding(
-                    float(E), float(nu), bonding_coeff
-                )
-            else:
-                D = build_constitutive_matrix(float(E), float(nu))
-            strain = B @ u_e               # (6,)  eps = B u_e
-            stress = D @ strain            # (6,)  sigma = D eps
+        # Batched strain: strain = B @ u_e → (M, 6) = einsum("mij,mj->mi")
+        strain_all = np.einsum("mij,mj->mi", B_all, u_e_all)  # (M, 6)
 
-            if use_aniso:
-                vm_stress[e_idx] = _von_mises_directional(stress, bonding_coeff)
-            else:
-                vm_stress[e_idx] = _von_mises(stress)
+        # Batched stress: stress = D @ strain → (M, 6) = einsum("mij,mj->mi")
+        stress_all = np.einsum("mij,mj->mi", D_all, strain_all)  # (M, 6)
+
+        # Vectorized von Mises (or directional von Mises)
+        if use_aniso:
+            vm_stress = _von_mises_directional_vectorized(stress_all, bonding_coeff)
+        else:
+            vm_stress = _von_mises_vectorized(stress_all)
+
+        # Zero out degenerate elements
+        vm_stress[~valid] = 0.0
+
+        _t1 = _time.monotonic()
+        from UM.Logger import Logger
+        Logger.log("d", "FEA compute_element_stress: vectorized %.3fs (%d elems)",
+                   _t1 - _t0, len(vm_stress))
 
         return vm_stress
 
@@ -354,45 +390,34 @@ class LinearElasticitySolver:
               as (force × displacement).
             - ``volumes``: per-element volume, shape (M,).
         """
-        nodes = tet_mesh.nodes
-        elements = tet_mesh.elements
-        n_elems = elements.shape[0]
-        ce = np.zeros(n_elems, dtype=np.float64)
-        volumes = np.zeros(n_elems, dtype=np.float64)
+        import time as _time
+        _t0 = _time.monotonic()
 
-        use_aniso = bonding_coeff < 1.0
+        # Vectorized: compute B matrices and volumes for ALL elements at once
+        B_all, V_all, valid = _strain_displacement_matrices_vectorized(tet_mesh)
 
-        for e_idx, (elem, E, nu) in enumerate(
-            zip(elements, E_per_element, nu_per_element)
-        ):
-            n0, n1, n2, n3 = int(elem[0]), int(elem[1]), int(elem[2]), int(elem[3])
-            x0, x1, x2, x3 = nodes[n0], nodes[n1], nodes[n2], nodes[n3]
+        # Build D matrices (M, 6, 6)
+        D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)
 
-            B, V = _strain_displacement_matrix(x0, x1, x2, x3)
-            if V <= 0.0:
-                continue
+        # Gather element displacements: (M, 12)
+        u_e_all = _gather_element_displacements(tet_mesh.elements, displacements)
 
-            volumes[e_idx] = V
+        # Batched strain and stress
+        strain_all = np.einsum("mij,mj->mi", B_all, u_e_all)  # (M, 6)
+        stress_all = np.einsum("mij,mj->mi", D_all, strain_all)  # (M, 6)
 
-            dof_indices = np.array(
-                [n0 * 3, n0 * 3 + 1, n0 * 3 + 2,
-                 n1 * 3, n1 * 3 + 1, n1 * 3 + 2,
-                 n2 * 3, n2 * 3 + 1, n2 * 3 + 2,
-                 n3 * 3, n3 * 3 + 1, n3 * 3 + 2],
-                dtype=np.int64,
-            )
-            u_e = displacements[dof_indices]
+        # Compliance: ce = V * strain^T @ stress (per-element dot product)
+        # Equivalent to: ce[m] = V[m] * sum(strain[m,i] * stress[m,i])
+        ce = V_all * np.einsum("mi,mi->m", strain_all, stress_all)
+        ce[~valid] = 0.0
 
-            if use_aniso:
-                D = build_constitutive_matrix_from_bonding(
-                    float(E), float(nu), bonding_coeff
-                )
-            else:
-                D = build_constitutive_matrix(float(E), float(nu))
+        volumes = V_all.copy()
+        volumes[~valid] = 0.0
 
-            strain = B @ u_e        # (6,)
-            stress = D @ strain     # (6,)
-            ce[e_idx] = V * float(strain @ stress)
+        _t1 = _time.monotonic()
+        from UM.Logger import Logger
+        Logger.log("d", "FEA compute_element_compliance: vectorized %.3fs (%d elems)",
+                   _t1 - _t0, len(ce))
 
         return ce, volumes
 
@@ -421,46 +446,38 @@ class LinearElasticitySolver:
             this is ``failure_index × yield_strength``; for von Mises it is the
             raw von Mises stress.
         """
-        nodes = tet_mesh.nodes
-        elements = tet_mesh.elements
-        n_elems = elements.shape[0]
-        result = np.zeros(n_elems, dtype=np.float64)
+        import time as _time
+        _t0 = _time.monotonic()
 
         use_tsai_hill = bonding_coeff < 0.95
 
-        for e_idx, (elem, E, nu) in enumerate(
-            zip(elements, E_per_element, nu_per_element)
-        ):
-            n0, n1, n2, n3 = int(elem[0]), int(elem[1]), int(elem[2]), int(elem[3])
-            x0, x1, x2, x3 = nodes[n0], nodes[n1], nodes[n2], nodes[n3]
+        # Vectorized: compute B matrices and volumes for ALL elements at once
+        B_all, V_all, valid = _strain_displacement_matrices_vectorized(tet_mesh)
 
-            B, V = _strain_displacement_matrix(x0, x1, x2, x3)
-            if V <= 0.0:
-                continue
+        # Build D matrices (M, 6, 6)
+        D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)
 
-            dof_indices = np.array(
-                [n0 * 3, n0 * 3 + 1, n0 * 3 + 2,
-                 n1 * 3, n1 * 3 + 1, n1 * 3 + 2,
-                 n2 * 3, n2 * 3 + 1, n2 * 3 + 2,
-                 n3 * 3, n3 * 3 + 1, n3 * 3 + 2],
-                dtype=np.int64,
-            )
-            u_e = displacements[dof_indices]
+        # Gather element displacements: (M, 12)
+        u_e_all = _gather_element_displacements(tet_mesh.elements, displacements)
 
-            if bonding_coeff < 1.0:
-                D = build_constitutive_matrix_from_bonding(
-                    float(E), float(nu), bonding_coeff
-                )
-            else:
-                D = build_constitutive_matrix(float(E), float(nu))
-            strain = B @ u_e
-            stress_vec = D @ strain
+        # Batched strain and stress
+        strain_all = np.einsum("mij,mj->mi", B_all, u_e_all)  # (M, 6)
+        stress_all = np.einsum("mij,mj->mi", D_all, strain_all)  # (M, 6)
 
-            if use_tsai_hill:
-                fi = _tsai_hill(stress_vec, yield_strength, bonding_coeff)
-                result[e_idx] = fi * yield_strength
-            else:
-                result[e_idx] = _von_mises(stress_vec)
+        # Vectorized failure criterion
+        if use_tsai_hill:
+            fi = _tsai_hill_vectorized(stress_all, yield_strength, bonding_coeff)
+            result = fi * yield_strength
+        else:
+            result = _von_mises_vectorized(stress_all)
+
+        # Zero out degenerate elements
+        result[~valid] = 0.0
+
+        _t1 = _time.monotonic()
+        from UM.Logger import Logger
+        Logger.log("d", "FEA compute_element_failure_index: vectorized %.3fs (%d elems)",
+                   _t1 - _t0, len(result))
 
         return result
 
@@ -605,6 +622,245 @@ def _von_mises(stress: np.ndarray) -> float:
         + 3.0 * (txy**2 + tyz**2 + txz**2)
     )
     return float(np.sqrt(max(vm2, 0.0)))
+
+
+def _von_mises_vectorized(stress_all: np.ndarray) -> np.ndarray:
+    """Vectorized von Mises stress for all elements at once.
+
+    Mathematically equivalent to calling _von_mises() per element, but
+    operates on the full (M, 6) stress array with numpy broadcasting.
+
+    Args:
+        stress_all: Stress vectors, shape (M, 6), Voigt ordering.
+
+    Returns:
+        Von Mises stress per element, shape (M,).
+    """
+    sx = stress_all[:, 0]
+    sy = stress_all[:, 1]
+    sz = stress_all[:, 2]
+    txy = stress_all[:, 3]
+    tyz = stress_all[:, 4]
+    txz = stress_all[:, 5]
+    vm2 = (
+        sx**2 + sy**2 + sz**2
+        - sx * sy - sy * sz - sx * sz
+        + 3.0 * (txy**2 + tyz**2 + txz**2)
+    )
+    return np.sqrt(np.maximum(vm2, 0.0))
+
+
+def _von_mises_directional_vectorized(stress_all: np.ndarray, k: float) -> np.ndarray:
+    """Vectorized directional von Mises for all elements at once.
+
+    Mathematically equivalent to calling _von_mises_directional() per element.
+    Scales Z-direction stress components by 1/k before computing.
+
+    Args:
+        stress_all: Stress vectors, shape (M, 6), Voigt ordering.
+        k: Layer bonding coefficient in (0, 1].
+
+    Returns:
+        Directional von Mises stress per element, shape (M,).
+    """
+    sx = stress_all[:, 0]
+    sy = stress_all[:, 1]
+    sz_eff = stress_all[:, 2] / k
+    txy = stress_all[:, 3]
+    tyz_eff = stress_all[:, 4] / k
+    txz_eff = stress_all[:, 5] / k
+    vm2 = (
+        sx**2 + sy**2 + sz_eff**2
+        - sx * sy - sy * sz_eff - sx * sz_eff
+        + 3.0 * (txy**2 + tyz_eff**2 + txz_eff**2)
+    )
+    return np.sqrt(np.maximum(vm2, 0.0))
+
+
+def _tsai_hill_vectorized(
+    stress_all: np.ndarray, yield_strength: float, bonding_coeff: float
+) -> np.ndarray:
+    """Vectorized Tsai-Hill failure index for all elements at once.
+
+    Mathematically equivalent to calling _tsai_hill() per element.
+
+    Args:
+        stress_all: Stress vectors, shape (M, 6), Voigt ordering.
+        yield_strength: In-plane yield strength X.
+        bonding_coeff: Bonding coefficient k.
+
+    Returns:
+        Failure index per element, shape (M,).
+    """
+    X = yield_strength
+    Z = bonding_coeff * yield_strength
+    S = 0.6 * Z
+
+    if X <= 0.0 or Z <= 0.0 or S <= 0.0:
+        return np.zeros(stress_all.shape[0], dtype=np.float64)
+
+    sx = stress_all[:, 0]
+    sy = stress_all[:, 1]
+    sz = stress_all[:, 2]
+    txy = stress_all[:, 3]
+    tyz = stress_all[:, 4]
+    txz = stress_all[:, 5]
+
+    # In-plane stress resultant
+    sigma_ip = np.sqrt(np.maximum(sx**2 + sy**2 - sx * sy + 3.0 * txy**2, 0.0))
+
+    # Out-of-plane shear resultant
+    tau_op = np.sqrt(tyz**2 + txz**2)
+
+    fi2 = (sigma_ip / X) ** 2 + (sz / Z) ** 2 - sigma_ip * sz / (X ** 2) + (tau_op / S) ** 2
+    return np.sqrt(np.maximum(fi2, 0.0))
+
+
+def _strain_displacement_matrices_vectorized(
+    tet_mesh: TetMesh,
+) -> tuple:
+    """Compute B matrices and volumes for ALL elements at once.
+
+    Reuses the same vectorized Jacobian/B-matrix computation from
+    assemble_stiffness_matrix, avoiding per-element Python calls to
+    _strain_displacement_matrix().
+
+    Args:
+        tet_mesh: Tetrahedral mesh.
+
+    Returns:
+        Tuple of ``(B_all, V_all, valid)`` where:
+        - ``B_all``: (M, 6, 12) strain-displacement matrices.
+        - ``V_all``: (M,) element volumes.
+        - ``valid``: (M,) boolean mask of non-degenerate elements.
+    """
+    nodes = tet_mesh.nodes     # (N, 3)
+    elements = tet_mesh.elements  # (M, 4)
+    n_elems = elements.shape[0]
+
+    # Gather element vertex coordinates: (M, 4, 3)
+    elem_nodes = nodes[elements]
+    x0 = elem_nodes[:, 0, :]
+    x1 = elem_nodes[:, 1, :]
+    x2 = elem_nodes[:, 2, :]
+    x3 = elem_nodes[:, 3, :]
+
+    # Jacobian: (M, 3, 3)
+    J = np.stack([x1 - x0, x2 - x0, x3 - x0], axis=1)
+    detJ = np.linalg.det(J)
+    V = np.abs(detJ) / 6.0
+
+    # Degenerate element check (same as assemble_stiffness_matrix)
+    max_edge = np.max(np.linalg.norm(
+        np.stack([x1-x0, x2-x0, x3-x0, x2-x1, x3-x1, x3-x2], axis=1),
+        axis=2), axis=1)
+    degen_threshold = (max_edge ** 3) * 1e-10
+    valid = np.abs(detJ) >= degen_threshold
+    valid &= V > 0
+
+    # Shape function gradients
+    dN_ref = np.array([
+        [-1.0, -1.0, -1.0],
+        [ 1.0,  0.0,  0.0],
+        [ 0.0,  1.0,  0.0],
+        [ 0.0,  0.0,  1.0],
+    ], dtype=np.float64)
+
+    # For degenerate elements, use identity Jacobian to avoid singular inverse
+    J_safe = J.copy()
+    J_safe[~valid] = np.eye(3)
+    J_inv = np.linalg.inv(J_safe)
+    dN_xyz = np.einsum("ik,mkj->mij", dN_ref, J_inv)  # (M, 4, 3)
+
+    # Build B matrices: (M, 6, 12)
+    B_all = np.zeros((n_elems, 6, 12), dtype=np.float64)
+    for i in range(4):
+        col = i * 3
+        bx = dN_xyz[:, i, 0]
+        by = dN_xyz[:, i, 1]
+        bz = dN_xyz[:, i, 2]
+        B_all[:, 0, col + 0] = bx
+        B_all[:, 1, col + 1] = by
+        B_all[:, 2, col + 2] = bz
+        B_all[:, 3, col + 0] = by
+        B_all[:, 3, col + 1] = bx
+        B_all[:, 4, col + 1] = bz
+        B_all[:, 4, col + 2] = by
+        B_all[:, 5, col + 0] = bz
+        B_all[:, 5, col + 2] = bx
+
+    # Zero out B for degenerate elements
+    B_all[~valid] = 0.0
+
+    return B_all, V, valid
+
+
+def _build_D_matrices(
+    E_per_element: np.ndarray,
+    nu_per_element: np.ndarray,
+    bonding_coeff: float,
+) -> np.ndarray:
+    """Build constitutive matrices for all elements.
+
+    For the common isotropic case with uniform nu, uses the efficient
+    scaling approach: D = E[:, None, None] * D_unit.
+
+    Args:
+        E_per_element: Young's modulus per element, shape (M,).
+        nu_per_element: Poisson's ratio per element, shape (M,).
+        bonding_coeff: Layer bonding coefficient.
+
+    Returns:
+        (M, 6, 6) array of constitutive matrices.
+    """
+    use_aniso = bonding_coeff < 1.0
+
+    if use_aniso:
+        # Per-element D with bonding coefficient — check if nu is uniform
+        nu_unique = np.unique(nu_per_element)
+        if len(nu_unique) == 1:
+            D_unit = build_constitutive_matrix_from_bonding(1.0, float(nu_unique[0]), bonding_coeff)
+            return E_per_element[:, np.newaxis, np.newaxis] * D_unit[np.newaxis, :, :]
+        else:
+            return np.stack([
+                build_constitutive_matrix_from_bonding(float(E), float(nu), bonding_coeff)
+                for E, nu in zip(E_per_element, nu_per_element)
+            ])
+    else:
+        nu_unique = np.unique(nu_per_element)
+        if len(nu_unique) == 1:
+            D_unit = build_constitutive_matrix(1.0, float(nu_unique[0]))
+            return E_per_element[:, np.newaxis, np.newaxis] * D_unit[np.newaxis, :, :]
+        else:
+            return np.stack([
+                build_constitutive_matrix(float(E), float(nu))
+                for E, nu in zip(E_per_element, nu_per_element)
+            ])
+
+
+def _gather_element_displacements(
+    elements: np.ndarray,
+    displacements: np.ndarray,
+) -> np.ndarray:
+    """Gather element nodal displacements for all elements at once.
+
+    Instead of per-element dof_indices construction + indexing, builds
+    the (M, 12) DOF index array vectorially and gathers in one operation.
+
+    Args:
+        elements: Element connectivity, shape (M, 4), node indices.
+        displacements: Global displacement vector, shape (ndof,).
+
+    Returns:
+        (M, 12) array of per-element displacements.
+    """
+    # Build DOF indices: (M, 12) — for each node, 3 DOFs (x, y, z)
+    elem_dofs = np.zeros((elements.shape[0], 12), dtype=np.int64)
+    for i in range(4):
+        elem_dofs[:, i*3 + 0] = elements[:, i] * 3
+        elem_dofs[:, i*3 + 1] = elements[:, i] * 3 + 1
+        elem_dofs[:, i*3 + 2] = elements[:, i] * 3 + 2
+    return displacements[elem_dofs]  # (M, 12) — numpy fancy indexing
 
 
 def _von_mises_directional(stress: np.ndarray, k: float) -> float:
