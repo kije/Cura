@@ -178,7 +178,7 @@ class BoundaryConditionTool(Tool):
             "Phase",
             "RunAnalysis", "CancelAnalysis", "GoBackToDefine",
             "ApplyModifierMeshes", "ShowStressOverlay", "ClearResults",
-            "MaterialName", "InfillPattern", "SafetyFactor", "MeshResolution",
+            "MaterialName", "MaterialSummary", "InfillPattern", "SafetyFactor", "MeshResolution",
             "AnalysisProgress", "AnalysisStage",
             "MaxStress", "MinStress", "SafetyFactorResult",
             "ConvergenceIterations", "SafetyVerdict", "HasResults",
@@ -592,6 +592,14 @@ class BoundaryConditionTool(Tool):
         if self._extension:
             self._extension.materialName = str(value)
         self.propertyChanged.emit()
+
+    def getMaterialSummary(self) -> str:
+        if self._extension:
+            return self._extension.materialSummary
+        return ""
+
+    def setMaterialSummary(self, value) -> None:
+        pass  # read-only
 
     def getInfillPattern(self) -> str:
         if self._extension:

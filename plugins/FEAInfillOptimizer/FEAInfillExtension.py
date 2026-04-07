@@ -105,6 +105,9 @@ class FEAInfillExtension(QObject, Extension):
         "tpu": "TPU_95A", "tpu 95a": "TPU_95A", "flex": "TPU_95A",
         "cf": "CF_Nylon", "cf-nylon": "CF_Nylon", "cf nylon": "CF_Nylon",
         "carbon": "CF_Nylon", "cf-pet": "CF_Nylon", "cf-pla": "CF_Nylon",
+        "pet-cf": "CF_Nylon", "petcf": "CF_Nylon", "pet cf": "CF_Nylon",
+        "pla-cf": "CF_Nylon", "placf": "CF_Nylon", "pla cf": "CF_Nylon",
+        "cpe": "PETG", "cpe+": "PETG",  # Ultimaker CPE ≈ PETG mechanically
         "asa": "ABS",  # ASA is similar to ABS mechanically
         "hips": "ABS",  # HIPS is similar to ABS
         "pva": "PLA",  # PVA (support) — use PLA as approximation
@@ -135,6 +138,16 @@ class FEAInfillExtension(QObject, Extension):
 
             cura_type_lower = cura_type.lower().strip()
             db_name = self._CURA_MATERIAL_MAP.get(cura_type_lower)
+
+            # Fuzzy fallback: check if any map key is a substring of the Cura type
+            # or vice versa (handles "Ultimaker PET-CF", "Generic PLA", etc.)
+            if not db_name:
+                normalized = cura_type_lower.replace("-", "").replace(" ", "").replace("_", "")
+                for key, val in self._CURA_MATERIAL_MAP.items():
+                    key_norm = key.replace("-", "").replace(" ", "").replace("_", "")
+                    if key_norm in normalized or normalized in key_norm:
+                        db_name = val
+                        break
 
             if db_name and db_name != self._material_name:
                 Logger.log("i", "FEA Infill: Auto-detected Cura material '%s' → mapped to '%s'",
@@ -585,6 +598,23 @@ class FEAInfillExtension(QObject, Extension):
         if self._material_name != value:
             self._material_name = value
             self.settingsChanged.emit()
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def materialSummary(self) -> str:
+        """Return a human-readable summary of the active material's properties."""
+        from .fea.material_database import MaterialDatabase
+        mat = MaterialDatabase.get_material(self._material_name)
+        parts = [
+            f"E = {mat.E_xy:.0f} MPa",
+            f"σ_yield = {mat.yield_strength:.0f} MPa",
+            f"ν = {mat.nu:.2f}",
+            f"k = {mat.bonding_coefficient:.2f}",
+        ]
+        if mat.failure_mode == "hyperelastic":
+            parts.append("⚠ Hyperelastic — linear FEA not valid")
+        elif mat.failure_mode == "brittle":
+            parts.append("Brittle — von Mises may overestimate strength")
+        return " | ".join(parts)
 
     @pyqtProperty(str, notify=settingsChanged)
     def infillPattern(self) -> str:
