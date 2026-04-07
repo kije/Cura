@@ -15,6 +15,7 @@ from UM.Logger import Logger
 from UM.Message import Message
 from UM.PluginRegistry import PluginRegistry
 from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
+from UM.Scene.Selection import Selection
 from UM.i18n import i18nCatalog
 
 from cura.CuraApplication import CuraApplication
@@ -64,6 +65,12 @@ class FEAInfillExtension(QObject, Extension):
 
         # Weak-reference cache for scene node lookup (C11: safe id-based lookup)
         self._node_cache: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+        # Set of node IDs already restored from metadata (prevents re-restore)
+        self._restored_node_ids: set = set()
+
+        # Per-model analysis state: node_key → {phase, results, settings, ...}
+        self._per_node_state: Dict[str, Dict[str, Any]] = {}
 
         # Pre-selected node for dialog opening from tool
         self._preselected_node_key = ""
@@ -217,6 +224,9 @@ class FEAInfillExtension(QObject, Extension):
             app.getController().getScene().sceneChanged.connect(self._onSceneNodeMayHaveBCMetadata)
             app.getController().getScene().sceneChanged.connect(self._cleanupOrphanedOverlays)
 
+            # Per-model state switching on selection change
+            Selection.selectionChanged.connect(self._onSelectionChanged)
+
             # Sync BC data to node.metadata before save
             app.getOutputDeviceManager().writeStarted.connect(self._syncAllBCsToMetadata)
 
@@ -263,45 +273,21 @@ class FEAInfillExtension(QObject, Extension):
 
         Called right before writing a 3MF file.  The 3MF writer reads
         node.metadata and saves each entry via savitar_node.setSetting().
-        Settings and results are saved on ANY printable node that has BCs,
-        or on the active node if no BCs are defined yet.
+        Settings and results are saved per-node from _per_node_state, falling
+        back to the current global state for the active node.
         """
         import json
+
+        # Snapshot current active node state before saving
+        if self._active_node_key:
+            self._saveCurrentStateForNode(self._active_node_key)
+
         scene = CuraApplication.getInstance().getController().getScene()
-        settings = {
-            "material_name": self._material_name,
-            "infill_pattern": self._infill_pattern,
-            "min_density": self._min_density,
-            "max_density": self._max_density,
-            "num_zones": self._num_zones,
-            "max_iterations": self._max_iterations,
-            "mesh_resolution": self._mesh_resolution,
-            "safety_factor": self._safety_factor,
-            "bonding_coeff": self._bonding_coeff,
-            "optimization_method": self._optimization_method,
-            "volume_fraction": self._volume_fraction,
-        }
-        settings_json = json.dumps(settings)
-
-        results_json = None
-        if self._results is not None:
-            results_summary = {
-                "max_stress": self._results.get("max_stress", 0),
-                "min_stress": self._results.get("min_stress", 0),
-                "safety_factor": self._results.get("safety_factor", 0),
-                "iterations": self._results.get("iterations", 0),
-                "converged": self._results.get("converged", False),
-                "mesh_quality": self._results.get("mesh_quality", ""),
-                "mesh_method": self._results.get("mesh_method", ""),
-                "num_zones": len(self._results.get("zones", [])),
-                "zone_densities": [z["density"] for z in self._results.get("zones", [])],
-            }
-            results_json = json.dumps(results_summary)
-
         saved_settings_on = set()
         for node in DepthFirstIterator(scene.getRoot()):
             if not isinstance(node, CuraSceneNode):
                 continue
+            node_key = str(id(node))
             try:
                 bc = node.callDecoration("getBoundaryConditions")
                 if bc is not None and bc.hasAnyBC():
@@ -310,10 +296,38 @@ class FEAInfillExtension(QObject, Extension):
                     Logger.log("d", "FEA Infill: Saved BCs for node '%s' (%d fixed, %d forces, %d torques)",
                                node.getName(), bc.getFixedFaceCount(),
                                bc.getForceGroupCount(), bc.getTorqueGroupCount())
-                    # Save settings alongside BCs
-                    node.metadata[self._SETTINGS_METADATA_KEY] = settings_json
-                    if results_json is not None:
-                        node.metadata[self._RESULTS_METADATA_KEY] = results_json
+
+                    # Get per-node state (fall back to current global state)
+                    node_state = self._per_node_state.get(node_key, {})
+                    settings = {
+                        "material_name": node_state.get("material_name", self._material_name),
+                        "infill_pattern": node_state.get("infill_pattern", self._infill_pattern),
+                        "min_density": node_state.get("min_density", self._min_density),
+                        "max_density": node_state.get("max_density", self._max_density),
+                        "num_zones": node_state.get("num_zones", self._num_zones),
+                        "max_iterations": node_state.get("max_iterations", self._max_iterations),
+                        "mesh_resolution": node_state.get("mesh_resolution", self._mesh_resolution),
+                        "safety_factor": node_state.get("safety_factor", self._safety_factor),
+                        "bonding_coeff": node_state.get("bonding_coeff", self._bonding_coeff),
+                        "optimization_method": node_state.get("optimization_method", self._optimization_method),
+                        "volume_fraction": node_state.get("volume_fraction", self._volume_fraction),
+                    }
+                    node.metadata[self._SETTINGS_METADATA_KEY] = json.dumps(settings)
+
+                    node_results = node_state.get("results")
+                    if node_results is not None:
+                        results_summary = {
+                            "max_stress": node_results.get("max_stress", 0),
+                            "min_stress": node_results.get("min_stress", 0),
+                            "safety_factor": node_results.get("safety_factor", 0),
+                            "iterations": node_results.get("iterations", 0),
+                            "converged": node_results.get("converged", False),
+                            "mesh_quality": node_results.get("mesh_quality", ""),
+                            "mesh_method": node_results.get("mesh_method", ""),
+                            "num_zones": len(node_results.get("zones", [])),
+                            "zone_densities": [z["density"] for z in node_results.get("zones", [])],
+                        }
+                        node.metadata[self._RESULTS_METADATA_KEY] = json.dumps(results_summary)
                     elif self._RESULTS_METADATA_KEY in node.metadata:
                         del node.metadata[self._RESULTS_METADATA_KEY]
                     saved_settings_on.add(id(node))
@@ -329,14 +343,36 @@ class FEAInfillExtension(QObject, Extension):
             active_node = self._node_cache.get(self._active_node_key)
             if active_node is not None and id(active_node) not in saved_settings_on:
                 try:
-                    active_node.metadata[self._SETTINGS_METADATA_KEY] = settings_json
-                    if results_json is not None:
-                        active_node.metadata[self._RESULTS_METADATA_KEY] = results_json
+                    settings = {
+                        "material_name": self._material_name,
+                        "infill_pattern": self._infill_pattern,
+                        "min_density": self._min_density,
+                        "max_density": self._max_density,
+                        "num_zones": self._num_zones,
+                        "max_iterations": self._max_iterations,
+                        "mesh_resolution": self._mesh_resolution,
+                        "safety_factor": self._safety_factor,
+                        "bonding_coeff": self._bonding_coeff,
+                        "optimization_method": self._optimization_method,
+                        "volume_fraction": self._volume_fraction,
+                    }
+                    active_node.metadata[self._SETTINGS_METADATA_KEY] = json.dumps(settings)
+                    results_summary = {
+                        "max_stress": self._results.get("max_stress", 0),
+                        "min_stress": self._results.get("min_stress", 0),
+                        "safety_factor": self._results.get("safety_factor", 0),
+                        "iterations": self._results.get("iterations", 0),
+                        "converged": self._results.get("converged", False),
+                        "mesh_quality": self._results.get("mesh_quality", ""),
+                        "mesh_method": self._results.get("mesh_method", ""),
+                        "num_zones": len(self._results.get("zones", [])),
+                        "zone_densities": [z["density"] for z in self._results.get("zones", [])],
+                    }
+                    active_node.metadata[self._RESULTS_METADATA_KEY] = json.dumps(results_summary)
                 except Exception:
                     pass
 
     _last_overlay_cleanup = 0.0
-    _last_bc_metadata_check = 0.0
 
     def _cleanupOrphanedOverlays(self, *args) -> None:
         """Remove stress overlays whose parent model was deleted.
@@ -361,16 +397,14 @@ class FEAInfillExtension(QObject, Extension):
         Connected to sceneChanged — fires for each node as it's added/modified.
         This catches nodes that get their metadata restored asynchronously
         during workspace loading (after workspaceLoaded has already fired).
-        Throttled to at most once per second since sceneChanged fires very
-        frequently (mouse moves, rendering updates, etc.).
+        Uses a set-based guard (_restored_node_ids) instead of a time throttle
+        to ensure all models are restored even when events arrive close together.
         """
-        import time as _time
-        now = _time.monotonic()
-        if now - self._last_bc_metadata_check < 1.0:
-            return
-        self._last_bc_metadata_check = now
         if node is None or not isinstance(node, CuraSceneNode):
             return
+        node_id = id(node)
+        if node_id in self._restored_node_ids:
+            return  # already processed
         try:
             if not hasattr(node, "metadata"):
                 return
@@ -378,6 +412,7 @@ class FEAInfillExtension(QObject, Extension):
                 return
             # Already has BC decorator — skip
             if node.callDecoration("getBoundaryConditions") is not None:
+                self._restored_node_ids.add(node_id)
                 return
             import json
             from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
@@ -387,18 +422,24 @@ class FEAInfillExtension(QObject, Extension):
             decorator = FEABoundaryConditionDecorator()
             decorator.fromDict(bc_data)
             node.addDecorator(decorator)
+            self._restored_node_ids.add(node_id)
             Logger.log("d", "FEA Infill: Restored BCs for node '%s' via sceneChanged "
                        "(%d fixed, %d forces, %d torques)",
                        node.getName(), decorator.getFixedFaceCount(),
                        decorator.getForceGroupCount(), decorator.getTorqueGroupCount())
 
-            # Restore settings if present
+            # Restore settings and results into per-node state
+            node_key = str(node_id)
+            self._node_cache[node_key] = node
+
             if self._SETTINGS_METADATA_KEY in node.metadata:
                 self._restoreSettingsFromNode(node)
 
-            # Restore results summary if present
             if self._RESULTS_METADATA_KEY in node.metadata:
                 self._restoreResultsFromNode(node)
+
+            # Save the restored state as per-node state
+            self._saveCurrentStateForNode(node_key)
         except Exception:
             pass  # Silently ignore — this fires very frequently
 
@@ -419,8 +460,10 @@ class FEAInfillExtension(QObject, Extension):
                 continue
             if self._BC_METADATA_KEY not in node.metadata:
                 continue
+            node_id = id(node)
             # Already has a BC decorator — don't overwrite
             if node.callDecoration("getBoundaryConditions") is not None:
+                self._restored_node_ids.add(node_id)
                 continue
             try:
                 raw = node.metadata[self._BC_METADATA_KEY]
@@ -430,6 +473,7 @@ class FEAInfillExtension(QObject, Extension):
                 decorator = FEABoundaryConditionDecorator()
                 decorator.fromDict(bc_data)
                 node.addDecorator(decorator)
+                self._restored_node_ids.add(node_id)
                 Logger.log("d", "FEA Infill: Restored BCs for node '%s' (%d fixed, %d forces)",
                            node.getName(), decorator.getFixedFaceCount(),
                            decorator.getForceGroupCount())
@@ -438,12 +482,18 @@ class FEAInfillExtension(QObject, Extension):
                                     node.getName())
 
             # Restore analysis settings
+            node_key = str(node_id)
+            self._node_cache[node_key] = node
+
             if self._SETTINGS_METADATA_KEY in node.metadata:
                 self._restoreSettingsFromNode(node)
 
             # Restore results summary (puts plugin in review phase)
             if self._RESULTS_METADATA_KEY in node.metadata:
                 self._restoreResultsFromNode(node)
+
+            # Save restored state as per-node state
+            self._saveCurrentStateForNode(node_key)
 
     def _restoreSettingsFromNode(self, node) -> None:
         """Read fea_infill_settings from node.metadata and apply to extension state."""
@@ -489,6 +539,86 @@ class FEAInfillExtension(QObject, Extension):
         except Exception:
             Logger.logException("w", "FEA Infill: Failed to restore results for node '%s'",
                                 node.getName())
+
+    # -- Per-model state management --
+
+    def _saveCurrentStateForNode(self, node_key: str) -> None:
+        """Snapshot the current global analysis state into _per_node_state[node_key]."""
+        self._per_node_state[node_key] = {
+            "phase": self._phase,
+            "results": self._results,
+            "analysis_status": self._analysis_status,
+            "progress": self._progress,
+            "analysis_stage": self._analysis_stage,
+            "stress_overlay_visible": self._stress_overlay_visible,
+            "error_message": self._error_message,
+            "material_name": self._material_name,
+            "infill_pattern": self._infill_pattern,
+            "min_density": self._min_density,
+            "max_density": self._max_density,
+            "num_zones": self._num_zones,
+            "max_iterations": self._max_iterations,
+            "mesh_resolution": self._mesh_resolution,
+            "safety_factor": self._safety_factor,
+            "bonding_coeff": self._bonding_coeff,
+            "optimization_method": self._optimization_method,
+            "volume_fraction": self._volume_fraction,
+        }
+
+    def _loadStateForNode(self, node_key: str) -> None:
+        """Load per-node state into the global Extension properties.
+
+        If no per-node state exists (e.g. old project or new model), resets to defaults.
+        """
+        state = self._per_node_state.get(node_key, {})
+        self._phase = state.get("phase", "define")
+        self._results = state.get("results", None)
+        self._analysis_status = state.get("analysis_status", "idle")
+        self._progress = state.get("progress", 0.0)
+        self._analysis_stage = state.get("analysis_stage", "")
+        self._stress_overlay_visible = state.get("stress_overlay_visible", False)
+        self._error_message = state.get("error_message", "")
+        self._material_name = state.get("material_name", self._material_name)
+        self._infill_pattern = state.get("infill_pattern", self._infill_pattern)
+        self._min_density = state.get("min_density", self._min_density)
+        self._max_density = state.get("max_density", self._max_density)
+        self._num_zones = state.get("num_zones", self._num_zones)
+        self._max_iterations = state.get("max_iterations", self._max_iterations)
+        self._mesh_resolution = state.get("mesh_resolution", self._mesh_resolution)
+        self._safety_factor = state.get("safety_factor", self._safety_factor)
+        self._bonding_coeff = state.get("bonding_coeff", self._bonding_coeff)
+        self._optimization_method = state.get("optimization_method", self._optimization_method)
+        self._volume_fraction = state.get("volume_fraction", self._volume_fraction)
+
+    def _onSelectionChanged(self) -> None:
+        """Switch per-model analysis state when the user selects a different model."""
+        # Save current model's state
+        if self._active_node_key:
+            self._saveCurrentStateForNode(self._active_node_key)
+
+        # Determine the new selection
+        selected = Selection.getSelectedObject(0)
+        if selected is None or not isinstance(selected, CuraSceneNode):
+            return
+
+        new_key = str(id(selected))
+        if new_key == self._active_node_key:
+            return  # same model, no switch needed
+
+        self._active_node_key = new_key
+        self._node_cache[new_key] = selected
+
+        # Load the new model's state (defaults if none stored)
+        self._loadStateForNode(new_key)
+
+        # Emit all signals so QML refreshes
+        self.phaseChanged.emit()
+        self.resultsChanged.emit()
+        self.analysisStatusChanged.emit()
+        self.progressChanged.emit()
+        self.settingsChanged.emit()
+        self.errorMessageChanged.emit()
+        self.stressOverlayVisibleChanged.emit()
 
     # -- Phase management --
 
@@ -1029,6 +1159,9 @@ class FEAInfillExtension(QObject, Extension):
                         self.stressOverlayVisibleChanged.emit()
                     except Exception:
                         Logger.logException("w", "FEA Infill: Auto stress overlay failed")
+            # Save per-node state after analysis completes
+            if self._active_node_key:
+                self._saveCurrentStateForNode(self._active_node_key)
             self.phaseChanged.emit()
             self.analysisStatusChanged.emit()
             self.resultsChanged.emit()
@@ -1100,6 +1233,11 @@ class FEAInfillExtension(QObject, Extension):
         self._progress = 0.0
         self._error_message = ""
         self._stress_overlay_visible = False
+
+        # Update per-node state
+        if self._active_node_key:
+            self._saveCurrentStateForNode(self._active_node_key)
+
         self.phaseChanged.emit()
         self.analysisStatusChanged.emit()
         self.progressChanged.emit()
