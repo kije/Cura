@@ -95,7 +95,7 @@ class FEAInfillExtension(QObject, Extension):
         self._num_zones = 6
         self._infill_pattern = "gyroid"  # overridden by _syncInfillPatternFromCura
         self._max_iterations = 20
-        self._mesh_resolution = "medium"
+        self._mesh_resolution = 20  # divisor: 10=coarse, 20=balanced, 40=fine
         self._safety_factor = 2.0
         self._bonding_coeff = 0.5  # 50 % default; overridden by UI or material
         self._optimization_method = "heuristic"  # "heuristic" or "oc"

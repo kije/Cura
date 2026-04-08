@@ -1763,34 +1763,45 @@ Item
                         Layout.fillWidth: true
                         spacing: UM.Theme.getSize("default_margin").height / 4
 
-                        Repeater
+                        Slider
                         {
-                            model: [
-                                { label: catalog.i18nc("@option", "Fast (coarse)"),        value: "coarse"  },
-                                { label: catalog.i18nc("@option", "Balanced (medium)"),    value: "medium"  },
-                                { label: catalog.i18nc("@option", "Precise (fine)"),       value: "fine"    }
-                            ]
+                            id: meshResolutionSlider
+                            Layout.fillWidth: true
+                            from: 5
+                            to: 50
+                            stepSize: 1
+                            value: Number(toolProperties.getValue("MeshResolution") ?? 20)
+                            onMoved: UM.Controller.setProperty("MeshResolution", value)
+                        }
 
-                            RowLayout
+                        RowLayout
+                        {
+                            Layout.fillWidth: true
+                            UM.Label
                             {
-                                spacing: UM.Theme.getSize("default_margin").width / 2
-
-                                RadioButton
-                                {
-                                    checked: (toolProperties.getValue("MeshResolution") ?? "medium") === modelData.value
-                                    onClicked: UM.Controller.setProperty("MeshResolution", modelData.value)
+                                text: catalog.i18nc("@label", "Fast")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                            }
+                            Item { Layout.fillWidth: true }
+                            UM.Label
+                            {
+                                text: {
+                                    var v = meshResolutionSlider.value
+                                    if (v <= 12) return catalog.i18nc("@label", "~5K elements")
+                                    if (v <= 25) return catalog.i18nc("@label", "~15K elements")
+                                    if (v <= 35) return catalog.i18nc("@label", "~30K elements")
+                                    return catalog.i18nc("@label", "~50K+ elements")
                                 }
-
-                                UM.Label
-                                {
-                                    text: modelData.label
-                                    font: UM.Theme.getFont("default")
-                                    MouseArea
-                                    {
-                                        anchors.fill: parent
-                                        onClicked: UM.Controller.setProperty("MeshResolution", modelData.value)
-                                    }
-                                }
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_emphasis")
+                            }
+                            Item { Layout.fillWidth: true }
+                            UM.Label
+                            {
+                                text: catalog.i18nc("@label", "Precise")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
                             }
                         }
                     }

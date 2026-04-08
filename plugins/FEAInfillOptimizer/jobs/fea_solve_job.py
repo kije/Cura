@@ -86,8 +86,12 @@ class FEASolveJob(Job):
             Target element edge length.
         """
         resolution = self._config.get("mesh_resolution", "medium")
-        divisors = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}
-        divisor = divisors.get(resolution, 20.0)
+        # Support both legacy string values and numeric divisor
+        if isinstance(resolution, (int, float)):
+            divisor = max(5.0, min(50.0, float(resolution)))
+        else:
+            divisors = {"coarse": 10.0, "medium": 20.0, "fine": 40.0}
+            divisor = divisors.get(str(resolution), 20.0)
         return bbox_diag / divisor
 
     # ------------------------------------------------------------------

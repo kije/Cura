@@ -788,14 +788,19 @@ class BoundaryConditionTool(Tool):
             self._extension.safetyFactor = float(value)
         self.propertyChanged.emit()
 
-    def getMeshResolution(self) -> str:
+    def getMeshResolution(self):
         if self._extension:
             return self._extension._mesh_resolution
-        return "medium"
+        return 20
 
-    def setMeshResolution(self, value: str) -> None:
+    def setMeshResolution(self, value) -> None:
         if self._extension:
-            self._extension._mesh_resolution = str(value)
+            try:
+                self._extension._mesh_resolution = int(float(value))
+            except (ValueError, TypeError):
+                # Legacy string values
+                legacy = {"coarse": 10, "medium": 20, "fine": 40}
+                self._extension._mesh_resolution = legacy.get(str(value), 20)
         self.propertyChanged.emit()
 
     def getAnalysisProgress(self) -> float:
