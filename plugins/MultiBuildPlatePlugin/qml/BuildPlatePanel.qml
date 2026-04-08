@@ -186,7 +186,7 @@ Item
     Rectangle
     {
         id: panelRect
-        anchors.bottom: toggleButton.top
+        anchors.bottom: parent.bottom
         width:   parent.width
         visible: root.panelOpen
         height: visible
