@@ -17,6 +17,7 @@ from analysis.deformation_field import (
     _enforce_slope_constraint,
     _enforce_thickness_constraint,
     _enforce_floor_constraint,
+    _HAS_SCIPY_SPARSE,
 )
 
 
@@ -444,3 +445,119 @@ class TestQPSolver:
         # All corners should be zero
         assert field.displacements[:, 0, 0].sum() == pytest.approx(0.0, abs=0.01)
         assert field.displacements[:, 4, 4].sum() == pytest.approx(0.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Tests: QuickCurve solver (if scipy.sparse available)
+# ---------------------------------------------------------------------------
+
+class TestQuickCurveSolver:
+    """Tests for the QuickCurve least-squares deformation field solver."""
+
+    @pytest.fixture(autouse=True)
+    def _check_scipy(self):
+        if not _HAS_SCIPY_SPARSE:
+            pytest.skip("scipy.sparse not installed")
+
+    def test_quickcurve_flat_surface_zero_displacement(self):
+        """A flat surface at a layer boundary should yield near-zero displacement."""
+        z_vals = np.full((5, 5), 1.0)
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.ones((5, 5), dtype=np.bool_)
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=5, first_layer_z=0.2,
+            decay_distance=5.0,
+        )
+
+        assert np.max(np.abs(field.displacements)) == pytest.approx(0.0, abs=0.02)
+
+    def test_quickcurve_produces_smooth_surface(self):
+        """QuickCurve should produce a smoother field than raw surface displacement."""
+        rows, cols = 7, 7
+        z_vals = np.zeros((rows, cols))
+        for c in range(cols):
+            z_vals[:, c] = 0.85 + 0.05 * c
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.ones((rows, cols), dtype=np.bool_)
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=6, first_layer_z=0.2,
+            decay_distance=5.0,
+        )
+
+        # Should have nonzero displacement
+        assert np.max(np.abs(field.displacements)) > 0.01
+
+        # Gradient should be smooth (no sharp jumps between cells)
+        for k in range(field.num_layers):
+            d = field.displacements[k]
+            if d.shape[1] > 1:
+                dx = np.abs(np.diff(d, axis=1))
+                assert np.max(dx) < 0.5, f"Layer {k}: X gradient too steep"
+
+    def test_quickcurve_respects_safe_region(self):
+        """Displacement should be zero outside the safe region."""
+        rows, cols = 5, 5
+        z_vals = np.full((rows, cols), 1.1)
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.zeros((rows, cols), dtype=np.bool_)
+        safe[2, 2] = True
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=6, first_layer_z=0.2,
+            decay_distance=5.0,
+        )
+
+        assert field.displacements[:, 0, 0].sum() == pytest.approx(0.0, abs=0.01)
+        assert field.displacements[:, 4, 4].sum() == pytest.approx(0.0, abs=0.01)
+
+    def test_quickcurve_decay_with_depth(self):
+        """Deeper layers should have less displacement than surface layers."""
+        rows, cols = 3, 3
+        z_vals = np.full((rows, cols), 1.1)
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.ones((rows, cols), dtype=np.bool_)
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=10, first_layer_z=0.2,
+            decay_distance=2.0,
+        )
+
+        # Surface layer (idx ~4-5) should have more displacement than deep layer (idx 0)
+        surface_disp = abs(field.displacements[4, 1, 1])
+        deep_disp = abs(field.displacements[0, 1, 1])
+        assert deep_disp < surface_disp
+
+    def test_quickcurve_slope_enforcement(self):
+        """After QuickCurve solve, slope should respect max angle."""
+        rows, cols = 5, 5
+        z_vals = np.zeros((rows, cols))
+        # Create a steep step: one side at 0.5, other at 1.5
+        z_vals[:, :2] = 0.5
+        z_vals[:, 3:] = 1.5
+        z_vals[:, 2] = 1.0
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.ones((rows, cols), dtype=np.bool_)
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=8, first_layer_z=0.2,
+            decay_distance=5.0,
+            max_angle_deg=30.0,
+        )
+
+        # Check that XY gradient doesn't exceed slope limit
+        max_slope = math.tan(math.radians(30.0))
+        max_delta = max_slope * 1.0  # resolution = 1.0mm
+        for k in range(field.num_layers):
+            d = field.displacements[k]
+            if d.shape[1] > 1:
+                dx = np.abs(np.diff(d, axis=1))
+                # Allow some tolerance for the LS solution + enforcement
+                assert np.max(dx) <= max_delta + 0.05, \
+                    f"Layer {k}: slope violation (max dx={np.max(dx):.3f}, limit={max_delta:.3f})"

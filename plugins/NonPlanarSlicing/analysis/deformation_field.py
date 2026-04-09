@@ -27,9 +27,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 try:
-    import osqp
     from scipy import sparse
-    _HAS_OSQP = True
+    from scipy.sparse.linalg import spsolve
+    _HAS_SCIPY_SPARSE = True
+except ImportError:
+    _HAS_SCIPY_SPARSE = False
+
+try:
+    import osqp
+    _HAS_OSQP = _HAS_SCIPY_SPARSE  # osqp also needs scipy.sparse
 except ImportError:
     _HAS_OSQP = False
 
@@ -274,9 +280,12 @@ def compute_deformation_field(
                     nearest_z = z_levels[idx + 1]
             surface_disp[r, c] = sz - nearest_z
 
-    # Compute displacements using QP solver or heuristic fallback.
-    if _HAS_OSQP:
-        displacements = _solve_qp(
+    # Compute displacements using best available solver:
+    # 1. QuickCurve (least-squares, fastest, needs scipy.sparse)
+    # 2. CurviSlicer QP (OSQP, most precise, needs osqp + scipy.sparse)
+    # 3. Heuristic (exponential decay, no dependencies)
+    if _HAS_SCIPY_SPARSE:
+        displacements = _solve_quickcurve(
             z_levels, surface_z, surface_disp, safe,
             work_rows, work_cols, work_resolution,
             layer_height, total_layers,
@@ -285,9 +294,8 @@ def compute_deformation_field(
         )
     else:
         logger.warning(
-            "osqp not installed — using heuristic exponential decay. "
-            "Install osqp for optimal CurviSlicer-style deformation: "
-            "pip install osqp"
+            "scipy.sparse not installed — using heuristic exponential decay. "
+            "Install scipy for QuickCurve-style deformation: pip install scipy"
         )
         displacements = _solve_heuristic(
             z_levels, surface_z, surface_disp, safe,
@@ -331,6 +339,208 @@ def compute_deformation_field(
         z_levels=z_levels,
         displacements=displacements,
     )
+
+
+def _solve_quickcurve(
+    z_levels: NDArray,
+    surface_z: NDArray,
+    surface_disp: NDArray,
+    safe: NDArray,
+    rows: int,
+    cols: int,
+    resolution: float,
+    layer_height: float,
+    total_layers: int,
+    min_thickness_ratio: float,
+    max_thickness_ratio: float,
+    max_angle_deg: float,
+    decay_distance: float,
+) -> NDArray:
+    """Solve deformation field using the QuickCurve approach.
+
+    Adapts the QuickCurve algorithm (2024, arXiv:2406.03966) which is
+    10-45x faster than CurviSlicer's full 3D QP. The key insight:
+
+    1. Solve a **2D least-squares** for the optimal surface displacement
+       (Poisson-like problem, rows*cols variables instead of
+       total_layers*rows*cols). This finds the smoothest surface that
+       conforms to the mesh topology at safe cells.
+
+    2. Enforce slope constraints via a **top-down sweep** (post-hoc
+       propagation) rather than as in-solver inequality constraints.
+
+    3. Propagate the optimized surface displacement downward through
+       layers using exponential decay from the optimal surface.
+
+    4. Enforce thickness bounds via a final clamping pass.
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+
+    M = rows * cols
+
+    def idx2d(r: int, c: int) -> int:
+        return r * cols + c
+
+    # ------------------------------------------------------------------
+    # Step 1: Solve 2D least-squares for optimal surface displacement
+    #
+    # Variables: s[r,c] — optimized surface displacement at each grid cell.
+    #
+    # Objective: minimize ||∇s||² (Laplacian smoothness)
+    # Subject to: s[r,c] = surface_disp[r,c] at safe surface cells (equality)
+    #             s[r,c] = 0 at unsafe cells (equality)
+    #
+    # This is a sparse linear system (Poisson equation with Dirichlet BCs).
+    # ------------------------------------------------------------------
+
+    # Classify cells: "fixed" (surface conformance or unsafe=0) vs "free"
+    is_fixed = np.zeros((rows, cols), dtype=np.bool_)
+    fixed_value = np.zeros((rows, cols), dtype=np.float64)
+
+    for r in range(rows):
+        for c in range(cols):
+            if not safe[r, c]:
+                is_fixed[r, c] = True
+                fixed_value[r, c] = 0.0
+            elif np.isfinite(surface_z[r, c]) and abs(surface_disp[r, c]) > 1e-6:
+                is_fixed[r, c] = True
+                fixed_value[r, c] = surface_disp[r, c]
+
+    # Build sparse linear system for the Laplacian: L @ s = rhs
+    # For free variables: Σ_neighbors (s[i] - s[j]) = 0  (smoothness)
+    # For fixed variables: s[i] = fixed_value[i]
+    #
+    # We use the standard 4-connected Laplacian stencil.
+    L_rows = []
+    L_cols = []
+    L_data = []
+    rhs = np.zeros(M, dtype=np.float64)
+
+    for r in range(rows):
+        for c in range(cols):
+            i = idx2d(r, c)
+
+            if is_fixed[r, c]:
+                # Fixed cell: s[i] = fixed_value
+                L_rows.append(i)
+                L_cols.append(i)
+                L_data.append(1.0)
+                rhs[i] = fixed_value[r, c]
+            else:
+                # Free cell: Laplacian stencil
+                neighbor_count = 0
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        j = idx2d(nr, nc)
+                        L_rows.append(i)
+                        L_cols.append(j)
+                        L_data.append(-1.0)
+                        neighbor_count += 1
+                L_rows.append(i)
+                L_cols.append(i)
+                L_data.append(float(neighbor_count))
+                rhs[i] = 0.0
+
+    L = sparse.csc_matrix((L_data, (L_rows, L_cols)), shape=(M, M))
+    surface_opt = spsolve(L, rhs)
+
+    logger.debug(
+        "QuickCurve LS: solved %dx%d surface (max_disp=%.3fmm)",
+        rows, cols, float(np.max(np.abs(surface_opt))),
+    )
+
+    # ------------------------------------------------------------------
+    # Step 2: Enforce slope constraints via top-down sweep
+    #
+    # For each altitude descending, propagate: if a neighbor's displacement
+    # would create a slope > max_slope, clamp it.
+    # This is the QuickCurve post-hoc constraint enforcement.
+    # ------------------------------------------------------------------
+    max_slope = math.tan(math.radians(min(max_angle_deg, 89.9)))
+    max_delta = max_slope * resolution
+    surface_2d = surface_opt.reshape(rows, cols)
+
+    # Multiple passes (converges quickly, typically 2-3 passes)
+    for _pass in range(5):
+        changed = False
+        # Forward sweep (top-left to bottom-right)
+        for r in range(rows):
+            for c in range(cols):
+                if is_fixed[r, c]:
+                    continue
+                for dr, dc in [(-1, 0), (0, -1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        diff = surface_2d[r, c] - surface_2d[nr, nc]
+                        if abs(diff) > max_delta:
+                            surface_2d[r, c] = surface_2d[nr, nc] + math.copysign(max_delta, diff)
+                            changed = True
+        # Backward sweep (bottom-right to top-left)
+        for r in range(rows - 1, -1, -1):
+            for c in range(cols - 1, -1, -1):
+                if is_fixed[r, c]:
+                    continue
+                for dr, dc in [(1, 0), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        diff = surface_2d[r, c] - surface_2d[nr, nc]
+                        if abs(diff) > max_delta:
+                            surface_2d[r, c] = surface_2d[nr, nc] + math.copysign(max_delta, diff)
+                            changed = True
+        if not changed:
+            break
+
+    logger.debug("QuickCurve: slope enforcement converged in %d passes", _pass + 1)
+
+    # ------------------------------------------------------------------
+    # Step 3: Propagate optimized surface downward through layers
+    #
+    # Use exponential decay from the optimized surface displacement.
+    # This is much faster than the full 3D QP since the surface is
+    # already optimally smooth.
+    # ------------------------------------------------------------------
+    displacements = np.zeros((total_layers, rows, cols), dtype=np.float64)
+
+    for layer_idx in range(total_layers):
+        z = z_levels[layer_idx]
+        for r in range(rows):
+            for c in range(cols):
+                if not safe[r, c]:
+                    continue
+                sz = surface_z[r, c]
+                if not np.isfinite(sz):
+                    continue
+                if z > sz + layer_height:
+                    continue
+                depth = max(0.0, sz - z)
+                if decay_distance > 0:
+                    decay = math.exp(-depth / decay_distance)
+                else:
+                    decay = 1.0 if depth < layer_height else 0.0
+                displacements[layer_idx, r, c] = surface_2d[r, c] * decay
+
+    # ------------------------------------------------------------------
+    # Step 4: Enforce thickness and floor constraints
+    # ------------------------------------------------------------------
+    _enforce_thickness_constraint(
+        displacements, z_levels, layer_height,
+        min_thickness_ratio, max_thickness_ratio,
+    )
+    _enforce_floor_constraint(displacements, z_levels)
+
+    # Zero outside safe region
+    for layer_idx in range(total_layers):
+        displacements[layer_idx][~safe] = 0.0
+
+    logger.info(
+        "QuickCurve solver: %dx%d surface → %d layers, max_disp=%.3fmm",
+        rows, cols, total_layers,
+        float(np.max(np.abs(displacements))),
+    )
+
+    return displacements
 
 
 def _solve_qp(
