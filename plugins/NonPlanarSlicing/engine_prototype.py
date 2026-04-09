@@ -45,6 +45,7 @@ SLOT_VERSION = "0.1.0-alpha"
 
 # Features that should NOT be inverse-transformed.
 SKIP_FEATURES = frozenset([
+    printfeatures_pb2.NONETYPE,
     printfeatures_pb2.SUPPORT,
     printfeatures_pb2.SKIRTBRIM,
     printfeatures_pb2.SUPPORTINFILL,
@@ -258,10 +259,14 @@ class BroadcastServicer(broadcast_pb2_grpc.BroadcastServiceServicer):
                 val = value_bytes.decode("utf-8", errors="replace").strip()
                 self._settings.enabled = val.lower() in ("true", "1", "yes")
             elif name == "nonplanar_deformation_field":
-                if value_bytes:
+                # Value is a file path (string), not binary data.
+                # The Python extension writes the NPDF binary to a file
+                # and passes the path through the settings broadcast.
+                path = value_bytes.decode("utf-8", errors="replace").strip()
+                if path:
                     try:
-                        # Try zstd decompression first
-                        raw = self._try_decompress(value_bytes)
+                        with open(path, "rb") as f:
+                            raw = f.read()
                         self._settings.deformation_field = DeformationField.from_bytes(raw)
                         logger.info(
                             "Loaded deformation field: %d layers, %dx%d grid",
@@ -271,26 +276,6 @@ class BroadcastServicer(broadcast_pb2_grpc.BroadcastServiceServicer):
                         )
                     except Exception as e:
                         logger.error("Failed to load deformation field: %s", e)
-
-    @staticmethod
-    def _try_decompress(data: bytes) -> bytes:
-        """Try zstd decompression, fall back to raw data."""
-        if data[:4] == b"\x28\xB5\x2F\xFD":
-            try:
-                import zstandard
-                dctx = zstandard.ZstdDecompressor()
-                return dctx.decompress(data)
-            except ImportError:
-                try:
-                    import zstd
-                    return zstd.decompress(data)
-                except ImportError:
-                    raise RuntimeError(
-                        "zstd decompression needed but neither "
-                        "zstandard nor zstd package is installed"
-                    )
-        return data
-
 
 class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
     """Applies inverse deformation to path Z coordinates."""

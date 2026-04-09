@@ -8,6 +8,7 @@ import os
 import collections
 import logging
 import struct
+import tempfile
 import time
 import weakref
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
@@ -655,22 +656,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
         )
         z_levels = field.z_levels.astype(numpy.float32).tobytes()
         displacements = field.displacements.astype(numpy.float32).tobytes()
-        raw = header + z_levels + displacements
-
-        # Try zstd compression (optional dependency)
-        try:
-            import zstandard
-            return zstandard.ZstdCompressor(level=3).compress(raw)
-        except ImportError:
-            pass
-        try:
-            import zstd
-            return zstd.compress(raw, 3)
-        except ImportError:
-            pass
-
-        # No compression available — send raw
-        return raw
+        return header + z_levels + displacements
 
     # -------------------------------------------------------------------------
     # Mesh Deformation (pre-slicing) & Engine Plugin Integration
@@ -698,22 +684,33 @@ class NonPlanarSlicingExtension(QObject, Extension):
             from .analysis.mesh_deformer import deform_mesh_vertices
 
             app = Application.getInstance()
+            scene = app.getController().getScene()
             backend = app.getBackend()
-            scene = backend._scene if backend is not None else None
-            if scene is None:
-                return
 
             deformation_field = analysis_result.deformation_field
 
-            # Serialize the deformation field for the engine plugin.
+            # Serialize the deformation field to a temp file.
+            # Binary data cannot survive the settings broadcast pipeline
+            # (str() serialization corrupts bytes), so we write to a file
+            # and pass the path as a string setting.
             try:
                 field_bytes = self._serialize_deformation_field(deformation_field)
                 Logger.log("i", "Serialized deformation field: %d bytes", len(field_bytes))
 
-                # Store as a setting value for broadcast to the engine plugin.
+                from UM.Resources import Resources
+                field_path = os.path.join(
+                    Resources.getDataStoragePath(),
+                    "nonplanar_deformation_field.bin",
+                )
+                with open(field_path, "wb") as f:
+                    f.write(field_bytes)
+
+                # Store the file path as a setting for broadcast to the
+                # engine plugin. String settings survive the str() pipeline.
                 stack = self._getGlobalStack()
                 if stack is not None:
-                    stack.setProperty("nonplanar_deformation_field", "value", field_bytes)
+                    stack.setProperty("nonplanar_deformation_field", "value", field_path)
+                    Logger.log("i", "Deformation field written to %s", field_path)
             except Exception:
                 Logger.logException("e", "Failed to serialize deformation field")
 
@@ -782,8 +779,8 @@ class NonPlanarSlicingExtension(QObject, Extension):
             return
 
         app = Application.getInstance()
+        scene = app.getController().getScene()
         backend = app.getBackend()
-        scene = backend._scene if backend is not None else None
 
         # Suppress sceneChanged during restoration.
         if scene is not None and backend is not None:
@@ -802,7 +799,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     Logger.logException("w", "Failed to restore mesh for node %s", node_id)
 
             if restored > 0:
-                Logger.log("i", "curvislicer_mesh: restored %d original meshes", restored)
+                Logger.log("i", "Non-planar: restored %d original meshes", restored)
         finally:
             self._mesh_swap_originals.clear()
             self._mesh_swap_active = False
@@ -828,11 +825,11 @@ class NonPlanarSlicingExtension(QObject, Extension):
         except ImportError:
             return
 
-        if state == BackendState.Done:
-            # Restore original meshes after slicing completes
+        if state in (BackendState.Done, BackendState.Error, BackendState.Disabled):
+            # Restore original meshes after slicing completes (or fails)
             if self._mesh_swap_active:
                 self._restoreMeshes()
-                Logger.log("i", "Non-planar: restored original meshes after slicing")
+                Logger.log("i", "Non-planar: restored original meshes (state=%s)", state)
 
     # -------------------------------------------------------------------------
     # Overlay Visualization
@@ -1175,8 +1172,17 @@ class _AnalysisJob(Job):
         try:
             from .analysis.deformation_field import compute_deformation_field
 
-            # Estimate total layers from height map Z range.
-            lh = 0.2  # Reasonable default layer height for analysis.
+            # Get layer height from print profile (fall back to 0.2mm)
+            lh = 0.2
+            try:
+                from cura.CuraApplication import CuraApplication
+                stack = CuraApplication.getInstance().getGlobalContainerStack()
+                if stack is not None:
+                    profile_lh = stack.getProperty("layer_height", "value")
+                    if profile_lh is not None and float(profile_lh) > 0:
+                        lh = float(profile_lh)
+            except Exception:
+                pass  # Use default if Cura is not available (e.g. in tests)
             z_vals = height_map.z_values
             finite_z = z_vals[numpy.isfinite(z_vals)]
             if finite_z.size > 0:

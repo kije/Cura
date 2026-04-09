@@ -49,27 +49,11 @@ fn slot_metadata() -> tonic::metadata::MetadataMap {
 #[derive(Debug, Clone, Default)]
 struct NonPlanarSettings {
     enabled: bool,
-    /// Compressed NPDF binary for the deformation field.
+    /// Raw NPDF binary for the deformation field (loaded from file).
     deformation_field_data: Option<Vec<u8>>,
 }
 
 type SharedSettings = Arc<Mutex<NonPlanarSettings>>;
-
-/// Decompress zstd-compressed data.
-fn zstd_decompress(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // Simple zstd frame decompression without external dependency.
-    // The zstd format starts with magic 0xFD2FB528.
-    // For simplicity, we use a minimal decoder or pass-through if not compressed.
-    if data.len() >= 4 && data[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
-        // This is zstd-compressed. Use frame content size for allocation.
-        // In production, we'd use the zstd crate. For now, we support
-        // both compressed and raw NPDF data.
-        Err("zstd decompression requires the zstd crate; send raw NPDF data instead".into())
-    } else {
-        // Not compressed — assume raw NPDF format
-        Ok(data.to_vec())
-    }
-}
 
 fn parse_settings(
     s: &mut NonPlanarSettings,
@@ -82,13 +66,21 @@ fn parse_settings(
                 s.enabled = matches!(val.as_str(), "true" | "1" | "True" | "yes");
             }
             "nonplanar_deformation_field" => {
-                // Binary data — the deformation field (may be compressed)
-                if !value_bytes.is_empty() {
-                    s.deformation_field_data = Some(value_bytes.clone());
-                    info!(
-                        "Received deformation field: {} bytes",
-                        value_bytes.len()
-                    );
+                // This is a file path (string) to the NPDF binary.
+                // The Python side writes the binary to a temp file and passes
+                // the path as a setting, because binary data cannot survive
+                // the str() serialization in the settings broadcast pipeline.
+                let path = String::from_utf8_lossy(value_bytes).trim().to_string();
+                if !path.is_empty() {
+                    match std::fs::read(&path) {
+                        Ok(data) => {
+                            info!("Loaded deformation field from {}: {} bytes", path, data.len());
+                            s.deformation_field_data = Some(data);
+                        }
+                        Err(e) => {
+                            warn!("Failed to read deformation field from {}: {}", path, e);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -161,20 +153,8 @@ impl proto::broadcast::broadcast_service_server::BroadcastService for BroadcastS
             wasm.set_enabled(s.enabled);
 
             if let Some(field_data) = &s.deformation_field_data {
-                // Try to decompress, fall back to raw
-                let raw_data = match zstd_decompress(field_data) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        // Check if it's already raw NPDF format
-                        if field_data.len() >= 4 && &field_data[0..4] == b"NPDF" {
-                            info!("Deformation field is already raw NPDF format");
-                            field_data.clone()
-                        } else {
-                            warn!("Failed to decompress deformation field: {}", e);
-                            vec![]
-                        }
-                    }
-                };
+                // Data is raw NPDF binary (loaded from file in parse_settings).
+                let raw_data = field_data.clone();
 
                 if !raw_data.is_empty() {
                     match wasm.set_deformation_field(&raw_data) {

@@ -162,6 +162,16 @@
             "settable_per_mesh": false,
             "settable_per_extruder": false,
             "settable_per_meshgroup": false
+        },
+        "nonplanar_deformation_field": {
+            "label": "Non-Planar Deformation Field (internal)",
+            "description": "File path to the serialized deformation field binary. Set automatically by the plugin before slicing. Do not edit.",
+            "type": "str",
+            "default_value": "",
+            "enabled": false,
+            "settable_per_mesh": false,
+            "settable_per_extruder": false,
+            "settable_per_meshgroup": false
         }
     }
 }

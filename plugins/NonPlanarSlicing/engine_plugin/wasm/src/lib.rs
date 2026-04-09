@@ -39,11 +39,15 @@ const MOVEWHILERETRACTING: i32 = 12;
 const MOVEWHILEUNRETRACTING: i32 = 13;
 const STATIONARYRETRACTUNRETRACT: i32 = 14;
 
+/// PrintFeature 0 = unset/unknown in protobuf3, should not be transformed.
+const NONETYPE: i32 = 0;
+
 /// Returns true if this feature should have its Z coordinates transformed.
 fn is_transformable_feature(feature: i32) -> bool {
     !matches!(
         feature,
-        SUPPORT
+        NONETYPE
+            | SUPPORT
             | SKIRTBRIM
             | SUPPORTINFILL
             | MOVEUNRETRACTED
@@ -283,11 +287,56 @@ impl DeformationField {
 const MIN_FLOW_RATIO: f64 = 0.5;
 const MAX_FLOW_RATIO: f64 = 2.0;
 
+/// Maximum segment length (microns) for subdivision before Z transform.
+/// All references (CurviSlicer: 0.8mm, RotBot: 1-2mm) recommend subdivision
+/// to accurately follow curved deformation fields.
+const MAX_SEGMENT_LENGTH_UM: i64 = 800; // 0.8mm, matching CurviSlicer
+
+/// Subdivide path segments longer than MAX_SEGMENT_LENGTH_UM.
+///
+/// This is critical for accuracy: without subdivision, long straight
+/// segments between two inverse-transformed endpoints would cut through
+/// the curved deformation field instead of following it.
+fn subdivide_path(points: &[proto::Point3d]) -> Vec<proto::Point3d> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+
+    let mut result = Vec::with_capacity(points.len() * 2);
+    result.push(points[0].clone());
+
+    for i in 1..points.len() {
+        let a = &points[i - 1];
+        let b = &points[i];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dist_sq = dx * dx + dy * dy;
+        let dist = (dist_sq as f64).sqrt() as i64;
+
+        if dist > MAX_SEGMENT_LENGTH_UM {
+            let n_segments = ((dist + MAX_SEGMENT_LENGTH_UM - 1) / MAX_SEGMENT_LENGTH_UM).max(2);
+            let dz = b.z - a.z;
+            for j in 1..n_segments {
+                let t = j as f64 / n_segments as f64;
+                result.push(proto::Point3d {
+                    x: a.x + (dx as f64 * t).round() as i64,
+                    y: a.y + (dy as f64 * t).round() as i64,
+                    z: a.z + (dz as f64 * t).round() as i64,
+                });
+            }
+        }
+        result.push(b.clone());
+    }
+
+    result
+}
+
 /// Apply inverse deformation to all path points.
 ///
-/// For each printable path, transforms Z coordinates from the deformed
-/// (flattened) space back to the original curved space. Also adjusts
-/// flow_ratio to compensate for varying layer thickness.
+/// For each printable path:
+/// 1. Subdivide long segments for accurate surface following
+/// 2. Inverse-transform Z coordinates from deformed to original space
+/// 3. Adjust flow_ratio per segment for thickness compensation
 pub fn modify_paths(
     mut paths: Vec<proto::GCodePath>,
     _layer_nr: i64,
@@ -307,26 +356,40 @@ pub fn modify_paths(
             continue;
         }
 
-        // Compute average thickness ratio for flow adjustment.
-        // Compare deformed layer gap to original layer gap at path midpoint.
-        let mid_idx = open_path.path.len() / 2;
-        let mid_pt = &open_path.path[mid_idx];
-        let mid_x = mid_pt.x as f64 / 1000.0;
-        let mid_y = mid_pt.y as f64 / 1000.0;
-        let mid_z = mid_pt.z as f64 / 1000.0;
+        // Step 1: Subdivide long segments
+        open_path.path = subdivide_path(&open_path.path);
 
-        let disp_here = field.interpolate(mid_x, mid_y, mid_z);
-        // Displacement gradient along Z approximates thickness change
-        let eps = 0.001;
-        let disp_above = field.interpolate(mid_x, mid_y, mid_z + eps);
-        let thickness_scale = 1.0 + (disp_above - disp_here) / eps;
+        // Step 2: Compute flow adjustment from average thickness ratio.
+        // Sample displacement gradient at multiple points along the path
+        // for better accuracy than a single midpoint sample.
+        let sample_count = open_path.path.len().min(10).max(1);
+        let step = open_path.path.len() / sample_count;
+        let mut total_thickness_scale = 0.0;
+        let mut samples = 0;
 
-        if thickness_scale > 0.0 {
-            let ratio = thickness_scale.clamp(MIN_FLOW_RATIO, MAX_FLOW_RATIO);
+        for idx in (0..open_path.path.len()).step_by(step.max(1)) {
+            let pt = &open_path.path[idx];
+            let px = pt.x as f64 / 1000.0;
+            let py = pt.y as f64 / 1000.0;
+            let pz = pt.z as f64 / 1000.0;
+
+            let disp_here = field.interpolate(px, py, pz);
+            let eps = 0.001;
+            let disp_above = field.interpolate(px, py, pz + eps);
+            let scale = 1.0 + (disp_above - disp_here) / eps;
+            if scale > 0.0 {
+                total_thickness_scale += scale;
+                samples += 1;
+            }
+        }
+
+        if samples > 0 {
+            let avg_scale = total_thickness_scale / samples as f64;
+            let ratio = avg_scale.clamp(MIN_FLOW_RATIO, MAX_FLOW_RATIO);
             path.flow_ratio *= ratio;
         }
 
-        // Inverse-transform Z for every point
+        // Step 3: Inverse-transform Z for every point
         for point in &mut open_path.path {
             let x_mm = point.x as f64 / 1000.0;
             let y_mm = point.y as f64 / 1000.0;
