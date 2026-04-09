@@ -297,7 +297,7 @@ const MAX_SEGMENT_LENGTH_UM: i64 = 800; // 0.8mm, matching CurviSlicer
 /// This is critical for accuracy: without subdivision, long straight
 /// segments between two inverse-transformed endpoints would cut through
 /// the curved deformation field instead of following it.
-fn subdivide_path(points: &[proto::Point3d]) -> Vec<proto::Point3d> {
+fn subdivide_path(points: &[proto::Point3D]) -> Vec<proto::Point3D> {
     if points.len() < 2 {
         return points.to_vec();
     }
@@ -318,7 +318,7 @@ fn subdivide_path(points: &[proto::Point3d]) -> Vec<proto::Point3d> {
             let dz = b.z - a.z;
             for j in 1..n_segments {
                 let t = j as f64 / n_segments as f64;
-                result.push(proto::Point3d {
+                result.push(proto::Point3D {
                     x: a.x + (dx as f64 * t).round() as i64,
                     y: a.y + (dy as f64 * t).round() as i64,
                     z: a.z + (dz as f64 * t).round() as i64,
