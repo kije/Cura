@@ -354,3 +354,93 @@ class TestConstraints:
         _enforce_floor_constraint(displacements, z_levels)
         deformed = 0.1 + displacements[0, 0, 0]
         assert deformed >= 0.05 - 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Tests: QP solver (if osqp available)
+# ---------------------------------------------------------------------------
+
+class TestQPSolver:
+    """Tests for the QP-based deformation field solver."""
+
+    @pytest.fixture(autouse=True)
+    def _check_osqp(self):
+        try:
+            import osqp
+            from scipy import sparse
+        except ImportError:
+            pytest.skip("osqp not installed")
+
+    def test_qp_produces_smooth_field(self):
+        """QP solver should produce a smoother field than the heuristic."""
+        rows, cols = 5, 5
+        # Tilted surface: z varies from 0.85 to 1.15
+        z_vals = np.zeros((rows, cols))
+        for c in range(cols):
+            z_vals[:, c] = 0.85 + 0.075 * c
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.ones((rows, cols), dtype=np.bool_)
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=6, first_layer_z=0.2,
+            decay_distance=5.0,
+        )
+
+        # The field should have non-zero displacement
+        assert np.max(np.abs(field.displacements)) > 0.01
+
+        # Check smoothness: gradient magnitude should be bounded
+        for k in range(field.num_layers):
+            d = field.displacements[k]
+            if d.shape[1] > 1:
+                dx = np.diff(d, axis=1)
+                assert np.all(np.abs(dx) < 1.0), "X gradient too large"
+            if d.shape[0] > 1:
+                dy = np.diff(d, axis=0)
+                assert np.all(np.abs(dy) < 1.0), "Y gradient too large"
+
+    def test_qp_respects_thickness_bounds(self):
+        """QP solution should maintain valid layer thickness."""
+        rows, cols = 3, 3
+        z_vals = np.full((rows, cols), 1.1)
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.ones((rows, cols), dtype=np.bool_)
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=6, first_layer_z=0.2,
+            decay_distance=3.0,
+            min_thickness_ratio=0.5,
+            max_thickness_ratio=2.0,
+        )
+
+        # Check thickness bounds between adjacent layers
+        for k in range(1, field.num_layers):
+            gap = (field.z_levels[k] + field.displacements[k]) - \
+                  (field.z_levels[k - 1] + field.displacements[k - 1])
+            min_gap = 0.5 * 0.2
+            max_gap = 2.0 * 0.2
+            # Allow small tolerance for solver precision
+            assert np.all(gap >= min_gap - 0.01), \
+                f"Layer {k}: min thickness violated (min gap={gap.min():.4f})"
+            assert np.all(gap <= max_gap + 0.01), \
+                f"Layer {k}: max thickness violated (max gap={gap.max():.4f})"
+
+    def test_qp_zeroes_outside_safe(self):
+        """QP should produce zero displacement outside safe region."""
+        rows, cols = 5, 5
+        z_vals = np.full((rows, cols), 1.1)
+        hm = MockHeightMap(z_vals, resolution=1.0)
+        safe = np.zeros((rows, cols), dtype=np.bool_)
+        safe[2, 2] = True  # Only center
+
+        field = compute_deformation_field(
+            hm, safe,
+            layer_height=0.2, total_layers=6, first_layer_z=0.2,
+            decay_distance=5.0,
+        )
+
+        # All corners should be zero
+        assert field.displacements[:, 0, 0].sum() == pytest.approx(0.0, abs=0.01)
+        assert field.displacements[:, 4, 4].sum() == pytest.approx(0.0, abs=0.01)

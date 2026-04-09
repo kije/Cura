@@ -1,18 +1,17 @@
-"""Deformation field computation for CurviSlicer-style extended non-planar slicing.
+"""Deformation field computation for non-planar slicing.
 
 Computes a smooth 3D deformation field that propagates surface curvature
-downward through the part with exponential decay.  Unlike standard
-non-planar slicing which only bends the top N layers, this module
-curves ALL layers proportionally to their depth from the surface.
+downward through the part.  Two solvers are available:
 
-The algorithm:
-  1. From the height map, compute per-cell surface displacement
-     (delta between surface Z and nearest nominal layer Z).
-  2. Propagate displacement downward with exponential decay.
-  3. Enforce constraints: slope limits, thickness bounds, floor
-     safety, and safe-region masking.
+1. **QP solver** (default): Formulates the deformation as a sparse
+   constrained quadratic program (CurviSlicer, Étienne et al., SIGGRAPH
+   2019). Minimizes displacement smoothness (L2 gradient) subject to
+   surface conformance, layer thickness bounds, slope limits, and floor
+   safety. Requires the ``osqp`` package.
 
-Inspired by CurviSlicer (Étienne et al., SIGGRAPH 2019).
+2. **Heuristic solver** (fallback): Propagates surface displacement
+   downward with exponential decay and enforces constraints via
+   one-pass clamping. Used when ``osqp`` is not installed.
 
 Copyright (c) 2024 Cura Non-Planar Contributors
 Non-Planar Slicing Plugin is released under the terms of the LGPLv3 or higher.
@@ -26,6 +25,13 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+
+try:
+    import osqp
+    from scipy import sparse
+    _HAS_OSQP = True
+except ImportError:
+    _HAS_OSQP = False
 
 logger = logging.getLogger(__name__)
 
@@ -268,41 +274,28 @@ def compute_deformation_field(
                     nearest_z = z_levels[idx + 1]
             surface_disp[r, c] = sz - nearest_z
 
-    # Propagate displacement downward with exponential decay.
-    displacements = np.zeros((total_layers, work_rows, work_cols), dtype=np.float64)
-
-    for layer_idx in range(total_layers):
-        z = z_levels[layer_idx]
-        for r in range(work_rows):
-            for c in range(work_cols):
-                sz = surface_z[r, c]
-                if not np.isfinite(sz) or not safe[r, c]:
-                    continue
-                if z > sz + layer_height:
-                    # Above the surface: no displacement.
-                    continue
-                depth = sz - z
-                if depth < 0:
-                    depth = 0.0
-                if decay_distance > 0:
-                    decay = math.exp(-depth / decay_distance)
-                else:
-                    decay = 1.0 if depth < layer_height else 0.0
-                displacements[layer_idx, r, c] = surface_disp[r, c] * decay
-
-    # Enforce constraints.
-    _enforce_slope_constraint(
-        displacements, z_levels, work_resolution, max_angle_deg,
-    )
-    _enforce_thickness_constraint(
-        displacements, z_levels, layer_height,
-        min_thickness_ratio, max_thickness_ratio,
-    )
-    _enforce_floor_constraint(displacements, z_levels)
-
-    # Zero out displacement outside safe region.
-    for layer_idx in range(total_layers):
-        displacements[layer_idx][~safe] = 0.0
+    # Compute displacements using QP solver or heuristic fallback.
+    if _HAS_OSQP:
+        displacements = _solve_qp(
+            z_levels, surface_z, surface_disp, safe,
+            work_rows, work_cols, work_resolution,
+            layer_height, total_layers,
+            min_thickness_ratio, max_thickness_ratio,
+            max_angle_deg, decay_distance,
+        )
+    else:
+        logger.warning(
+            "osqp not installed — using heuristic exponential decay. "
+            "Install osqp for optimal CurviSlicer-style deformation: "
+            "pip install osqp"
+        )
+        displacements = _solve_heuristic(
+            z_levels, surface_z, surface_disp, safe,
+            work_rows, work_cols,
+            layer_height, total_layers,
+            decay_distance, work_resolution, max_angle_deg,
+            min_thickness_ratio, max_thickness_ratio,
+        )
 
     # If we used coarser resolution, upsample back to height map grid.
     if work_resolution > hm_resolution:
@@ -338,6 +331,316 @@ def compute_deformation_field(
         z_levels=z_levels,
         displacements=displacements,
     )
+
+
+def _solve_qp(
+    z_levels: NDArray,
+    surface_z: NDArray,
+    surface_disp: NDArray,
+    safe: NDArray,
+    rows: int,
+    cols: int,
+    resolution: float,
+    layer_height: float,
+    total_layers: int,
+    min_thickness_ratio: float,
+    max_thickness_ratio: float,
+    max_angle_deg: float,
+    decay_distance: float,
+) -> NDArray:
+    """Solve deformation field as a constrained quadratic program.
+
+    Implements the CurviSlicer approach (Étienne et al., SIGGRAPH 2019):
+    minimizes the L2 norm of displacement gradients (smoothness) subject
+    to surface conformance, thickness bounds, slope limits, and floor
+    safety constraints.
+
+    Variables: h[k, r, c] — Z displacement at layer k, grid cell (r, c).
+    Flattened into a 1D vector of size N = total_layers * rows * cols.
+
+    Objective:
+        min  Σ (h[k,r,c] - h[k,r,c-1])² + (h[k,r,c] - h[k,r-1,c])²
+             + (h[k,r,c] - h[k-1,r,c])²
+        (smoothness in XY and Z directions)
+
+    Constraints:
+        h[k,r,c] = surface_disp[r,c]   at surface layer (equality)
+        h[k,r,c] = 0                    outside safe region
+        min_gap ≤ (z[k]+h[k]) - (z[k-1]+h[k-1]) ≤ max_gap  (thickness)
+        |h[k,r,c] - h[k,r,c±1]| ≤ tan(angle) * resolution  (slope)
+        z[k] + h[k,r,c] ≥ floor_z                           (floor)
+    """
+    import osqp
+    from scipy import sparse
+
+    N = total_layers * rows * cols
+
+    def idx(k: int, r: int, c: int) -> int:
+        return k * rows * cols + r * cols + c
+
+    # ------------------------------------------------------------------
+    # Build objective: minimize ||∇h||² (smoothness)
+    # P is a sparse matrix such that the objective is 0.5 * h' P h.
+    # Each gradient term (h[i] - h[j])² contributes +1 to P[i,i], +1 to
+    # P[j,j], and -1 to P[i,j] and P[j,i].
+    # ------------------------------------------------------------------
+    P_rows_list = []
+    P_cols_list = []
+    P_data_list = []
+
+    def add_gradient_term(i: int, j: int, weight: float = 1.0) -> None:
+        P_rows_list.extend([i, j, i, j])
+        P_cols_list.extend([i, j, j, i])
+        P_data_list.extend([weight, weight, -weight, -weight])
+
+    # XY smoothness within each layer
+    for k in range(total_layers):
+        for r in range(rows):
+            for c in range(cols):
+                if c + 1 < cols:
+                    add_gradient_term(idx(k, r, c), idx(k, r, c + 1))
+                if r + 1 < rows:
+                    add_gradient_term(idx(k, r, c), idx(k, r + 1, c))
+
+    # Z smoothness between layers
+    for k in range(total_layers - 1):
+        for r in range(rows):
+            for c in range(cols):
+                add_gradient_term(idx(k, r, c), idx(k + 1, r, c), 0.5)
+
+    P = sparse.csc_matrix(
+        (P_data_list, (P_rows_list, P_cols_list)),
+        shape=(N, N),
+    )
+
+    # Linear term: zero (pure quadratic smoothness)
+    q = np.zeros(N, dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # Build constraints: A @ h in [l, u]
+    # ------------------------------------------------------------------
+    A_rows_list = []
+    A_cols_list = []
+    A_data_list = []
+    l_list = []
+    u_list = []
+    constraint_idx = 0
+
+    # 1. Surface conformance: h[surface_layer, r, c] = surface_disp[r, c]
+    #    For each safe cell, find the topmost layer at or below surface_z.
+    for r in range(rows):
+        for c in range(cols):
+            if not safe[r, c]:
+                continue
+            sz = surface_z[r, c]
+            if not np.isfinite(sz):
+                continue
+            # Find the layer index closest to the surface
+            k = int(np.searchsorted(z_levels, sz, side="right")) - 1
+            k = max(0, min(k, total_layers - 1))
+
+            i = idx(k, r, c)
+            A_rows_list.append(constraint_idx)
+            A_cols_list.append(i)
+            A_data_list.append(1.0)
+            l_list.append(surface_disp[r, c])
+            u_list.append(surface_disp[r, c])
+            constraint_idx += 1
+
+    # 2. Fix unsafe cells to zero displacement
+    for k in range(total_layers):
+        for r in range(rows):
+            for c in range(cols):
+                if not safe[r, c]:
+                    i = idx(k, r, c)
+                    A_rows_list.append(constraint_idx)
+                    A_cols_list.append(i)
+                    A_data_list.append(1.0)
+                    l_list.append(0.0)
+                    u_list.append(0.0)
+                    constraint_idx += 1
+
+    # 3. Layer thickness constraints:
+    #    min_gap <= (z[k] + h[k]) - (z[k-1] + h[k-1]) <= max_gap
+    #    => min_gap - nominal_gap <= h[k] - h[k-1] <= max_gap - nominal_gap
+    min_gap = min_thickness_ratio * layer_height
+    max_gap = max_thickness_ratio * layer_height
+
+    for k in range(1, total_layers):
+        nominal_gap = z_levels[k] - z_levels[k - 1]
+        for r in range(rows):
+            for c in range(cols):
+                i_above = idx(k, r, c)
+                i_below = idx(k - 1, r, c)
+                # h[k] - h[k-1]
+                A_rows_list.extend([constraint_idx, constraint_idx])
+                A_cols_list.extend([i_above, i_below])
+                A_data_list.extend([1.0, -1.0])
+                l_list.append(min_gap - nominal_gap)
+                u_list.append(max_gap - nominal_gap)
+                constraint_idx += 1
+
+    # 4. Slope constraints (XY):
+    #    |h[k,r,c] - h[k,r,c±1]| <= max_slope * resolution
+    max_slope = math.tan(math.radians(min(max_angle_deg, 89.9)))
+    max_delta = max_slope * resolution
+
+    for k in range(total_layers):
+        for r in range(rows):
+            for c in range(cols):
+                if c + 1 < cols:
+                    i = idx(k, r, c)
+                    j = idx(k, r, c + 1)
+                    A_rows_list.extend([constraint_idx, constraint_idx])
+                    A_cols_list.extend([i, j])
+                    A_data_list.extend([1.0, -1.0])
+                    l_list.append(-max_delta)
+                    u_list.append(max_delta)
+                    constraint_idx += 1
+                if r + 1 < rows:
+                    i = idx(k, r, c)
+                    j = idx(k, r + 1, c)
+                    A_rows_list.extend([constraint_idx, constraint_idx])
+                    A_cols_list.extend([i, j])
+                    A_data_list.extend([1.0, -1.0])
+                    l_list.append(-max_delta)
+                    u_list.append(max_delta)
+                    constraint_idx += 1
+
+    # 5. Floor constraint: z[k] + h[k,r,c] >= floor_z
+    #    => h[k,r,c] >= floor_z - z[k]
+    for k in range(total_layers):
+        z = z_levels[k]
+        for r in range(rows):
+            for c in range(cols):
+                i = idx(k, r, c)
+                A_rows_list.append(constraint_idx)
+                A_cols_list.append(i)
+                A_data_list.append(1.0)
+                l_list.append(_BED_FLOOR_Z - z)
+                u_list.append(np.inf)
+                constraint_idx += 1
+
+    A = sparse.csc_matrix(
+        (A_data_list, (A_rows_list, A_cols_list)),
+        shape=(constraint_idx, N),
+    )
+    l_arr = np.array(l_list, dtype=np.float64)
+    u_arr = np.array(u_list, dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # Solve with OSQP
+    # ------------------------------------------------------------------
+    solver = osqp.OSQP()
+    solver.setup(
+        P, q, A, l_arr, u_arr,
+        verbose=False,
+        eps_abs=1e-4,
+        eps_rel=1e-4,
+        max_iter=10000,
+        warm_start=True,
+        polish=True,
+    )
+
+    # Warm-start with heuristic solution for faster convergence
+    h_init = _solve_heuristic_flat(
+        z_levels, surface_z, surface_disp, safe,
+        rows, cols,
+        layer_height, total_layers,
+        decay_distance, resolution, max_angle_deg,
+        min_thickness_ratio, max_thickness_ratio,
+    )
+    solver.warm_start(x=h_init)
+
+    result = solver.solve()
+
+    if result.info.status not in ("solved", "solved_inaccurate"):
+        logger.warning(
+            "QP solver status: %s — falling back to heuristic",
+            result.info.status,
+        )
+        return _solve_heuristic_flat(
+            z_levels, surface_z, surface_disp, safe,
+            rows, cols,
+            layer_height, total_layers,
+            decay_distance, resolution, max_angle_deg,
+            min_thickness_ratio, max_thickness_ratio,
+        ).reshape(total_layers, rows, cols)
+
+    if result.info.status == "solved_inaccurate":
+        logger.warning("QP solver converged with reduced accuracy")
+
+    logger.info(
+        "QP solver: %s in %d iterations, obj=%.4f",
+        result.info.status, result.info.iter, result.info.obj_val,
+    )
+
+    return result.x.reshape(total_layers, rows, cols)
+
+
+def _solve_heuristic_flat(
+    z_levels, surface_z, surface_disp, safe,
+    rows, cols,
+    layer_height, total_layers,
+    decay_distance, resolution, max_angle_deg,
+    min_thickness_ratio, max_thickness_ratio,
+) -> NDArray:
+    """Run heuristic solver and return flat 1D array (for QP warm-start)."""
+    displacements = _solve_heuristic(
+        z_levels, surface_z, surface_disp, safe,
+        rows, cols,
+        layer_height, total_layers,
+        decay_distance, resolution, max_angle_deg,
+        min_thickness_ratio, max_thickness_ratio,
+    )
+    return displacements.ravel()
+
+
+def _solve_heuristic(
+    z_levels, surface_z, surface_disp, safe,
+    rows, cols,
+    layer_height, total_layers,
+    decay_distance, resolution, max_angle_deg,
+    min_thickness_ratio, max_thickness_ratio,
+) -> NDArray:
+    """Heuristic solver: exponential decay + constraint clamping.
+
+    Fallback when OSQP is not available or QP solver fails.
+    """
+    displacements = np.zeros((total_layers, rows, cols), dtype=np.float64)
+
+    # Propagate displacement downward with exponential decay.
+    for layer_idx in range(total_layers):
+        z = z_levels[layer_idx]
+        for r in range(rows):
+            for c in range(cols):
+                sz = surface_z[r, c]
+                if not np.isfinite(sz) or not safe[r, c]:
+                    continue
+                if z > sz + layer_height:
+                    continue
+                depth = max(0.0, sz - z)
+                if decay_distance > 0:
+                    decay = math.exp(-depth / decay_distance)
+                else:
+                    decay = 1.0 if depth < layer_height else 0.0
+                displacements[layer_idx, r, c] = surface_disp[r, c] * decay
+
+    # Enforce constraints.
+    _enforce_slope_constraint(
+        displacements, z_levels, resolution, max_angle_deg,
+    )
+    _enforce_thickness_constraint(
+        displacements, z_levels, layer_height,
+        min_thickness_ratio, max_thickness_ratio,
+    )
+    _enforce_floor_constraint(displacements, z_levels)
+
+    # Zero out displacement outside safe region.
+    for layer_idx in range(total_layers):
+        displacements[layer_idx][~safe] = 0.0
+
+    return displacements
 
 
 def _resample_to_grid(
