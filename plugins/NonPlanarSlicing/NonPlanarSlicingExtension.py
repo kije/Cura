@@ -7,6 +7,7 @@ import json
 import os
 import collections
 import logging
+import struct
 import time
 import weakref
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
@@ -45,19 +46,12 @@ logger = logging.getLogger(__name__)
 # Setting keys
 SETTING_ENABLED = "nonplanar_enabled"
 SETTING_MAX_ANGLE = "nonplanar_max_angle"
-SETTING_SURFACE_MODE = "nonplanar_surface_mode"
-SETTING_LAYER_COUNT = "nonplanar_layer_count"
 SETTING_NOZZLE_CLEARANCE = "nonplanar_nozzle_clearance"
 SETTING_MIN_REGION_AREA = "nonplanar_min_region_area"
 SETTING_BLEND_DISTANCE = "nonplanar_blend_distance"
-SETTING_FLOW_COMPENSATION = "nonplanar_flow_compensation"
-SETTING_FEEDRATE_COMPENSATION = "nonplanar_feedrate_compensation"
 SETTING_HEIGHTMAP_RESOLUTION = "nonplanar_heightmap_resolution"
-SETTING_SEGMENT_LENGTH = "nonplanar_segment_length"
 SETTING_SAFETY_MARGIN = "nonplanar_safety_margin"
 SETTING_MIN_BENEFIT_ANGLE = "nonplanar_min_benefit_angle"
-SETTING_MAX_FLOW_MULTIPLIER = "nonplanar_max_flow_multiplier"
-SETTING_MIN_FLOW_MULTIPLIER = "nonplanar_min_flow_multiplier"
 SETTING_FIELD_DECAY_MM = "nonplanar_field_decay_mm"
 SETTING_MIN_THICKNESS_RATIO = "nonplanar_min_thickness_ratio"
 SETTING_MAX_THICKNESS_RATIO = "nonplanar_max_thickness_ratio"
@@ -69,17 +63,10 @@ MACHINE_GANTRY_HEIGHT = "gantry_height"
 MACHINE_NOZZLE_EXPANSION_ANGLE = "machine_nozzle_expansion_angle"
 MACHINE_NOZZLE_SIZE = "machine_nozzle_size"
 
-# Non-planar layer types to skip (G-code ;TYPE: values)
-SKIP_LINE_TYPES = frozenset([
-    "SUPPORT", "SUPPORT-INTERFACE", "PRIME-TOWER", "SKIRT",
-])
-
 # Settings whose changes should invalidate the analysis cache and trigger
-# re-analysis.  These affect candidate detection, height maps, or collision
-# checking — NOT settings that only affect G-code output.
+# re-analysis.
 SETTINGS_INVALIDATE_ANALYSIS = frozenset([
     SETTING_MAX_ANGLE,
-    SETTING_SURFACE_MODE,
     SETTING_NOZZLE_CLEARANCE,
     SETTING_MIN_REGION_AREA,
     SETTING_BLEND_DISTANCE,
@@ -96,15 +83,19 @@ SETTINGS_INVALIDATE_ANALYSIS = frozenset([
     MACHINE_NOZZLE_SIZE,
 ])
 
+# NPDF serialization constants
+_NPDF_MAGIC = b"NPDF"
+_NPDF_VERSION = 1
+
 
 class NonPlanarSlicingExtension(QObject, Extension):
     """Main extension class for the Non-Planar Slicing plugin.
 
-    Orchestrates the full non-planar slicing pipeline:
+    Orchestrates the non-planar slicing pipeline:
     1. Injects custom settings into Cura's "experimental" category
     2. Analyzes mesh geometry to identify non-planar candidate regions
-    3. After slicing, post-processes G-code to bend top layers onto the model surface
-    4. Modifies layer visualization data for the preview
+    3. Before slicing, deforms the mesh and serializes the deformation field
+    4. The CuraEngine plugin (NonPlanarEnginePlugin) inverse-transforms paths
     5. Provides overlay visualization of candidate regions
     """
 
@@ -158,31 +149,18 @@ class NonPlanarSlicingExtension(QObject, Extension):
         # (the setting might be off when the file is first loaded).
         app.globalContainerStackChanged.connect(self._onGlobalStackChanged)
 
-        # G-code post-processing hook (same pattern as PostProcessingPlugin)
-        app.getOutputDeviceManager().writeStarted.connect(self._onWriteStarted)
-
-        # Layer data modification after slicing/layer processing finishes.
+        # Connect backend signals for mesh deformation lifecycle.
         backend = app.getBackend()
         if backend is not None:
             backend.backendStateChange.connect(self._onBackendStateChanged)
-
-        # Also hook into view changes: ProcessSlicedLayersJob often runs
-        # when the user switches to SimulationView, AFTER slicing is done.
-        app.getController().activeViewChanged.connect(self._onActiveViewChanged)
-
-        # Track whether we've already post-processed the current slice
-        self._postprocessing_done_for_gcode = False
-
-        # Phase II (curvislicer_mesh): Track original meshes for swap/restore.
-        self._mesh_swap_originals: Dict[int, tuple] = {}  # id(node) → (node, MeshData)
-        self._mesh_swap_active = False
-
-        # Connect slicingStarted for mesh swap (Phase II).
-        if backend is not None:
             try:
                 backend.slicingStarted.connect(self._onSlicingStarted)
             except AttributeError:
                 pass  # Signal may not exist in all Cura versions.
+
+        # Track original meshes for deform/restore cycle.
+        self._mesh_swap_originals: Dict[int, tuple] = {}  # id(node) → (node, MeshData)
+        self._mesh_swap_active = False
 
         Logger.log("i", "Non-Planar Slicing plugin initialized")
 
@@ -311,21 +289,12 @@ class NonPlanarSlicingExtension(QObject, Extension):
         return {
             "enabled": self._isEnabled(),
             "max_angle_deg": float(self._getSetting(SETTING_MAX_ANGLE, 30.0)),
-            "surface_mode": str(self._getSetting(SETTING_SURFACE_MODE, "all_surfaces")),
-            "nonplanar_layer_count": int(self._getSetting(SETTING_LAYER_COUNT, 5)),
             "nozzle_clearance_mm": float(self._getSetting(SETTING_NOZZLE_CLEARANCE, 8.0)),
             "min_region_area_mm2": float(self._getSetting(SETTING_MIN_REGION_AREA, 100.0)),
             "blend_distance_mm": float(self._getSetting(SETTING_BLEND_DISTANCE, 3.0)),
-            "flow_compensation": bool(self._getSetting(SETTING_FLOW_COMPENSATION, True)),
-            "feedrate_compensation": bool(self._getSetting(SETTING_FEEDRATE_COMPENSATION, True)),
-            # Tunable analysis/bending parameters
             "heightmap_resolution": float(self._getSetting(SETTING_HEIGHTMAP_RESOLUTION, 0.5)),
-            "segment_length": float(self._getSetting(SETTING_SEGMENT_LENGTH, 1.0)),
             "safety_margin_mm": float(self._getSetting(SETTING_SAFETY_MARGIN, 0.5)),
             "min_benefit_angle_deg": float(self._getSetting(SETTING_MIN_BENEFIT_ANGLE, 5.0)),
-            "max_flow_multiplier": float(self._getSetting(SETTING_MAX_FLOW_MULTIPLIER, 2.0)),
-            "min_flow_multiplier": float(self._getSetting(SETTING_MIN_FLOW_MULTIPLIER, 0.5)),
-            # Extended mode (curvislicer) settings
             "field_decay_mm": float(self._getSetting(SETTING_FIELD_DECAY_MM, 5.0)),
             "min_thickness_ratio": float(self._getSetting(SETTING_MIN_THICKNESS_RATIO, 0.5)),
             "max_thickness_ratio": float(self._getSetting(SETTING_MAX_THICKNESS_RATIO, 2.0)),
@@ -653,209 +622,71 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     self._updating_overlays = False
 
     # -------------------------------------------------------------------------
-    # G-code Post-Processing
+    # Deformation Field Serialization
     # -------------------------------------------------------------------------
 
-    def _bendGCodeInPlace(self) -> None:
-        """Bend G-code in-place right after slicing, so preview reflects changes."""
-        if not self._isEnabled():
-            return
+    @staticmethod
+    def _serialize_deformation_field(field) -> bytes:
+        """Serialize a DeformationField to NPDF binary format.
 
-        scene = Application.getInstance().getController().getScene()
-        gcode_dict = getattr(scene, "gcode_dict", None)
-        if not gcode_dict:
-            return
-
-        from cura.CuraApplication import CuraApplication
-        active_plate = CuraApplication.getInstance().getMultiBuildPlateModel().activeBuildPlate
-        gcode_list = gcode_dict.get(active_plate)
-        if not gcode_list:
-            return
-
-        if gcode_list[0] and ";NON-PLANAR PROCESSED" in gcode_list[0]:
-            return
-
-        analysis_result = self._getActiveAnalysisResult()
-        if analysis_result is None or analysis_result.height_map is None:
-            Logger.log("d", "No non-planar analysis available for G-code bending")
-            return
-
-        if analysis_result.safe_map is None or not numpy.any(analysis_result.safe_map):
-            Logger.log("d", "No safe non-planar regions for G-code bending")
-            return
-
-        settings = self._getSettings()
-        try:
-            t0 = time.time()
-
-            # Phase II: If mesh swap was active, restore meshes and
-            # back-transform G-code instead of standard bending.
-            if self._mesh_swap_active and settings.get("surface_mode") == "curvislicer_mesh":
-                self._restoreMeshes()
-                modified_gcode = self._backTransformGCode(
-                    gcode_list, analysis_result, settings,
-                )
-                gcode_dict[active_plate] = modified_gcode
-                setattr(scene, "gcode_dict", gcode_dict)
-                Logger.log("i", "curvislicer_mesh: G-code back-transform completed in %.2fs",
-                           time.time() - t0)
-            else:
-                modified_gcode = self._bendGCode(gcode_list, analysis_result, settings)
-                gcode_dict[active_plate] = modified_gcode
-                setattr(scene, "gcode_dict", gcode_dict)
-                Logger.log("i", "Non-planar G-code bending completed in %.2fs", time.time() - t0)
-        except Exception:
-            Logger.logException("e", "Failed to apply non-planar G-code bending after slicing")
-            # Ensure meshes are restored even on failure.
-            if self._mesh_swap_active:
-                self._restoreMeshes()
-
-    def _onWriteStarted(self, output_device) -> None:
-        """Post-process G-code before export: apply non-planar bending."""
-        if not self._isEnabled():
-            return
-
-        scene = Application.getInstance().getController().getScene()
-        if not hasattr(scene, "gcode_dict"):
-            return
-
-        gcode_dict = getattr(scene, "gcode_dict")
-        if not gcode_dict:
-            return
-
-        from cura.CuraApplication import CuraApplication
-        active_plate = CuraApplication.getInstance().getMultiBuildPlateModel().activeBuildPlate
-        gcode_list = gcode_dict.get(active_plate)
-        if not gcode_list:
-            return
-
-        # Check for already-processed G-code
-        if gcode_list[0] and ";NON-PLANAR PROCESSED" in gcode_list[0]:
-            Logger.log("d", "G-code already non-planar processed, skipping")
-            return
-
-        # Find the analysis result for the active scene
-        analysis_result = self._getActiveAnalysisResult()
-        if analysis_result is None or analysis_result.height_map is None:
-            Logger.log("d", "No non-planar analysis available, skipping G-code bending")
-            return
-
-        if analysis_result.safe_map is None or not numpy.any(analysis_result.safe_map):
-            Logger.log("d", "No safe non-planar regions, skipping G-code bending")
-            return
-
-        settings = self._getSettings()
-
-        try:
-            t0 = time.time()
-            modified_gcode = self._bendGCode(gcode_list, analysis_result, settings)
-            elapsed = time.time() - t0
-
-            gcode_dict[active_plate] = modified_gcode
-            setattr(scene, "gcode_dict", gcode_dict)
-
-            Logger.log("i", "Non-planar G-code bending completed in %.2fs", elapsed)
-
-            Message(
-                catalog.i18nc("@info:status",
-                              "Non-planar slicing applied successfully ({time:.1f}s).").format(time=elapsed),
-                title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
-                message_type=Message.MessageType.POSITIVE,
-                lifetime=5,
-            ).show()
-
-        except Exception:
-            Logger.logException("e", "Failed to apply non-planar G-code bending")
-            Message(
-                catalog.i18nc("@info:status",
-                              "Non-planar slicing failed. Original G-code preserved."),
-                title=catalog.i18nc("@info:title", "Non-Planar Slicing"),
-                message_type=Message.MessageType.ERROR,
-                lifetime=10,
-            ).show()
-
-    def _bendGCode(self, gcode_list: List[str], analysis: _AnalysisResult,
-                   settings: Dict[str, Any]) -> List[str]:
-        """Apply non-planar bending to the G-code."""
-        from .gcode.gcode_bender import bend_gcode
-
-        # Detect layer height from G-code
-        layer_height = self._detectLayerHeight(gcode_list, settings)
-
-        # Compute G-code ↔ analysis coordinate offset.
-        # CuraEngine maps: gcode_X = scene_X + W/2, gcode_Y = -scene_Z + D/2
-        # Analysis maps:   analysis_X = scene_X,     analysis_Y = -scene_Z
-        # So: analysis = gcode - (W/2, D/2)
-        gcode_offset_x = 0.0
-        gcode_offset_y = 0.0
-        stack = self._getGlobalStack()
-        if stack is not None:
-            center_is_zero = stack.getProperty("machine_center_is_zero", "value")
-            if not center_is_zero:
-                machine_width = float(stack.getProperty("machine_width", "value") or 0)
-                machine_depth = float(stack.getProperty("machine_depth", "value") or 0)
-                gcode_offset_x = machine_width / 2.0
-                gcode_offset_y = machine_depth / 2.0
-
-        bender_settings = {
-            "layer_height": layer_height,
-            "nonplanar_layer_count": settings["nonplanar_layer_count"],
-            "max_angle_deg": settings["max_angle_deg"],
-            "flow_compensation": settings["flow_compensation"],
-            "feedrate_compensation": settings["feedrate_compensation"],
-            "segment_length": settings.get("segment_length", SEGMENT_LENGTH),
-            "surface_mode": settings.get("surface_mode", "all_surfaces"),
-            "gcode_offset_x": gcode_offset_x,
-            "gcode_offset_y": gcode_offset_y,
-            "nozzle_clearance": settings.get("nozzle_clearance_mm", 8.0),
-            "max_flow_multiplier": settings.get("max_flow_multiplier", 2.0),
-            "min_flow_multiplier": settings.get("min_flow_multiplier", 0.5),
-        }
-
-        return bend_gcode(
-            gcode_list,
-            height_map=analysis.height_map,
-            safe_map=analysis.safe_map,
-            blend_map=analysis.blend_map,
-            settings=bender_settings,
-            deformation_field=analysis.deformation_field,
+        Layout (little-endian):
+          magic: 4 bytes = b"NPDF"
+          version: u16 = 1
+          num_layers: u32
+          rows: u32
+          cols: u32
+          x_min, x_max, y_min, y_max, resolution: 5 x f64
+          z_levels: [f32; num_layers]
+          displacements: [f32; num_layers * rows * cols]
+        """
+        rows, cols = field.grid_shape
+        header = struct.pack(
+            "<4sHIII5d",
+            _NPDF_MAGIC,
+            _NPDF_VERSION,
+            field.num_layers,
+            rows,
+            cols,
+            field.x_min,
+            field.x_max,
+            field.y_min,
+            field.y_max,
+            field.resolution,
         )
+        z_levels = field.z_levels.astype(numpy.float32).tobytes()
+        displacements = field.displacements.astype(numpy.float32).tobytes()
+        raw = header + z_levels + displacements
 
-    def _detectLayerHeight(self, gcode_list: List[str], settings: Dict[str, Any]) -> float:
-        """Detect layer height from G-code comments or settings."""
-        # Try to find ;Layer height: X.XX in header
-        for chunk in gcode_list[:3]:
-            for line in chunk.split("\n"):
-                if line.startswith(";Layer height:"):
-                    try:
-                        return float(line.split(":")[1].strip())
-                    except (ValueError, IndexError):
-                        pass
+        # Try zstd compression (optional dependency)
+        try:
+            import zstandard
+            return zstandard.ZstdCompressor(level=3).compress(raw)
+        except ImportError:
+            pass
+        try:
+            import zstd
+            return zstd.compress(raw, 3)
+        except ImportError:
+            pass
 
-        # Fall back to the global setting
-        stack = self._getGlobalStack()
-        if stack is not None:
-            lh = stack.getProperty("layer_height", "value")
-            if lh is not None and lh > 0:
-                return float(lh)
-
-        return 0.2  # safe default
+        # No compression available — send raw
+        return raw
 
     # -------------------------------------------------------------------------
-    # Phase II: Mesh Swap for curvislicer_mesh Mode
+    # Mesh Deformation (pre-slicing) & Engine Plugin Integration
     # -------------------------------------------------------------------------
 
     def _onSlicingStarted(self) -> None:
-        """Hook into slicingStarted to swap meshes for curvislicer_mesh mode.
+        """Hook into slicingStarted to deform meshes and serialize deformation field.
 
         Deforms mesh vertices using the deformation field before CuraEngine
-        slices them.  The originals are saved for restoration after slicing.
-        Signal suppression prevents recursive re-slicing.
+        slices them. The originals are saved for restoration after slicing.
+        The serialized deformation field is stored as a setting so the
+        CuraEngine plugin receives it via settings broadcast and can
+        inverse-transform the toolpath Z coordinates.
         """
         settings = self._getSettings()
         if not settings.get("enabled", False):
-            return
-        if settings.get("surface_mode") != "curvislicer_mesh":
             return
 
         # Find analysis results with a deformation field.
@@ -864,7 +695,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
             return
 
         try:
-            from .analysis.mesh_deformer import deform_mesh_vertices, validate_deformation
+            from .analysis.mesh_deformer import deform_mesh_vertices
 
             app = Application.getInstance()
             backend = app.getBackend()
@@ -874,9 +705,17 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
             deformation_field = analysis_result.deformation_field
 
-            # Validate deformation before applying.
-            # We use the analysis vertices, but for speed just check the field.
-            # Full mesh validation would be too slow here.
+            # Serialize the deformation field for the engine plugin.
+            try:
+                field_bytes = self._serialize_deformation_field(deformation_field)
+                Logger.log("i", "Serialized deformation field: %d bytes", len(field_bytes))
+
+                # Store as a setting value for broadcast to the engine plugin.
+                stack = self._getGlobalStack()
+                if stack is not None:
+                    stack.setProperty("nonplanar_deformation_field", "value", field_bytes)
+            except Exception:
+                Logger.logException("e", "Failed to serialize deformation field")
 
             # Suppress sceneChanged to prevent recursive re-slicing.
             if backend is not None:
@@ -886,8 +725,6 @@ class NonPlanarSlicingExtension(QObject, Extension):
                     pass
 
             try:
-                from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
-
                 self._mesh_swap_originals.clear()
                 swap_count = 0
 
@@ -925,8 +762,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
 
                 self._mesh_swap_active = swap_count > 0
                 if swap_count > 0:
-                    Logger.log("i", "curvislicer_mesh: swapped %d meshes for deformed slicing",
-                               swap_count)
+                    Logger.log("i", "Non-planar: deformed %d meshes for slicing", swap_count)
 
             finally:
                 # Always reconnect sceneChanged.
@@ -937,7 +773,7 @@ class NonPlanarSlicingExtension(QObject, Extension):
                         pass
 
         except Exception:
-            Logger.logException("e", "curvislicer_mesh: mesh swap failed")
+            Logger.logException("e", "Non-planar: mesh deformation failed")
             self._restoreMeshes()
 
     def _restoreMeshes(self) -> None:
@@ -976,226 +812,27 @@ class NonPlanarSlicingExtension(QObject, Extension):
                 except (TypeError, AttributeError):
                     pass
 
-    def _backTransformGCode(self, gcode_list: list, analysis: _AnalysisResult,
-                            settings: dict) -> list:
-        """Apply inverse deformation to G-code Z coordinates after mesh-mode slicing.
-
-        This undoes the mesh deformation in the G-code so the printer
-        produces the original geometry with curved layers.
-        """
-        if analysis.deformation_field is None:
-            return gcode_list
-
-        from .analysis.mesh_deformer import inverse_deform_gcode_line
-
-        # Compute offsets (same logic as _bendGCode).
-        gcode_offset_x = 0.0
-        gcode_offset_y = 0.0
-        stack = self._getGlobalStack()
-        if stack is not None:
-            center_is_zero = stack.getProperty("machine_center_is_zero", "value")
-            if not center_is_zero:
-                machine_width = float(stack.getProperty("machine_width", "value") or 0)
-                machine_depth = float(stack.getProperty("machine_depth", "value") or 0)
-                gcode_offset_x = machine_width / 2.0
-                gcode_offset_y = machine_depth / 2.0
-
-        current_x, current_y, current_z = 0.0, 0.0, 0.0
-        result = []
-
-        for chunk_idx, chunk in enumerate(gcode_list):
-            if chunk_idx < 2:
-                # Header and start G-code: pass through.
-                result.append(chunk)
-                continue
-
-            lines = chunk.split("\n")
-            new_lines = []
-            for line in lines:
-                modified, current_x, current_y, current_z = inverse_deform_gcode_line(
-                    line, analysis.deformation_field,
-                    current_x, current_y, current_z,
-                    gcode_offset_x, gcode_offset_y,
-                )
-                new_lines.append(modified)
-            result.append("\n".join(new_lines))
-
-        return result
-
     # -------------------------------------------------------------------------
-    # Layer Data Modification (SimulationView preview)
+    # Backend State Handling
     # -------------------------------------------------------------------------
 
     def _onBackendStateChanged(self, state) -> None:
         """Called when the backend state changes.
 
-        We track two state transitions:
-        - Processing: mark that a new slice is in progress (reset flag)
-        - Done: slicing finished; schedule post-processing with a delay
-          to allow ProcessSlicedLayersJob to run first
+        Restores original meshes when slicing completes. The CuraEngine
+        plugin handles the inverse Z transform — no G-code post-processing
+        is needed here.
         """
         try:
             from UM.Backend.Backend import BackendState
         except ImportError:
             return
 
-        if state == BackendState.Processing:
-            # New slice started — reset the post-processing flag
-            self._postprocessing_done_for_gcode = False
-        elif state == BackendState.Done:
-            if not self._isEnabled():
-                return
-            # Slicing finished. ProcessSlicedLayersJob may or may not
-            # have been started yet (depends on whether SimulationView
-            # is active). Schedule a delayed check.
-            Logger.log("d", "NonPlanar: slicing done — scheduling post-processing check")
-            QTimer.singleShot(500, self._tryApplyPostProcessing)
-
-    def _onActiveViewChanged(self) -> None:
-        """Called when the user switches views (e.g. to SimulationView).
-
-        ProcessSlicedLayersJob often starts when switching to
-        SimulationView AFTER slicing completes. We schedule a delayed
-        post-processing attempt to catch this case.
-        """
-        if not self._isEnabled():
-            return
-        if self._postprocessing_done_for_gcode:
-            return
-
-        controller = Application.getInstance().getController()
-        view = controller.getActiveView()
-        if view is not None and view.getPluginId() == "SimulationView":
-            Logger.log("d", "NonPlanar: SimulationView activated — scheduling post-processing check")
-            # Delay to allow ProcessSlicedLayersJob to finish building
-            # the layer mesh (it typically runs a few hundred ms).
-            QTimer.singleShot(1000, self._tryApplyPostProcessing)
-
-    def _tryApplyPostProcessing(self) -> None:
-        """Attempt post-processing if layer data is available.
-
-        Called from multiple hooks (backend done, view change). Checks
-        whether there's layer data to modify and G-code to bend.
-        Guards against duplicate processing via _postprocessing_done_for_gcode.
-        """
-        if not self._isEnabled():
-            return
-        if self._postprocessing_done_for_gcode:
-            return
-
-        # Check if layer data is available (ProcessSlicedLayersJob has finished)
-        scene = Application.getInstance().getController().getScene()
-        has_layer_data = False
-        for node in DepthFirstIterator(scene.getRoot()):
-            if node.callDecoration("getLayerData") is not None:
-                has_layer_data = True
-                break
-
-        if not has_layer_data:
-            Logger.log("d", "NonPlanar: no layer data available yet — will retry on view change")
-            return
-
-        # Check if there's G-code to process
-        gcode_dict = getattr(scene, "gcode_dict", None)
-        if not gcode_dict:
-            Logger.log("d", "NonPlanar: no G-code available yet")
-            return
-
-        Logger.log("i", "NonPlanar: layer data and G-code available — applying post-processing")
-        self._postprocessing_done_for_gcode = True
-        self._applyNonPlanarPostProcessing()
-
-    def _applyNonPlanarPostProcessing(self) -> None:
-        """Apply both layer data modification and G-code bending after slicing."""
-        if not self._isEnabled():
-            return
-
-        # Ensure analysis has been run. If the user enabled the setting
-        # after loading the model, analysis might not have happened yet.
-        # If a background job is running, wait for it (it should be fast
-        # at this point since slicing itself takes longer).
-        if self._getActiveAnalysisResult() is None:
-            if self._analysis_job is not None:
-                Logger.log("d", "Waiting for background analysis to finish before post-processing")
-                # Don't block the UI indefinitely — if the job is still
-                # running, fall through and let the result arrive later.
-            else:
-                Logger.log("d", "No analysis results at post-processing time; running synchronous analysis")
-                self._runAnalysisSynchronous()
-
-        # 1. Modify layer data for SimulationView preview
-        self._modifyLayerData()
-
-        # 2. Bend G-code in-place so preview and export match
-        self._bendGCodeInPlace()
-
-    def _modifyLayerData(self) -> None:
-        """Modify the built layer data mesh for non-planar preview."""
-        analysis_result = self._getActiveAnalysisResult()
-        if analysis_result is None or analysis_result.height_map is None:
-            Logger.log("d", "NonPlanar: _modifyLayerData skipped — no analysis/height_map")
-            return
-
-        if analysis_result.safe_map is None or not numpy.any(analysis_result.safe_map):
-            Logger.log("d", "NonPlanar: _modifyLayerData skipped — no safe cells")
-            return
-
-        Logger.log("i", "NonPlanar: _modifyLayerData starting (safe_cells=%d/%d, blend_range=%.3f..%.3f)",
-                    int(numpy.sum(analysis_result.safe_map)),
-                    analysis_result.safe_map.size,
-                    float(numpy.min(analysis_result.blend_map)),
-                    float(numpy.max(analysis_result.blend_map)))
-
-        settings = self._getSettings()
-        scene = Application.getInstance().getController().getScene()
-
-        from .visualization.layer_data_modifier import LayerDataModifier
-
-        found_layer_data = False
-        for node in DepthFirstIterator(scene.getRoot()):
-            layer_data = node.callDecoration("getLayerData")
-            if layer_data is None:
-                continue
-
-            found_layer_data = True
-            try:
-                layers = layer_data.getLayers()
-                if not layers:
-                    Logger.log("d", "NonPlanar: layer_data has no layers")
-                    continue
-                total_layers = max(layers.keys()) + 1 if layers else 0
-
-                layer_height = self._detectLayerHeight(
-                    getattr(scene, "gcode_dict", {}).get(0, [""]),
-                    settings,
-                )
-                Logger.log("d", "NonPlanar: layer_data found with %d layers, layer_height=%.3f",
-                            total_layers, layer_height)
-
-                modifier = LayerDataModifier(
-                    height_map=analysis_result.height_map,
-                    safe_map=analysis_result.safe_map,
-                    blend_map=analysis_result.blend_map,
-                    layer_height=layer_height,
-                    nonplanar_layer_count=settings["nonplanar_layer_count"],
-                    total_layers=total_layers,
-                    surface_mode=settings.get("surface_mode", "all_surfaces"),
-                    nozzle_clearance=settings.get("nozzle_clearance_mm", 8.0),
-                    deformation_field=analysis_result.deformation_field,
-                )
-
-                if modifier.modify_layer_data(layer_data):
-                    Logger.log("i", "NonPlanar: modified layer data for preview — triggering scene update")
-                    # Trigger a scene update so SimulationView re-renders.
-                    scene.sceneChanged.emit(node)
-                else:
-                    Logger.log("w", "NonPlanar: modify_layer_data returned False — no vertices modified")
-
-            except Exception:
-                Logger.logException("w", "Failed to modify layer data for non-planar preview")
-
-        if not found_layer_data:
-            Logger.log("w", "NonPlanar: _modifyLayerData found no nodes with LayerData")
+        if state == BackendState.Done:
+            # Restore original meshes after slicing completes
+            if self._mesh_swap_active:
+                self._restoreMeshes()
+                Logger.log("i", "Non-planar: restored original meshes after slicing")
 
     # -------------------------------------------------------------------------
     # Overlay Visualization
@@ -1426,7 +1063,7 @@ class _AnalysisJob(Job):
         from .analysis.candidate_detector import detect_candidates
         from .analysis.height_map import generate_height_map
         from .analysis.collision_checker import check_collisions
-        from .gcode.transition_blender import compute_blend_map
+        from .analysis.transition_blender import compute_blend_map
         return analyze_mesh, detect_candidates, generate_height_map, check_collisions, compute_blend_map
 
     def run(self) -> None:
@@ -1533,48 +1170,41 @@ class _AnalysisJob(Job):
             blend_distance=settings["blend_distance_mm"],
         )
 
-        # Step 6: Compute deformation field for curvislicer modes
+        # Step 6: Compute deformation field (always — needed for engine plugin)
         deformation_field = None
-        surface_mode = settings.get("surface_mode", "all_surfaces")
-        if surface_mode in ("curvislicer", "curvislicer_mesh"):
-            try:
-                from .analysis.deformation_field import compute_deformation_field
+        try:
+            from .analysis.deformation_field import compute_deformation_field
 
-                # Estimate total layers from height map Z range.
-                layer_height_est = settings.get("heightmap_resolution", 0.5)
-                # Use a rough estimate; actual layer height comes from G-code.
-                # For analysis, use a reasonable default.
-                lh = 0.2  # Will be refined at G-code bending time.
-                z_vals = height_map.z_values
-                finite_z = z_vals[numpy.isfinite(z_vals)]
-                if finite_z.size > 0:
-                    z_max = float(numpy.max(finite_z))
-                    total_layers_est = max(1, int(z_max / lh) + 1)
-                else:
-                    total_layers_est = 1
+            # Estimate total layers from height map Z range.
+            lh = 0.2  # Reasonable default layer height for analysis.
+            z_vals = height_map.z_values
+            finite_z = z_vals[numpy.isfinite(z_vals)]
+            if finite_z.size > 0:
+                z_max = float(numpy.max(finite_z))
+                total_layers_est = max(1, int(z_max / lh) + 1)
+            else:
+                total_layers_est = 1
 
-                t0 = time.time()
-                deformation_field = compute_deformation_field(
-                    height_map,
-                    collision_result.safe_map,
-                    layer_height=lh,
-                    total_layers=total_layers_est,
-                    first_layer_z=lh,
-                    decay_distance=settings.get("field_decay_mm", 5.0),
-                    min_thickness_ratio=settings.get("min_thickness_ratio", 0.5),
-                    max_thickness_ratio=settings.get("max_thickness_ratio", 2.0),
-                    max_angle_deg=settings["max_angle_deg"],
-                    optimization_resolution=settings.get("optimization_resolution", 2.0),
-                )
-                Logger.log("d", "  Deformation field: %d layers, grid %dx%d in %.2fs",
-                           deformation_field.num_layers,
-                           deformation_field.grid_shape[0],
-                           deformation_field.grid_shape[1],
-                           time.time() - t0)
-            except Exception:
-                Logger.logException("e", "Failed to compute deformation field; "
-                                    "falling back to standard mode")
-                deformation_field = None
+            t0 = time.time()
+            deformation_field = compute_deformation_field(
+                height_map,
+                collision_result.safe_map,
+                layer_height=lh,
+                total_layers=total_layers_est,
+                first_layer_z=lh,
+                decay_distance=settings.get("field_decay_mm", 5.0),
+                min_thickness_ratio=settings.get("min_thickness_ratio", 0.5),
+                max_thickness_ratio=settings.get("max_thickness_ratio", 2.0),
+                max_angle_deg=settings["max_angle_deg"],
+                optimization_resolution=settings.get("optimization_resolution", 2.0),
+            )
+            Logger.log("d", "  Deformation field: %d layers, grid %dx%d in %.2fs",
+                       deformation_field.num_layers,
+                       deformation_field.grid_shape[0],
+                       deformation_field.grid_shape[1],
+                       time.time() - t0)
+        except Exception:
+            Logger.logException("e", "Failed to compute deformation field")
 
         return _AnalysisResult(
             analysis=analysis,

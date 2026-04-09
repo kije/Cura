@@ -7,6 +7,11 @@ except ImportError:
     NonPlanarSlicingExtension = None  # type: ignore[assignment,misc]
 
 try:
+    from .NonPlanarEnginePlugin import NonPlanarEnginePlugin
+except ImportError:
+    NonPlanarEnginePlugin = None  # type: ignore[assignment,misc]
+
+try:
     from .visualization.NonPlanarView import NonPlanarView
 except ImportError:
     NonPlanarView = None  # type: ignore[assignment,misc]
@@ -23,7 +28,11 @@ def getMetaData():
 
 
 def register(app):
-    result = {"extension": NonPlanarSlicingExtension.NonPlanarSlicingExtension()}
+    result = {}
+    if NonPlanarSlicingExtension is not None:
+        result["extension"] = NonPlanarSlicingExtension.NonPlanarSlicingExtension()
+    if NonPlanarEnginePlugin is not None:
+        result["backend_plugin"] = NonPlanarEnginePlugin()
     if NonPlanarView is not None:
         result["view"] = NonPlanarView()
     return result

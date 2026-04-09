@@ -92,8 +92,6 @@ def compute_blend_map(
     if safe_map.size == 0:
         return np.empty_like(safe_map, dtype=np.float64)
 
-    # If scipy is unavailable, fall back to a binary map (no smooth
-    # transition).
     if distance_transform_edt is None:
         logger.warning(
             "Using binary blend map (no smooth transition) because "
@@ -101,20 +99,12 @@ def compute_blend_map(
         )
         return safe_map.astype(np.float64)
 
-    # The distance transform computes, for each True cell, the
-    # Euclidean distance (in grid units) to the nearest False cell.
-    # We scale to mm using the ``sampling`` parameter.
     dist_mm: NDArray[np.floating] = distance_transform_edt(
         safe_map, sampling=resolution,
     )
 
-    # Normalize so that ``blend_distance`` mm maps to 1.0.
     normalized = dist_mm / blend_distance
-
-    # Apply smoothstep for C1 continuity.
     blend: NDArray[np.floating] = smoothstep(normalized)
-
-    # Ensure anything outside the safe region is exactly 0.
     blend[~safe_map] = 0.0
 
     logger.debug(

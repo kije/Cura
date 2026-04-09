@@ -1,0 +1,307 @@
+name: Build Non-Planar Engine Plugin
+
+on:
+  push:
+    paths:
+      - 'plugins/NonPlanarSlicing/engine_plugin/**'
+      - 'plugins/NonPlanarSlicing/proto/**'
+      - 'plugins/NonPlanarSlicing/engine_prototype.py'
+      - 'plugins/NonPlanarSlicing/tests/**'
+      - '.github/workflows/nonplanar-engine.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------
+  # Detect which components changed
+  # ---------------------------------------------------------------
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      host: ${{ steps.filter.outputs.host }}
+      wasm: ${{ steps.filter.outputs.wasm }}
+      python: ${{ steps.filter.outputs.python }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            host:
+              - 'plugins/NonPlanarSlicing/engine_plugin/host/**'
+              - 'plugins/NonPlanarSlicing/proto/**'
+              - '.github/workflows/nonplanar-engine.yml'
+            wasm:
+              - 'plugins/NonPlanarSlicing/engine_plugin/wasm/**'
+              - 'plugins/NonPlanarSlicing/proto/**'
+              - '.github/workflows/nonplanar-engine.yml'
+            python:
+              - 'plugins/NonPlanarSlicing/engine_prototype.py'
+              - 'plugins/NonPlanarSlicing/tests/**'
+              - 'plugins/NonPlanarSlicing/proto/**'
+
+  # ---------------------------------------------------------------
+  # WASM algorithm module (universal, single platform)
+  # ---------------------------------------------------------------
+  build-wasm:
+    name: Build WASM
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/NonPlanarSlicing/engine_plugin
+          key: wasm
+
+      - name: Build WASM module
+        working-directory: plugins/NonPlanarSlicing/engine_plugin
+        run: cargo build -p nonplanar_wasm --target wasm32-wasip1 --release
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nonplanar-wasm
+          path: plugins/NonPlanarSlicing/engine_plugin/target/wasm32-wasip1/release/nonplanar_wasm.wasm
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Native host binary (per-platform)
+  # ---------------------------------------------------------------
+  build-host:
+    name: Build Host (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.host == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary_name: nonplanar_engine
+            artifact_name: nonplanar_engine-linux-x86_64
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary_name: nonplanar_engine
+            artifact_name: nonplanar_engine-linux-aarch64
+            cross: true
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            binary_name: nonplanar_engine.exe
+            artifact_name: nonplanar_engine-windows-x86_64
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            binary_name: nonplanar_engine
+            artifact_name: nonplanar_engine-macos-x86_64
+            cross: true
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            binary_name: nonplanar_engine
+            artifact_name: nonplanar_engine-macos-aarch64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/NonPlanarSlicing/engine_plugin
+          key: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.cross && runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Configure cross-compilation linker
+        if: matrix.cross && runner.os == 'Linux'
+        run: |
+          mkdir -p plugins/NonPlanarSlicing/engine_plugin/.cargo
+          cat > plugins/NonPlanarSlicing/engine_plugin/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build native host
+        working-directory: plugins/NonPlanarSlicing/engine_plugin
+        run: cargo build -p nonplanar_engine --release --target ${{ matrix.target }}
+
+      - name: Upload host binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: plugins/NonPlanarSlicing/engine_plugin/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Package — assemble plugin, reusing previous artifacts if skipped
+  # ---------------------------------------------------------------
+  package:
+    name: Package Plugin
+    needs: [build-wasm, build-host]
+    if: |
+      always() &&
+      (needs.build-wasm.result == 'success' || needs.build-wasm.result == 'skipped') &&
+      (needs.build-host.result == 'success' || needs.build-host.result == 'skipped') &&
+      (needs.build-wasm.result == 'success' || needs.build-host.result == 'success')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download current run artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+        continue-on-error: true
+
+      - name: Fetch previous WASM artifact
+        if: needs.build-wasm.result == 'skipped'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: nonplanar-engine.yml
+          name: nonplanar-wasm
+          path: artifacts/nonplanar-wasm
+          branch: main
+          if_no_artifact_found: warn
+          workflow_conclusion: success
+
+      - name: Fetch previous host binaries
+        if: needs.build-host.result == 'skipped'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: nonplanar-engine.yml
+          name: nonplanar_engine-*
+          name_is_regexp: true
+          path: artifacts/
+          branch: main
+          if_no_artifact_found: warn
+          workflow_conclusion: success
+
+      - name: Assemble plugin package
+        run: |
+          PKG="nonplanar-plugin"
+          mkdir -p "$PKG/NonPlanarSlicing/bin/linux-x86_64"
+          mkdir -p "$PKG/NonPlanarSlicing/bin/linux-aarch64"
+          mkdir -p "$PKG/NonPlanarSlicing/bin/windows-x86_64"
+          mkdir -p "$PKG/NonPlanarSlicing/bin/macos-x86_64"
+          mkdir -p "$PKG/NonPlanarSlicing/bin/macos-aarch64"
+
+          # Copy plugin Python files
+          cp plugins/NonPlanarSlicing/plugin.json                     "$PKG/NonPlanarSlicing/"
+          cp plugins/NonPlanarSlicing/__init__.py                      "$PKG/NonPlanarSlicing/"
+          cp plugins/NonPlanarSlicing/NonPlanarSlicingExtension.py     "$PKG/NonPlanarSlicing/"
+          cp plugins/NonPlanarSlicing/NonPlanarEnginePlugin.py         "$PKG/NonPlanarSlicing/"
+          cp plugins/NonPlanarSlicing/engine_prototype.py              "$PKG/NonPlanarSlicing/"
+          cp plugins/NonPlanarSlicing/nonplanar_settings.def.json      "$PKG/NonPlanarSlicing/"
+          cp -r plugins/NonPlanarSlicing/proto                         "$PKG/NonPlanarSlicing/"
+          cp -r plugins/NonPlanarSlicing/analysis                      "$PKG/NonPlanarSlicing/"
+          cp -r plugins/NonPlanarSlicing/visualization                 "$PKG/NonPlanarSlicing/"
+
+          # Copy platform host binaries
+          for plat in linux-x86_64 linux-aarch64 windows-x86_64 macos-x86_64 macos-aarch64; do
+            artifact_dir="artifacts/nonplanar_engine-${plat}"
+            if [ -d "$artifact_dir" ]; then
+              cp "$artifact_dir"/* "$PKG/NonPlanarSlicing/bin/${plat}/"
+            else
+              echo "WARNING: No host binary for ${plat}"
+            fi
+          done
+
+          # Copy universal WASM module into bin/ root
+          if [ -f artifacts/nonplanar-wasm/nonplanar_wasm.wasm ]; then
+            cp artifacts/nonplanar-wasm/nonplanar_wasm.wasm "$PKG/NonPlanarSlicing/bin/nonplanar.wasm"
+          else
+            echo "WARNING: No WASM module found"
+          fi
+
+          # Make binaries executable
+          chmod +x "$PKG/NonPlanarSlicing/bin/"*/nonplanar_engine* 2>/dev/null || true
+
+          # Create zip package
+          cd "$PKG"
+          zip -r "../NonPlanarSlicing-plugin.zip" NonPlanarSlicing/
+          cd ..
+
+          echo "=== Package contents ==="
+          unzip -l NonPlanarSlicing-plugin.zip
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NonPlanarSlicing-plugin
+          path: NonPlanarSlicing-plugin.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Release — create GitHub release on tag push
+  # ---------------------------------------------------------------
+  release:
+    name: Create Release
+    needs: package
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download plugin package
+        uses: actions/download-artifact@v4
+        with:
+          name: NonPlanarSlicing-plugin
+
+      - name: Download individual binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            NonPlanarSlicing-plugin.zip
+            binaries/nonplanar_engine-linux-x86_64/nonplanar_engine
+            binaries/nonplanar_engine-linux-aarch64/nonplanar_engine
+            binaries/nonplanar_engine-windows-x86_64/nonplanar_engine.exe
+            binaries/nonplanar_engine-macos-x86_64/nonplanar_engine
+            binaries/nonplanar_engine-macos-aarch64/nonplanar_engine

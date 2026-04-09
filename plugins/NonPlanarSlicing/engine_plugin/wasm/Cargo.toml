@@ -1,0 +1,15 @@
+[package]
+name = "nonplanar_wasm"
+version = "1.0.0"
+edition = "2021"
+description = "Non-Planar Slicing algorithm compiled to WASI"
+license = "LGPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"

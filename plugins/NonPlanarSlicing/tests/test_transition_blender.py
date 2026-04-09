@@ -5,7 +5,7 @@
 
 import numpy as np
 import pytest
-from gcode.transition_blender import smoothstep, compute_blend_map
+from analysis.transition_blender import smoothstep, compute_blend_map
 
 
 class TestSmoothstep:
