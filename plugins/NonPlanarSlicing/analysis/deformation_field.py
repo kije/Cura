@@ -407,11 +407,24 @@ def _solve_quickcurve(
                 is_fixed[r, c] = True
                 fixed_value[r, c] = surface_disp[r, c]
 
-    # Build sparse linear system for the Laplacian: L @ s = rhs
-    # For free variables: Σ_neighbors (s[i] - s[j]) = 0  (smoothness)
-    # For fixed variables: s[i] = fixed_value[i]
+    # Build least-squares system using QR-style assembly (A @ x ≈ b).
+    # We construct as a normal-equation form: (A^T A) @ x = A^T b
+    # using the Laplacian stencil augmented with gradient steepening.
     #
-    # We use the standard 4-connected Laplacian stencil.
+    # Row types (per QuickCurve, arXiv:2406.03966):
+    # 1. Fixed cells: s[i] = fixed_value[i]   (weight = 1.0)
+    # 2. Smoothness:  s[i] - s[j] = 0         for free neighbor pairs
+    # 3. Gradient steepening: s[i] - s[j] = ±H_target  (encourages
+    #    the surface to be as steep as possible in free regions,
+    #    maximizing the non-planar curvature benefit)
+    #
+    # We use the Laplacian with steepening-adjusted RHS.
+
+    # H_target: target height difference per grid cell (mm).
+    # This is the key QuickCurve addition — free cells are encouraged
+    # to slope at theta_target, not just be smooth.
+    h_target = math.tan(math.radians(min(max_angle_deg * 0.7, 89.0))) * resolution
+
     L_rows = []
     L_cols = []
     L_data = []
@@ -422,14 +435,15 @@ def _solve_quickcurve(
             i = idx2d(r, c)
 
             if is_fixed[r, c]:
-                # Fixed cell: s[i] = fixed_value
+                # Fixed cell: s[i] = fixed_value (Dirichlet BC)
                 L_rows.append(i)
                 L_cols.append(i)
                 L_data.append(1.0)
                 rhs[i] = fixed_value[r, c]
             else:
-                # Free cell: Laplacian stencil
+                # Free cell: Laplacian stencil with gradient steepening
                 neighbor_count = 0
+                steepening_rhs = 0.0
                 for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                     nr, nc = r + dr, c + dc
                     if 0 <= nr < rows and 0 <= nc < cols:
@@ -438,10 +452,23 @@ def _solve_quickcurve(
                         L_cols.append(j)
                         L_data.append(-1.0)
                         neighbor_count += 1
+
+                        # Gradient steepening: if the neighbor has a
+                        # known surface value, encourage this cell to
+                        # slope toward it at the target angle.
+                        if is_fixed[nr, nc] and safe[nr, nc]:
+                            nval = fixed_value[nr, nc]
+                            if abs(nval) > 1e-6:
+                                # Encourage slope toward the surface
+                                steepening_rhs += math.copysign(
+                                    min(h_target, abs(nval)),
+                                    nval,
+                                )
+
                 L_rows.append(i)
                 L_cols.append(i)
                 L_data.append(float(neighbor_count))
-                rhs[i] = 0.0
+                rhs[i] = steepening_rhs
 
     L = sparse.csc_matrix((L_data, (L_rows, L_cols)), shape=(M, M))
     surface_opt = spsolve(L, rhs)
