@@ -166,35 +166,61 @@ def _subdivide_adaptive_once(
     target_edge_length: float,
     max_triangles: int
 ) -> tuple:
-    """Single pass of adaptive subdivision.
+    """Single pass of adaptive subdivision using global edge marking.
+
+    Edges are marked globally so that shared edges between adjacent triangles
+    always agree on whether to split, preventing T-junctions (cracks).
 
     Returns (new_vertices, new_indices, any_split).
     """
     num_verts = len(vertices)
     num_faces = len(indices)
 
-    # Build edges: (v0,v1), (v1,v2), (v0,v2) per face
+    # ----------------------------------------------------------------
+    # Step 1: Build ALL unique edges from the mesh (same pattern as
+    # _subdivide_once).  edge_inverse maps each of the M*3 per-face
+    # edge slots back to the unique-edge index.
+    # ----------------------------------------------------------------
     edge_pairs = numpy.stack([
         indices[:, [0, 1]],
         indices[:, [1, 2]],
         indices[:, [0, 2]],
     ], axis=1)  # (M, 3, 2)
 
-    # Compute edge lengths
-    e01 = numpy.linalg.norm(vertices[indices[:, 1]] - vertices[indices[:, 0]], axis=1)
-    e12 = numpy.linalg.norm(vertices[indices[:, 2]] - vertices[indices[:, 1]], axis=1)
-    e02 = numpy.linalg.norm(vertices[indices[:, 2]] - vertices[indices[:, 0]], axis=1)
-    edge_lengths = numpy.stack([e01, e12, e02], axis=1)  # (M, 3)
+    sorted_edges = numpy.sort(edge_pairs, axis=2)
+    all_edges = sorted_edges.reshape(-1, 2)  # (M*3, 2)
 
-    # Flag edges exceeding target length
-    flags = edge_lengths > target_edge_length  # (M, 3) bool
-    flag_counts = flags.sum(axis=1)  # (M,) int: 0, 1, 2, or 3
+    unique_edges, edge_inverse = numpy.unique(
+        all_edges, axis=0, return_inverse=True
+    )  # unique_edges: (U, 2),  edge_inverse: (M*3,)
 
-    if flag_counts.max() == 0:
+    # ----------------------------------------------------------------
+    # Step 2: Compute the length of each *unique* edge (once per edge,
+    # not once per triangle half-edge).
+    # ----------------------------------------------------------------
+    unique_edge_vectors = (
+        vertices[unique_edges[:, 1]] - vertices[unique_edges[:, 0]]
+    )
+    unique_edge_lengths = numpy.linalg.norm(unique_edge_vectors, axis=1)  # (U,)
+
+    # ----------------------------------------------------------------
+    # Step 3: Mark unique edges exceeding target_edge_length.
+    # ----------------------------------------------------------------
+    unique_edge_marked = unique_edge_lengths > target_edge_length  # (U,) bool
+
+    if not unique_edge_marked.any():
         return vertices, indices, False
 
+    # ----------------------------------------------------------------
+    # Step 4: Map the global marks back to per-triangle flags via
+    # edge_inverse.  After reshape, flags[i, j] tells whether the
+    # j-th edge of triangle i is marked for splitting.
+    # ----------------------------------------------------------------
+    flags = unique_edge_marked[edge_inverse].reshape(num_faces, 3)  # (M, 3) bool
+    flag_counts = flags.sum(axis=1)  # (M,) — 0, 1, 2, or 3
+
     # Estimate output triangle count
-    output_estimate = (
+    output_estimate = int(
         (flag_counts == 0).sum() +
         (flag_counts == 1).sum() * 2 +
         (flag_counts == 2).sum() * 3 +
@@ -203,29 +229,32 @@ def _subdivide_adaptive_once(
     if output_estimate > max_triangles:
         return vertices, indices, False
 
-    # Sort edges for deduplication
-    sorted_edges = numpy.sort(edge_pairs, axis=2)
-    all_edges = sorted_edges.reshape(-1, 2)
-    all_flags = flags.ravel()  # (M*3,)
+    # ----------------------------------------------------------------
+    # Step 5: Compute midpoints for every marked unique edge, then
+    # build the per-face midpoint-index table.
+    # ----------------------------------------------------------------
+    # We only need midpoints for the marked unique edges.  Build a
+    # compact midpoint array and a mapping from unique-edge-index to
+    # new vertex index (or -1 if not marked).
 
-    # Find unique edges that need midpoints (only flagged ones)
-    flagged_edges = all_edges[all_flags]
-    if len(flagged_edges) == 0:
-        return vertices, indices, False
+    marked_unique_indices = numpy.where(unique_edge_marked)[0]  # indices into unique_edges
+    midpoints = (
+        vertices[unique_edges[marked_unique_indices, 0]] +
+        vertices[unique_edges[marked_unique_indices, 1]]
+    ) * 0.5  # (num_marked, 3)
 
-    unique_flagged, inv_flagged = numpy.unique(flagged_edges, axis=0, return_inverse=True)
-    midpoints = (vertices[unique_flagged[:, 0]] + vertices[unique_flagged[:, 1]]) * 0.5
+    # Map from unique-edge-index -> new-vertex global index (-1 if unmarked)
+    unique_to_midpoint = numpy.full(len(unique_edges), -1, dtype=numpy.int32)
+    unique_to_midpoint[marked_unique_indices] = numpy.arange(
+        num_verts, num_verts + len(marked_unique_indices), dtype=numpy.int32
+    )
 
-    # Build a mapping from edge key to midpoint index
-    # For the full all_edges array, create midpoint index or -1
-    midpoint_indices = numpy.full(len(all_edges), -1, dtype=numpy.int32)
-    flagged_positions = numpy.where(all_flags)[0]
-    midpoint_indices[flagged_positions] = (num_verts + inv_flagged).astype(numpy.int32)
+    # Per-face midpoint indices via edge_inverse: (M*3,) -> reshape (M, 3)
+    face_midpoints = unique_to_midpoint[edge_inverse].reshape(num_faces, 3)
 
-    # Reshape to (M, 3): per-face midpoint indices (-1 if not split)
-    face_midpoints = midpoint_indices.reshape(num_faces, 3)
-
-    # Process each group by flag count
+    # ----------------------------------------------------------------
+    # Step 6: Per-triangle rebuild grouped by flag count (0/1/2/3).
+    # ----------------------------------------------------------------
     new_tris_list = []
 
     # Group 0: unchanged triangles
@@ -246,7 +275,7 @@ def _subdivide_adaptive_once(
         t3 = numpy.column_stack([m01, m12, m02])
         new_tris_list.extend([t0, t1, t2, t3])
 
-    # Group 1: split into 2 (split the flagged edge)
+    # Group 1: split into 2 (split the single flagged edge)
     mask_1 = flag_counts == 1
     if mask_1.any():
         tri1 = indices[mask_1]
@@ -275,7 +304,8 @@ def _subdivide_adaptive_once(
                 new_tris_list.append(numpy.column_stack([v0, v1, mid]))
                 new_tris_list.append(numpy.column_stack([v1, v2, mid]))
 
-    # Group 2: split into 3 (two edges flagged — fan from vertex opposite the unsplit edge)
+    # Group 2: split into 3 (two edges flagged — fan from vertex opposite
+    # the unsplit edge)
     mask_2 = flag_counts == 2
     if mask_2.any():
         tri2 = indices[mask_2]

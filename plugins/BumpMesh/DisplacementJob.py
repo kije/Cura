@@ -159,6 +159,10 @@ class DisplacementJob(Job):
         mask = DisplacementEngine.compute_angle_mask(normals, mask_angle)
         if flat_face_mask is not None:
             mask = mask * flat_face_mask
+
+        # Apply boundary falloff to smooth mask transitions
+        if flat_face_mask is not None:
+            mask = DisplacementEngine.compute_boundary_falloff(vertices, mask, falloff_distance=2.0)
         message.setProgress(55)
 
         # Step 6: Sample displacement values

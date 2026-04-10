@@ -251,18 +251,25 @@ Item
                     id: scaleUSlider
                     Layout.fillWidth: true
                     indicatorVisible: false
-                    from: 0.1
-                    to: 50.0
-                    stepSize: 0.1
-                    value: UM.Controller.properties.getValue("ScaleU") ?? 1.0
+                    from: 0.0
+                    to: 1.0
+                    stepSize: 0.001
+
+                    property real logMin: Math.log(0.05)
+                    property real logMax: Math.log(50.0)
+
+                    function scaleToPos(s) { return (Math.log(Math.max(s, 0.05)) - logMin) / (logMax - logMin) }
+                    function posToScale(p) { return Math.exp(logMin + p * (logMax - logMin)) }
+
+                    value: scaleToPos(UM.Controller.properties.getValue("ScaleU") ?? 1.0)
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed) UM.Controller.setProperty("ScaleU", scaleUSlider.value)
+                        if (!pressed) UM.Controller.setProperty("ScaleU", posToScale(scaleUSlider.value))
                     }
                 }
                 UM.Label
                 {
-                    text: scaleUSlider.value.toFixed(1)
+                    text: scaleUSlider.posToScale(scaleUSlider.value).toFixed(1)
                     Layout.preferredWidth: 30
                 }
             }
@@ -275,18 +282,25 @@ Item
                     id: scaleVSlider
                     Layout.fillWidth: true
                     indicatorVisible: false
-                    from: 0.1
-                    to: 50.0
-                    stepSize: 0.1
-                    value: UM.Controller.properties.getValue("ScaleV") ?? 1.0
+                    from: 0.0
+                    to: 1.0
+                    stepSize: 0.001
+
+                    property real logMin: Math.log(0.05)
+                    property real logMax: Math.log(50.0)
+
+                    function scaleToPos(s) { return (Math.log(Math.max(s, 0.05)) - logMin) / (logMax - logMin) }
+                    function posToScale(p) { return Math.exp(logMin + p * (logMax - logMin)) }
+
+                    value: scaleToPos(UM.Controller.properties.getValue("ScaleV") ?? 1.0)
                     onPressedChanged: function(pressed)
                     {
-                        if (!pressed) UM.Controller.setProperty("ScaleV", scaleVSlider.value)
+                        if (!pressed) UM.Controller.setProperty("ScaleV", posToScale(scaleVSlider.value))
                     }
                 }
                 UM.Label
                 {
-                    text: scaleVSlider.value.toFixed(1)
+                    text: scaleVSlider.posToScale(scaleVSlider.value).toFixed(1)
                     Layout.preferredWidth: 30
                 }
             }

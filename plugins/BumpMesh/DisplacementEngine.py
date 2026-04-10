@@ -205,6 +205,159 @@ def compute_angle_mask(normals: numpy.ndarray, mask_angle_deg: float) -> numpy.n
     return mask.astype(numpy.float32)
 
 
+def compute_boundary_falloff(
+    vertices: numpy.ndarray,
+    mask: numpy.ndarray,
+    falloff_distance: float = 2.0,
+) -> numpy.ndarray:
+    """Smooth the boundary of a binary mask using distance-based falloff.
+
+    For each vertex near a mask boundary (where adjacent vertices have different
+    mask values), smoothly ramp the mask from 0 to 1 over `falloff_distance` mm.
+    Uses a spatial grid for efficient neighbor lookup.
+
+    :param vertices: (N, 3) float32 vertex positions.
+    :param mask: (N,) float32 mask values (0.0 or 1.0, or already smooth).
+    :param falloff_distance: Distance in mm over which to smooth the transition.
+    :return: (N,) float32 smoothed mask values [0, 1].
+    """
+    n = len(vertices)
+    if n == 0 or falloff_distance <= 0.0:
+        return mask.copy()
+
+    # --- Step 1: Identify boundary vertices ---
+    # Quantize positions to find coincident / nearby vertices (same logic as
+    # compute_flat_normals) so that triangle-soup vertices sharing the same
+    # spatial position are grouped together.
+    quantized = numpy.round(vertices * QUANTISE_FACTOR).astype(numpy.int64)
+    keys = (quantized[:, 0] * 1000000007
+            + quantized[:, 1] * 1000000009
+            + quantized[:, 2])
+    unique_keys, inverse, counts = numpy.unique(
+        keys, return_inverse=True, return_counts=True
+    )
+
+    # For each unique position, compute min and max mask value among its vertices
+    num_groups = len(unique_keys)
+    group_mask_min = numpy.ones(num_groups, dtype=numpy.float32)
+    group_mask_max = numpy.zeros(num_groups, dtype=numpy.float32)
+
+    # Use bincount-based min/max: min via -max(-x), max via max(x)
+    # numpy.minimum/maximum with at for scatter
+    numpy.minimum.at(group_mask_min, inverse, mask)
+    numpy.maximum.at(group_mask_max, inverse, mask)
+
+    # A group is on the boundary if its vertices don't all share the same mask value
+    group_is_boundary = group_mask_max - group_mask_min > 0.01
+
+    # Also check triangle-level adjacency: for each triangle, if the 3 vertices
+    # (by unique-group) have differing mask values, mark those groups as boundary.
+    num_tris = n // 3
+    if num_tris > 0:
+        tri_groups = inverse.reshape(num_tris, 3)
+        tri_mask_vals = mask.reshape(num_tris, 3)
+        tri_min = tri_mask_vals.min(axis=1)
+        tri_max = tri_mask_vals.max(axis=1)
+        mixed_tris = numpy.where(tri_max - tri_min > 0.01)[0]
+        if len(mixed_tris) > 0:
+            mixed_groups = tri_groups[mixed_tris].ravel()
+            group_is_boundary[mixed_groups] = True
+
+    # Map boundary flag back to per-vertex
+    vertex_is_boundary = group_is_boundary[inverse]
+    boundary_indices = numpy.where(vertex_is_boundary)[0]
+
+    if len(boundary_indices) == 0:
+        return mask.copy()
+
+    boundary_positions = vertices[boundary_indices]  # (B, 3)
+
+    # --- Step 2: Build spatial grid for efficient neighbor lookup ---
+    cell_size = falloff_distance
+    if cell_size < 1e-6:
+        return mask.copy()
+
+    # Determine which vertices are candidates for smoothing: those within
+    # falloff_distance of any boundary vertex.  We process all non-boundary
+    # vertices to check, using the spatial grid for efficiency.
+
+    # Grid cell coordinates for boundary vertices
+    b_cells = numpy.floor(boundary_positions / cell_size).astype(numpy.int64)
+
+    # Build a dict mapping cell -> list of boundary vertex indices (into boundary_positions)
+    grid = {}
+    for idx in range(len(boundary_indices)):
+        cx, cy, cz = int(b_cells[idx, 0]), int(b_cells[idx, 1]), int(b_cells[idx, 2])
+        key = (cx, cy, cz)
+        if key not in grid:
+            grid[key] = []
+        grid[key].append(idx)
+
+    # Convert lists to arrays for vectorized distance computation
+    for key in grid:
+        grid[key] = numpy.array(grid[key], dtype=numpy.int64)
+
+    # --- Step 3: For each vertex, find distance to nearest boundary vertex ---
+    result = mask.copy()
+
+    # Process vertices in chunks to limit memory usage
+    chunk_size = 4096
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunk_verts = vertices[start:end]  # (C, 3)
+        chunk_cells = numpy.floor(chunk_verts / cell_size).astype(numpy.int64)
+
+        for local_i in range(end - start):
+            global_i = start + local_i
+            # Boundary vertices keep their original mask
+            if vertex_is_boundary[global_i]:
+                # Set boundary vertices to the threshold (0.5) for smooth transition
+                continue
+
+            cx = int(chunk_cells[local_i, 0])
+            cy = int(chunk_cells[local_i, 1])
+            cz = int(chunk_cells[local_i, 2])
+
+            # Gather boundary vertices from the 3x3x3 neighborhood of cells
+            nearby_boundary_idx = []
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    for dz in range(-1, 2):
+                        cell_key = (cx + dx, cy + dy, cz + dz)
+                        if cell_key in grid:
+                            nearby_boundary_idx.append(grid[cell_key])
+
+            if len(nearby_boundary_idx) == 0:
+                continue
+
+            nearby_boundary_idx = numpy.concatenate(nearby_boundary_idx)
+            nearby_positions = boundary_positions[nearby_boundary_idx]
+
+            # Compute distances to nearby boundary vertices
+            diffs = nearby_positions - chunk_verts[local_i]
+            dists = numpy.sqrt(numpy.sum(diffs * diffs, axis=1))
+            min_dist = numpy.min(dists)
+
+            if min_dist > falloff_distance:
+                continue
+
+            # Signed distance: positive inside masked region, negative outside
+            current_mask_val = mask[global_i]
+            if current_mask_val > 0.5:
+                signed_dist = min_dist  # inside -> positive
+            else:
+                signed_dist = -min_dist  # outside -> negative
+
+            # Map to [0, falloff_distance] then smoothstep to [0, 1]
+            t = numpy.clip((signed_dist + falloff_distance) / (2.0 * falloff_distance), 0.0, 1.0)
+            # Smoothstep: 3t^2 - 2t^3
+            smoothed = t * t * (3.0 - 2.0 * t)
+
+            result[global_i] = smoothed
+
+    return result.astype(numpy.float32)
+
+
 def smooth_texture(texture_data: numpy.ndarray, iterations: int) -> numpy.ndarray:
     """Apply box blur smoothing to the displacement map.
 
