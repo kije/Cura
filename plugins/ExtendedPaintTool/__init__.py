@@ -4,8 +4,6 @@
 from . import ExtendedPaintTool
 from . import ExtendedPaintView
 from .DrawingTool import DrawingMode
-from .PaintLayer import BlendMode
-from .ImageProjection import ProjectionMode
 
 from PyQt6.QtQml import qmlRegisterUncreatableType
 
@@ -32,8 +30,8 @@ def register(app):
     qmlRegisterUncreatableType(ExtendedPaintTool.ExtendedPaintTool.Brush, "Cura", 1, 0, "This is an enumeration class", "ExtPaintToolBrush")
     qmlRegisterUncreatableType(ExtendedPaintTool.ExtendedPaintTool.Paint, "Cura", 1, 0, "This is an enumeration class", "ExtPaintToolState")
     qmlRegisterUncreatableType(DrawingMode, "Cura", 1, 0, "This is an enumeration class", "ExtPaintToolDrawingMode")
-    qmlRegisterUncreatableType(BlendMode, "Cura", 1, 0, "This is an enumeration class", "ExtPaintToolBlendMode")
-    qmlRegisterUncreatableType(ProjectionMode, "Cura", 1, 0, "This is an enumeration class", "ExtPaintToolProjectionMode")
+    # NOTE: BlendMode and ProjectionMode are NOT registered here to stay within
+    # Qt's 60-type limit.  QML uses plain integer constants for those enums.
     view = ExtendedPaintView.ExtendedPaintView()
     return {
         "tool": ExtendedPaintTool.ExtendedPaintTool(view),
