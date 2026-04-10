@@ -79,7 +79,20 @@ Item
                     catalog.i18nc("@item:inlistbox", "Dots"),
                     catalog.i18nc("@item:inlistbox", "Noise"),
                     catalog.i18nc("@item:inlistbox", "Crosshatch"),
-                    catalog.i18nc("@item:inlistbox", "Hexagonal")
+                    catalog.i18nc("@item:inlistbox", "Hexagonal"),
+                    catalog.i18nc("@item:inlistbox", "Voronoi cells"),
+                    catalog.i18nc("@item:inlistbox", "Knurl"),
+                    catalog.i18nc("@item:inlistbox", "Checkerboard"),
+                    catalog.i18nc("@item:inlistbox", "Grid"),
+                    catalog.i18nc("@item:inlistbox", "Stripes"),
+                    catalog.i18nc("@item:inlistbox", "Diagonal stripes"),
+                    catalog.i18nc("@item:inlistbox", "Concentric rings"),
+                    catalog.i18nc("@item:inlistbox", "Fish scales"),
+                    catalog.i18nc("@item:inlistbox", "Fine noise"),
+                    catalog.i18nc("@item:inlistbox", "Zigzag"),
+                    catalog.i18nc("@item:inlistbox", "Starburst"),
+                    catalog.i18nc("@item:inlistbox", "Radial gradient"),
+                    catalog.i18nc("@item:inlistbox", "Linear gradient")
                 ]
                 currentIndex: 0
                 onActivated: function(index)
@@ -198,6 +211,30 @@ Item
                 {
                     text: amplitudeSlider.value.toFixed(1) + " mm"
                     Layout.preferredWidth: 50
+                }
+            }
+
+            // Symmetric/Asymmetric toggle
+            RowLayout
+            {
+                width: parent.width
+                spacing: UM.Theme.getSize("default_margin").width
+
+                UM.Label
+                {
+                    text: catalog.i18nc("@label", "Mode:")
+                    Layout.preferredWidth: 40
+                }
+
+                Cura.ComboBox
+                {
+                    Layout.fillWidth: true
+                    model: [
+                        catalog.i18nc("@item:inlistbox", "Symmetric (bidirectional)"),
+                        catalog.i18nc("@item:inlistbox", "Outward only")
+                    ]
+                    currentIndex: (UM.Controller.properties.getValue("Symmetric") ?? true) ? 0 : 1
+                    onCurrentIndexChanged: UM.Controller.setProperty("Symmetric", currentIndex === 0)
                 }
             }
 

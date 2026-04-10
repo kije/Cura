@@ -24,15 +24,18 @@ from .FaceMask import FaceMask
 from .MeshDisplaceOperation import MeshDisplaceOperation
 
 # Maximum estimated face count before we refuse to run (prevents OOM)
-_MAX_ESTIMATED_FACES = 5_000_000
+_MAX_ESTIMATED_FACES = 10_000_000
 
 # Debounce delay in ms before running a preview after parameter changes
 _PREVIEW_DEBOUNCE_MS = 350
 
 # Built-in texture filenames (index matches the QML combo box order)
 _BUILTIN_TEXTURE_NAMES = [
-    "diamond.png", "brick.png", "waves.png", "dots.png",
-    "noise.png", "crosshatch.png", "hexagonal.png",
+    "diamond.png", "brick.png", "waves.png", "dots.png", "noise.png",
+    "crosshatch.png", "hexagonal.png", "voronoi.png", "knurl.png",
+    "checkerboard.png", "grid.png", "stripes.png", "diagonal_stripes.png",
+    "rings.png", "scales.png", "fine_noise.png", "zigzag.png",
+    "starburst.png", "radial.png", "gradient.png",
 ]
 
 
@@ -73,6 +76,7 @@ class BumpMeshTool(Tool):
         self._target_edge_length: float = 1.0  # mm, for adaptive mode
         self._mask_angle: float = 0.0
         self._smoothing: int = 0
+        self._symmetric: bool = True  # True = bidirectional, False = outward only
 
         # State
         self._state: int = BumpMeshTool.State.READY
@@ -104,7 +108,7 @@ class BumpMeshTool(Tool):
             "TexturePath", "ProjectionMode", "Amplitude",
             "ScaleU", "ScaleV", "OffsetU", "OffsetV", "Rotation",
             "SubdivisionLevel", "SubdivisionMode", "TargetEdgeLength",
-            "MaskAngle", "Smoothing",
+            "MaskAngle", "Smoothing", "Symmetric",
             "State", "HasTexture", "EstimatedVertices", "ErrorMessage",
             "HasUnconfirmedChanges",
             "PaintMode", "BucketAngle", "HasFaceMask", "BuiltinTexture"
@@ -231,6 +235,16 @@ class BumpMeshTool(Tool):
         value = int(value)
         if value != self._smoothing:
             self._smoothing = value
+            self.propertyChanged.emit()
+            self._schedulePreview()
+
+    def getSymmetric(self) -> bool:
+        return self._symmetric
+
+    def setSymmetric(self, value: bool) -> None:
+        value = bool(value)
+        if value != self._symmetric:
+            self._symmetric = value
             self.propertyChanged.emit()
             self._schedulePreview()
 
@@ -720,6 +734,9 @@ class BumpMeshTool(Tool):
             "target_edge_length": self._target_edge_length,
             "mask_angle": self._mask_angle,
             "smoothing": self._smoothing,
+            "symmetric": self._symmetric,
+            "tex_width": self._texture_image.width() if self._texture_image else 0,
+            "tex_height": self._texture_image.height() if self._texture_image else 0,
         }
 
         self._state = BumpMeshTool.State.PROCESSING

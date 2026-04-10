@@ -4,6 +4,11 @@
 import numpy
 from math import pi
 
+# Default cylindrical cap angle: vertices with |normal·Y| > cos(cap_angle) use XZ projection
+_DEFAULT_CAP_ANGLE_DEG = 20.0
+# Cubic seam band width for cross-fade blending between projection zones
+_CUBIC_SEAM_BAND = 0.35
+
 
 def project(vertices: numpy.ndarray, normals: numpy.ndarray, mode: int, params: dict) -> numpy.ndarray:
     """Compute UV coordinates for each vertex based on the selected projection mode.
@@ -20,7 +25,7 @@ def project(vertices: numpy.ndarray, normals: numpy.ndarray, mode: int, params: 
     elif mode == 1:
         uvs = _project_cubic(vertices, normals)
     elif mode == 2:
-        uvs = _project_cylindrical(vertices)
+        uvs = _project_cylindrical(vertices, normals)
     elif mode == 3:
         uvs = _project_spherical(vertices)
     elif mode == 4:
@@ -32,15 +37,13 @@ def project(vertices: numpy.ndarray, normals: numpy.ndarray, mode: int, params: 
     else:
         uvs = _project_planar_xz(vertices)
 
-    # Apply UV transforms: scale, rotation, offset
+    # Apply UV transforms: scale, rotation, offset, texture aspect correction
     uvs = _apply_uv_transform(uvs, params)
     return uvs
 
 
 def sample_displacement(uvs: numpy.ndarray, texture_data: numpy.ndarray) -> numpy.ndarray:
     """Sample displacement values from texture using bilinear interpolation.
-
-    For triplanar mode, use sample_displacement_triplanar instead.
 
     :param uvs: (N, 2) float32 UV coordinates.
     :param texture_data: (H, W) float32 grayscale texture [0, 1].
@@ -91,6 +94,8 @@ def sample_displacement_triplanar(
 ) -> numpy.ndarray:
     """Sample displacement using triplanar blending (3 planar projections blended by normal).
 
+    Now properly applies rotation and all UV transforms to each projection plane.
+
     :param vertices: (N, 3) float32 vertex positions.
     :param normals: (N, 3) float32 per-vertex normals.
     :param texture_data: (H, W) float32 grayscale texture [0, 1].
@@ -111,7 +116,7 @@ def sample_displacement_triplanar(
     uv_xz = numpy.column_stack([norm_verts[:, 0], norm_verts[:, 2]])  # project along Y
     uv_xy = numpy.column_stack([norm_verts[:, 0], norm_verts[:, 1]])  # project along Z
 
-    # Apply UV transforms to each projection
+    # Apply UV transforms to each projection (including rotation)
     uv_yz = _apply_uv_transform(uv_yz, params)
     uv_xz = _apply_uv_transform(uv_xz, params)
     uv_xy = _apply_uv_transform(uv_xy, params)
@@ -171,8 +176,13 @@ def _project_planar_yz(vertices: numpy.ndarray) -> numpy.ndarray:
     return numpy.column_stack([u, v]).astype(numpy.float32)
 
 
-def _project_cylindrical(vertices: numpy.ndarray) -> numpy.ndarray:
-    """Cylindrical projection around the Y axis."""
+def _project_cylindrical(vertices: numpy.ndarray, normals: numpy.ndarray) -> numpy.ndarray:
+    """Cylindrical projection around the Y axis with cap handling.
+
+    Vertices whose normal points mostly up/down (within cap_angle of Y axis) smoothly
+    blend from cylindrical side projection to XZ planar projection for the caps.
+    This prevents extreme stretching at cylinder tops/bottoms.
+    """
     bbox_min = vertices.min(axis=0)
     bbox_max = vertices.max(axis=0)
     bbox_size = bbox_max - bbox_min
@@ -183,10 +193,28 @@ def _project_cylindrical(vertices: numpy.ndarray) -> numpy.ndarray:
     dx = vertices[:, 0] - center_x
     dz = vertices[:, 2] - center_z
 
-    u = (numpy.arctan2(dz, dx) + pi) / (2 * pi)
-
+    # Side projection: angular U, height V
+    u_side = (numpy.arctan2(dz, dx) + pi) / (2 * pi)
     height = bbox_size[1] if bbox_size[1] > 1e-6 else 1.0
-    v = (vertices[:, 1] - bbox_min[1]) / height
+    v_side = (vertices[:, 1] - bbox_min[1]) / height
+
+    # Cap projection: planar XZ normalized to bbox
+    u_cap = (vertices[:, 0] - bbox_min[0]) / max(bbox_size[0], 1e-6)
+    v_cap = (vertices[:, 2] - bbox_min[2]) / max(bbox_size[2], 1e-6)
+
+    # Blend: vertices with normal mostly along Y get cap projection
+    cap_angle_rad = numpy.radians(_DEFAULT_CAP_ANGLE_DEG)
+    cos_cap = numpy.cos(cap_angle_rad)
+    abs_ny = numpy.abs(normals[:, 1])
+
+    # Smooth transition: blend factor from 0 (side) to 1 (cap)
+    # Ramp over a 10-degree band
+    blend_start = cos_cap  # e.g., cos(20°) ≈ 0.94
+    blend_end = numpy.cos(numpy.radians(max(_DEFAULT_CAP_ANGLE_DEG + 10, 30)))  # cos(30°) ≈ 0.87
+    cap_blend = numpy.clip((abs_ny - blend_end) / max(blend_start - blend_end, 1e-6), 0.0, 1.0)
+
+    u = u_side * (1.0 - cap_blend) + u_cap * cap_blend
+    v = v_side * (1.0 - cap_blend) + v_cap * cap_blend
 
     return numpy.column_stack([u, v]).astype(numpy.float32)
 
@@ -206,58 +234,80 @@ def _project_spherical(vertices: numpy.ndarray) -> numpy.ndarray:
 
 
 def _project_cubic(vertices: numpy.ndarray, normals: numpy.ndarray) -> numpy.ndarray:
-    """Cubic (box) projection -- each face projects based on its dominant normal axis."""
+    """Cubic (box) projection with seam blending between dominant axes.
+
+    Uses a smoothstep cross-fade at zone boundaries instead of hard axis selection.
+    """
     bbox_min = vertices.min(axis=0)
     bbox_max = vertices.max(axis=0)
     bbox_size = bbox_max - bbox_min
     bbox_size = numpy.where(bbox_size < 1e-6, 1.0, bbox_size)
 
     norm_verts = (vertices - bbox_min) / bbox_size
-
     abs_normals = numpy.abs(normals)
-    dominant = numpy.argmax(abs_normals, axis=1)
 
-    uvs = numpy.zeros((len(vertices), 2), dtype=numpy.float32)
+    # Compute blend weights per axis with seam band cross-fade
+    # The dominant axis gets weight 1.0; near boundaries, weights blend smoothly
+    ax = abs_normals[:, 0]
+    ay = abs_normals[:, 1]
+    az = abs_normals[:, 2]
 
-    # X-dominant faces -> project onto YZ plane
-    mask_x = dominant == 0
-    uvs[mask_x, 0] = norm_verts[mask_x, 1]
-    uvs[mask_x, 1] = norm_verts[mask_x, 2]
+    # Power-law sharpening with seam band softness
+    power = max(1.0, 1.0 + (1.0 - _CUBIC_SEAM_BAND) * 11.0)
+    wx = ax ** power
+    wy = ay ** power
+    wz = az ** power
 
-    # Y-dominant faces -> project onto XZ plane
-    mask_y = dominant == 1
-    uvs[mask_y, 0] = norm_verts[mask_y, 0]
-    uvs[mask_y, 1] = norm_verts[mask_y, 2]
+    w_sum = wx + wy + wz
+    w_sum = numpy.where(w_sum < 1e-8, 1.0, w_sum)
+    wx /= w_sum
+    wy /= w_sum
+    wz /= w_sum
 
-    # Z-dominant faces -> project onto XY plane
-    mask_z = dominant == 2
-    uvs[mask_z, 0] = norm_verts[mask_z, 0]
-    uvs[mask_z, 1] = norm_verts[mask_z, 1]
+    # Per-axis UVs
+    u_x = norm_verts[:, 1]  # X-dominant: YZ plane
+    v_x = norm_verts[:, 2]
+    u_y = norm_verts[:, 0]  # Y-dominant: XZ plane
+    v_y = norm_verts[:, 2]
+    u_z = norm_verts[:, 0]  # Z-dominant: XY plane
+    v_z = norm_verts[:, 1]
 
-    return uvs
+    # Weighted blend of UVs from all three axes
+    u = wx * u_x + wy * u_y + wz * u_z
+    v = wx * v_x + wy * v_y + wz * v_z
+
+    return numpy.column_stack([u, v]).astype(numpy.float32)
 
 
 def _project_triplanar(vertices: numpy.ndarray, normals: numpy.ndarray) -> numpy.ndarray:
     """Triplanar projection -- returns dummy UVs (actual sampling is done in sample_displacement_triplanar)."""
-    # For triplanar, we don't use standard UVs. Return zeros as placeholder.
-    # The actual triplanar blending happens in sample_displacement_triplanar().
     return numpy.zeros((len(vertices), 2), dtype=numpy.float32)
 
 
 # --- UV Transform ---
 
 def _apply_uv_transform(uvs: numpy.ndarray, params: dict) -> numpy.ndarray:
-    """Apply rotation, scale, and offset to UV coordinates.
+    """Apply rotation, scale, offset, and texture aspect correction to UV coordinates.
 
-    Order: center at (0.5, 0.5) -> rotate -> scale -> uncenter -> offset.
-    This ensures rotation always happens around the texture center regardless
-    of the scale values.
+    Order: center at (0.5, 0.5) -> rotate -> scale (with aspect correction) -> uncenter -> offset.
     """
     scale_u = params.get("scale_u", 1.0)
     scale_v = params.get("scale_v", 1.0)
     offset_u = params.get("offset_u", 0.0)
     offset_v = params.get("offset_v", 0.0)
     rotation_deg = params.get("rotation", 0.0)
+
+    # Texture aspect correction: compensate for non-square textures so that
+    # equal world-space distances produce equal texture-space distances.
+    tex_width = params.get("tex_width", 0)
+    tex_height = params.get("tex_height", 0)
+    if tex_width > 0 and tex_height > 0:
+        t_max = max(tex_width, tex_height)
+        aspect_u = t_max / tex_width
+        aspect_v = t_max / tex_height
+    else:
+        aspect_u = 1.0
+        aspect_v = 1.0
 
     result = uvs.copy()
 
@@ -275,9 +325,9 @@ def _apply_uv_transform(uvs: numpy.ndarray, params: dict) -> numpy.ndarray:
         result[:, 0] = u_rot
         result[:, 1] = v_rot
 
-    # Scale around the center
-    result[:, 0] *= scale_u
-    result[:, 1] *= scale_v
+    # Scale (with aspect correction)
+    result[:, 0] *= scale_u * aspect_u
+    result[:, 1] *= scale_v * aspect_v
 
     # Uncenter
     result[:, 0] += 0.5
