@@ -65,43 +65,89 @@ Item
                 }
             }
 
-            // Built-in textures dropdown
-            Cura.ComboBox
+            // Built-in textures — collapsible grid with previews
+            UM.Label
             {
-                id: builtinCombo
-                width: parent.width
-                enabled: currentState !== 2
-                model: [
-                    catalog.i18nc("@item:inlistbox", "— Built-in textures —"),
-                    catalog.i18nc("@item:inlistbox", "Diamond plate"),
-                    catalog.i18nc("@item:inlistbox", "Brick"),
-                    catalog.i18nc("@item:inlistbox", "Waves"),
-                    catalog.i18nc("@item:inlistbox", "Dots"),
-                    catalog.i18nc("@item:inlistbox", "Noise"),
-                    catalog.i18nc("@item:inlistbox", "Crosshatch"),
-                    catalog.i18nc("@item:inlistbox", "Hexagonal"),
-                    catalog.i18nc("@item:inlistbox", "Voronoi cells"),
-                    catalog.i18nc("@item:inlistbox", "Knurl"),
-                    catalog.i18nc("@item:inlistbox", "Checkerboard"),
-                    catalog.i18nc("@item:inlistbox", "Grid"),
-                    catalog.i18nc("@item:inlistbox", "Stripes"),
-                    catalog.i18nc("@item:inlistbox", "Diagonal stripes"),
-                    catalog.i18nc("@item:inlistbox", "Concentric rings"),
-                    catalog.i18nc("@item:inlistbox", "Fish scales"),
-                    catalog.i18nc("@item:inlistbox", "Fine noise"),
-                    catalog.i18nc("@item:inlistbox", "Zigzag"),
-                    catalog.i18nc("@item:inlistbox", "Starburst"),
-                    catalog.i18nc("@item:inlistbox", "Radial gradient"),
-                    catalog.i18nc("@item:inlistbox", "Linear gradient")
-                ]
-                currentIndex: 0
-                onActivated: function(index)
+                id: builtinToggleLabel
+                property bool expanded: false
+                text: expanded ?
+                    catalog.i18nc("@label", "Built-in Textures \u25B2") :
+                    catalog.i18nc("@label", "Built-in Textures \u25BC")
+                font: UM.Theme.getFont("default_bold")
+                color: UM.Theme.getColor("text_link")
+
+                MouseArea
                 {
-                    if (index > 0)
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: builtinToggleLabel.expanded = !builtinToggleLabel.expanded
+                }
+            }
+
+            // Scrollable grid of texture thumbnails (visible when expanded)
+            Flickable
+            {
+                visible: builtinToggleLabel.expanded
+                width: parent.width
+                height: Math.min(contentHeight, 160)
+                contentHeight: textureGrid.height
+                clip: true
+                flickableDirection: Flickable.VerticalFlick
+
+                Grid
+                {
+                    id: textureGrid
+                    columns: 5
+                    spacing: 4
+                    width: parent.width
+
+                    property var textureFiles: [
+                        "diamond.png", "brick.png", "waves.png", "dots.png", "noise.png",
+                        "crosshatch.png", "hexagonal.png", "voronoi.png", "knurl.png",
+                        "checkerboard.png", "grid.png", "stripes.png", "diagonal_stripes.png",
+                        "rings.png", "scales.png", "fine_noise.png", "zigzag.png",
+                        "starburst.png", "radial.png", "gradient.png"
+                    ]
+
+                    Repeater
                     {
-                        // Setting BuiltinTexture property triggers the load on the Python side
-                        UM.Controller.setProperty("BuiltinTexture", index - 1)
-                        currentIndex = 0
+                        model: textureGrid.textureFiles.length
+                        delegate: Rectangle
+                        {
+                            width: (textureGrid.width - textureGrid.spacing * 4) / 5
+                            height: width
+                            color: "transparent"
+                            border.width: thumbMouse.containsMouse ? 2 : 1
+                            border.color: thumbMouse.containsMouse ?
+                                UM.Theme.getColor("primary") :
+                                UM.Theme.getColor("lining")
+                            radius: 2
+
+                            Image
+                            {
+                                anchors.fill: parent
+                                anchors.margins: 1
+                                source: Qt.resolvedUrl("textures/" + textureGrid.textureFiles[index])
+                                fillMode: Image.PreserveAspectFit
+                                smooth: false
+                            }
+
+                            MouseArea
+                            {
+                                id: thumbMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: UM.Controller.setProperty("BuiltinTexture", index)
+                            }
+
+                            ToolTip
+                            {
+                                visible: thumbMouse.containsMouse
+                                text: textureGrid.textureFiles[index].replace(".png", "").replace("_", " ")
+                                delay: 500
+                            }
+                        }
                     }
                 }
             }
