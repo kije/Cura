@@ -33,6 +33,7 @@ from .DrawingTool import (
     DrawingMode, DrawingTool, DrawingToolResult,
     FreehandTool, LineTool, RectangleTool, CircleTool, PolygonTool, FillTool,
 )
+from .ImageProjection import ImageProjector, ImageTransform, ProjectionMode
 
 
 class ExtendedPaintTool(Tool):
@@ -107,6 +108,10 @@ class ExtendedPaintTool(Tool):
         self._stabilize: bool = False
         self._stabilize_strength: int = 5
 
+        # Image projection
+        self._image_projector: ImageProjector = ImageProjector()
+        self._image_path: str = ""
+
         legacy_opengl = OpenGLContext.isLegacyOpenGL()
         self._state: ExtendedPaintTool.Paint.State = ExtendedPaintTool.Paint.State.NOT_SUPPORTED if legacy_opengl else\
                                                                                 ExtendedPaintTool.Paint.State.MULTIPLE_SELECTION
@@ -118,6 +123,10 @@ class ExtendedPaintTool(Tool):
             "DrawingMode", "SymmetryX", "SymmetryY", "SymmetryZ",
             "Stabilize", "StabilizeStrength",
             "LayerStack",
+            "ImageLoaded", "ImagePath", "ImageProjectionMode", "ImageThreshold",
+            "ImageInvert", "ImageScale", "ImageRotation",
+            "ImageOffsetU", "ImageOffsetV",
+            "ImageCenterX", "ImageCenterY", "ImageCenterZ",
         )
 
         self._controller.activeViewChanged.connect(self._updateIgnoreUnselectedObjects)
@@ -208,6 +217,226 @@ class ExtendedPaintTool(Tool):
         """Get the layer stack for the current painted object and paint type.
         Exposed to QML for the LayerPanel."""
         return self._view.getLayerStack()
+
+    # --- Image Projection ---
+
+    def getImageLoaded(self) -> bool:
+        return self._image_projector.has_image()
+
+    def getImagePath(self) -> str:
+        return self._image_path
+
+    def setImagePath(self, path: str) -> None:
+        """Load an image from disk and (re)initialize the projector.
+
+        Accepts file:// URLs as well as plain paths so QML FileDialog values
+        can be passed through directly.
+        """
+        path_str = str(path) if path is not None else ""
+        if path_str.startswith("file://"):
+            from urllib.parse import urlparse, unquote
+            path_str = unquote(urlparse(path_str).path)
+
+        if path_str == self._image_path and self._image_projector.has_image():
+            return
+
+        self._image_path = path_str
+        if not path_str:
+            self._image_projector.clear()
+            self.propertyChanged.emit()
+            return
+
+        ok = self._image_projector.load_image(path_str)
+        if not ok:
+            self._image_path = ""
+        else:
+            # Recentre the projection on the current painted object if any.
+            painted = self._view.getPaintedObject()
+            if painted is not None:
+                bbox = painted.getBoundingBox()
+                if bbox is not None:
+                    c = bbox.center
+                    self._image_projector.transform.center_x = float(c.x)
+                    self._image_projector.transform.center_y = float(c.y)
+                    self._image_projector.transform.center_z = float(c.z)
+        self.propertyChanged.emit()
+
+    def getImageProjectionMode(self) -> int:
+        return self._image_projector.get_mode()
+
+    def setImageProjectionMode(self, mode: int) -> None:
+        self._image_projector.set_mode(int(mode))
+        self.propertyChanged.emit()
+
+    def getImageThreshold(self) -> int:
+        return self._image_projector.get_threshold()
+
+    def setImageThreshold(self, threshold: int) -> None:
+        self._image_projector.set_threshold(int(threshold))
+        self.propertyChanged.emit()
+
+    def getImageInvert(self) -> bool:
+        return self._image_projector.get_invert()
+
+    def setImageInvert(self, invert: bool) -> None:
+        self._image_projector.set_invert(bool(invert))
+        self.propertyChanged.emit()
+
+    def getImageScale(self) -> float:
+        return self._image_projector.transform.scale
+
+    def setImageScale(self, scale: float) -> None:
+        self._image_projector.transform.scale = max(float(scale), 0.01)
+        self.propertyChanged.emit()
+
+    def getImageRotation(self) -> float:
+        return self._image_projector.transform.rotation_deg
+
+    def setImageRotation(self, rotation: float) -> None:
+        self._image_projector.transform.rotation_deg = float(rotation)
+        self.propertyChanged.emit()
+
+    def getImageOffsetU(self) -> float:
+        return self._image_projector.transform.offset_u
+
+    def setImageOffsetU(self, value: float) -> None:
+        self._image_projector.transform.offset_u = float(value)
+        self.propertyChanged.emit()
+
+    def getImageOffsetV(self) -> float:
+        return self._image_projector.transform.offset_v
+
+    def setImageOffsetV(self, value: float) -> None:
+        self._image_projector.transform.offset_v = float(value)
+        self.propertyChanged.emit()
+
+    def getImageCenterX(self) -> float:
+        return self._image_projector.transform.center_x
+
+    def setImageCenterX(self, value: float) -> None:
+        self._image_projector.transform.center_x = float(value)
+        self.propertyChanged.emit()
+
+    def getImageCenterY(self) -> float:
+        return self._image_projector.transform.center_y
+
+    def setImageCenterY(self, value: float) -> None:
+        self._image_projector.transform.center_y = float(value)
+        self.propertyChanged.emit()
+
+    def getImageCenterZ(self) -> float:
+        return self._image_projector.transform.center_z
+
+    def setImageCenterZ(self, value: float) -> None:
+        self._image_projector.transform.center_z = float(value)
+        self.propertyChanged.emit()
+
+    def resetImageTransform(self) -> None:
+        """Reset the projection transform to a sane default centred on the object."""
+        painted = self._view.getPaintedObject()
+        center_x = center_y = center_z = 0.0
+        if painted is not None:
+            bbox = painted.getBoundingBox()
+            if bbox is not None:
+                c = bbox.center
+                center_x, center_y, center_z = float(c.x), float(c.y), float(c.z)
+        self._image_projector.set_transform(ImageTransform(
+            center_x = center_x, center_y = center_y, center_z = center_z,
+        ))
+        self.propertyChanged.emit()
+
+    def clearImage(self) -> None:
+        self._image_projector.clear()
+        self._image_path = ""
+        self.propertyChanged.emit()
+
+    def applyImage(self) -> None:
+        """Project the currently loaded image onto the painted object and push
+        the result onto the undo stack.
+        """
+        if not self._image_projector.has_image():
+            Logger.warning("ExtendedPaintTool.applyImage called without a loaded image")
+            return
+
+        painted_object = self._view.getPaintedObject()
+        if painted_object is None:
+            Logger.warning("ExtendedPaintTool.applyImage: no painted object")
+            return
+
+        mesh_data = painted_object.getMeshData()
+        if mesh_data is None or not mesh_data.hasUVCoordinates():
+            Logger.warning("ExtendedPaintTool.applyImage: mesh has no UV coordinates")
+            return
+
+        tex_w, tex_h = self._view.getUvTexDimensions()
+        if tex_w <= 0 or tex_h <= 0:
+            Logger.warning("ExtendedPaintTool.applyImage: paint texture not ready")
+            return
+
+        # Refresh the transformed mesh cache.
+        if self._cache_dirty or self._mesh_transformed_cache is None or self._node_cache is not painted_object:
+            self._node_cache = painted_object
+            self._mesh_transformed_cache = painted_object.getMeshDataTransformed()
+            self._cache_dirty = False
+
+        world_vertices = self._mesh_transformed_cache.getVertices()
+        uv_coords = mesh_data.getUVCoordinates()
+        indices = self._mesh_transformed_cache.getIndices()
+
+        bbox = painted_object.getBoundingBox()
+        if bbox is None:
+            Logger.warning("ExtendedPaintTool.applyImage: object has no bounding box")
+            return
+        bbox_size = numpy.array([
+            float(bbox.width), float(bbox.height), float(bbox.depth)
+        ], dtype = numpy.float32)
+
+        # Use camera forward for backface culling if available.
+        cam_forward = None
+        try:
+            if self._camera is None:
+                self._updateCamera()
+            if self._camera is not None:
+                cam_ray = self._camera.getRay(0, 0)
+                cam_forward = numpy.asarray(cam_ray.direction.getData(), dtype = numpy.float32)
+                norm = numpy.linalg.norm(cam_forward)
+                if norm > 1e-9:
+                    cam_forward = cam_forward / norm
+        except Exception:
+            cam_forward = None
+
+        # Backface culling makes sense for planar modes (one-sided decal),
+        # but the wrap-around modes (box / spherical / cylindrical) should
+        # naturally cover the entire model.
+        planar_modes = (
+            ProjectionMode.Mode.PLANAR_X,
+            ProjectionMode.Mode.PLANAR_Y,
+            ProjectionMode.Mode.PLANAR_Z,
+        )
+        cull_backfaces = self._image_projector.get_mode() in planar_modes
+
+        try:
+            mask = self._image_projector.build_texture_mask(
+                world_vertices = world_vertices,
+                uv_coords = uv_coords,
+                indices = indices,
+                texture_width = tex_w,
+                texture_height = tex_h,
+                bbox_size = bbox_size,
+                camera_forward = cam_forward,
+                cull_backfaces = cull_backfaces,
+            )
+        except Exception:
+            Logger.logException("e", "ExtendedPaintTool.applyImage: projection failed")
+            return
+
+        if mask is None or not mask.any():
+            Logger.info("ExtendedPaintTool.applyImage: projection produced an empty mask")
+            return
+
+        brush_color = str(self._brush_extruder)
+        self._view.applyImageMask(mask, brush_color)
+        self._updateScene(painted_object, update_node = True)
 
     # --- Camera ---
 

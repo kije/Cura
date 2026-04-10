@@ -343,6 +343,27 @@ Item
                 color: UM.Theme.getColor("lining")
             }
 
+            Rectangle
+            {
+                width: parent.width
+                height: UM.Theme.getSize("default_lining").height
+                color: UM.Theme.getColor("lining")
+            }
+
+            // --- Image Projection ---
+            ImagePanel
+            {
+                id: imagePanelInstance
+                width: parent.width
+            }
+
+            Rectangle
+            {
+                width: parent.width
+                height: UM.Theme.getSize("default_lining").height
+                color: UM.Theme.getColor("lining")
+            }
+
             // --- Undo / Redo / Clear ---
             RowLayout
             {

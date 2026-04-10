@@ -27,6 +27,7 @@ from cura.Scene.SliceableObjectDecorator import SliceableObjectDecorator
 
 from .PaintStrokeCommand import PaintStrokeCommand
 from .PaintClearCommand import PaintClearCommand
+from .PaintImageCommand import PaintImageCommand
 from .MultiMaterialExtruderConverter import MultiMaterialExtruderConverter
 from .PaintLayer import PaintLayerStack
 
@@ -321,6 +322,42 @@ class ExtendedPaintView(CuraView):
                                                   merge_with_previous,
                                                   None)
                 layer_stroke.redo()
+                layer_stack.invalidateCache()
+
+    def applyImageMask(self, mask, brush_color: str) -> None:
+        """Apply a pre-computed bool numpy mask as an image-projection paint operation.
+
+        The mask is in paint-texture space (shape = (height, width)). Every True
+        texel receives the bit-packed value for the given brush colour.
+        """
+        if self._paint_texture is None or self._paint_texture.getImage() is None:
+            return
+        if mask is None:
+            return
+
+        self._prepareDataMapping()
+        stack = self._prepareUndoRedoStack()
+        if stack is None:
+            return
+
+        set_value = self._shiftTextureValue(self._paint_modes[self._current_paint_type][brush_color].value)
+        stack.push(PaintImageCommand(self._paint_texture,
+                                     mask,
+                                     set_value,
+                                     self._current_bits_ranges,
+                                     self._getSliceableObjectDecorator()))
+
+        # Mirror to the active layer, if any
+        layer_stack = self.getLayerStack()
+        if layer_stack is not None:
+            active_layer = layer_stack.getActiveLayer()
+            if active_layer is not None and not active_layer.locked:
+                layer_cmd = PaintImageCommand(active_layer.texture,
+                                              mask,
+                                              set_value,
+                                              self._current_bits_ranges,
+                                              None)
+                layer_cmd.redo()
                 layer_stack.invalidateCache()
 
     def _getSliceableObjectDecorator(self) -> Optional[SliceableObjectDecorator]:
