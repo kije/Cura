@@ -40,8 +40,56 @@ jobs:
               - '.github/workflows/nonplanar-engine.yml'
             python:
               - 'plugins/NonPlanarSlicing/engine_prototype.py'
+              - 'plugins/NonPlanarSlicing/analysis/**'
               - 'plugins/NonPlanarSlicing/tests/**'
               - 'plugins/NonPlanarSlicing/proto/**'
+
+  # ---------------------------------------------------------------
+  # Python tests (unit + E2E pipeline + gRPC integration)
+  # ---------------------------------------------------------------
+  test-python:
+    name: Python Tests
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest numpy scipy osqp grpcio grpcio-tools protobuf
+
+      - name: Compile proto files
+        working-directory: plugins/NonPlanarSlicing
+        run: |
+          python -m grpc_tools.protoc \
+            --proto_path=proto \
+            --python_out=proto \
+            --grpc_python_out=proto \
+            proto/cura/plugins/v0/slot_id.proto \
+            proto/cura/plugins/v0/point3d.proto \
+            proto/cura/plugins/v0/printfeatures.proto \
+            proto/cura/plugins/v0/polygons.proto \
+            proto/cura/plugins/v0/gcode_path.proto \
+            proto/cura/plugins/slots/handshake/v0/handshake.proto \
+            proto/cura/plugins/slots/broadcast/v0/broadcast.proto \
+            proto/cura/plugins/slots/gcode_paths/v0/modify.proto
+
+      - name: Run tests
+        working-directory: plugins/NonPlanarSlicing
+        run: |
+          python -m pytest \
+            -p no:cacheprovider \
+            --rootdir=. \
+            --override-ini="testpaths=tests" \
+            --override-ini="python_files=test_*.py" \
+            tests/ -v
 
   # ---------------------------------------------------------------
   # WASM algorithm module (universal, single platform)
