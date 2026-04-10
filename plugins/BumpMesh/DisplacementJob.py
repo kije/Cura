@@ -181,6 +181,12 @@ class DisplacementJob(Job):
         new_vertices = DisplacementEngine.displace(
             vertices, normals, displacement_values, amplitude, mask, symmetric=symmetric
         )
+
+        # Step 7b: Weld coincident vertices to close gaps between adjacent faces.
+        # After displacement, vertices that were at the same position may have moved
+        # slightly apart (different normals/displacement). Averaging their final
+        # positions closes the cracks while keeping triangle soup format.
+        new_vertices = DisplacementEngine.weld_coincident_vertices(new_vertices)
         message.setProgress(80)
 
         # Step 8: Compute post-displacement normals via direct cross-product

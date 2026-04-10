@@ -40,6 +40,48 @@ def displace(
     return vertices + normals * offset[:, numpy.newaxis]
 
 
+def weld_coincident_vertices(vertices: numpy.ndarray) -> numpy.ndarray:
+    """Snap coincident vertices in triangle soup to the same position.
+
+    After displacement, vertices that were at the same position before flattening
+    may have displaced to slightly different positions (due to different normals
+    on different faces). This creates visible cracks between adjacent faces.
+
+    Fix: for each group of vertices that STARTED at the same position (within
+    tolerance), average their displaced positions so they meet at one point.
+    This closes the gaps while preserving the triangle soup format.
+
+    :param vertices: (M*3, 3) float32 displaced triangle soup vertices.
+    :return: (M*3, 3) float32 vertices with coincident positions welded.
+    """
+    # Quantize to find groups of originally-coincident vertices
+    # Use a tolerance of ~0.001mm (same as QUANTISE_FACTOR)
+    quantized = numpy.round(vertices * QUANTISE_FACTOR).astype(numpy.int64)
+    keys = quantized[:, 0] * 1000000007 + quantized[:, 1] * 1000000009 + quantized[:, 2]
+
+    unique_keys, inverse, counts = numpy.unique(keys, return_inverse=True, return_counts=True)
+
+    # Only process groups with 2+ vertices (singletons can't have cracks)
+    multi_mask = counts > 1
+    if not multi_mask.any():
+        return vertices
+
+    # Compute the mean position for each group using bincount
+    result = vertices.copy()
+    num_groups = len(unique_keys)
+
+    for axis in range(3):
+        group_sum = numpy.bincount(inverse, weights=vertices[:, axis].astype(numpy.float64),
+                                   minlength=num_groups)
+        group_mean = group_sum / counts.astype(numpy.float64)
+        # Only overwrite vertices belonging to multi-vertex groups
+        new_vals = group_mean[inverse].astype(numpy.float32)
+        multi_vertex_mask = multi_mask[inverse]
+        result[multi_vertex_mask, axis] = new_vals[multi_vertex_mask]
+
+    return result
+
+
 def flatten_mesh(vertices: numpy.ndarray, indices: numpy.ndarray) -> numpy.ndarray:
     """Flatten an indexed mesh to triangle soup (no shared vertices).
 
