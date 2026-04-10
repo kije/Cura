@@ -255,20 +255,7 @@ class BumpMeshTool(Tool):
         value = int(value)
         if value == self._paint_mode:
             return
-        was_painting = self._paint_mode > 0
         self._paint_mode = value
-        now_painting = value > 0
-
-        if now_painting and not was_painting:
-            # Entering paint mode: show the original mesh so face picking matches.
-            # The user paints on the unmodified mesh, then we re-apply the preview
-            # with the mask when they switch back to Off.
-            if self._has_unconfirmed_changes:
-                self._revertPreview()
-        elif was_painting and not now_painting:
-            # Exiting paint mode: re-run the preview with the (possibly updated) mask
-            self._schedulePreview()
-
         self.propertyChanged.emit()
 
     def getBucketAngle(self) -> float:
@@ -513,6 +500,8 @@ class BumpMeshTool(Tool):
                 return False
             self._mouse_painting = True
             self._paintAtScreenPosition(mouse_evt.x, mouse_evt.y)
+            # Immediate preview for visual feedback
+            self._schedulePreview()
             return True
 
         if event.type == Event.MouseMoveEvent:
@@ -522,20 +511,40 @@ class BumpMeshTool(Tool):
             # Brush modes drag-paint; bucket fill is single-click only
             if self._paint_mode in (1, 2):
                 self._paintAtScreenPosition(mouse_evt.x, mouse_evt.y)
+                # Schedule preview during drag for real-time visual feedback
+                self._schedulePreview()
             return True
 
         if event.type == Event.MouseReleaseEvent:
             if self._mouse_painting:
                 self._mouse_painting = False
-                # Trigger preview after release (avoid spamming during drag)
                 self._schedulePreview()
                 return True
             return False
 
         return False
 
+    def _mapPickedFaceToOriginal(self, picked_face_id: int) -> int:
+        """Map a face ID from the displayed (possibly subdivided) mesh back
+        to the original mesh's face index.
+
+        For uniform subdivision at level L, the subdivider creates 4^L sub-faces
+        per original face in sequential order. So original = picked // 4^L.
+        For adaptive subdivision or level 0, the mapping is direct.
+        """
+        if self._subdivision_mode == 0 and self._subdivision_level > 0:
+            divisor = 4 ** self._subdivision_level
+            return picked_face_id // divisor
+        # For adaptive or no subdivision, face IDs map directly
+        return picked_face_id
+
     def _paintAtScreenPosition(self, x: int, y: int) -> None:
-        """Pick a face under the cursor and apply the current paint mode."""
+        """Pick a face under the cursor and apply the current paint mode.
+
+        Maps the picked face ID from the displayed (subdivided) mesh back to
+        the original mesh's face index, so the face mask stays at original resolution.
+        Visual feedback: excluded faces stay flat in the live preview.
+        """
         if self._face_mask is None:
             return
 
@@ -552,7 +561,12 @@ class BumpMeshTool(Tool):
         if self._faces_selection_pass is None:
             return
 
-        face_id = int(self._faces_selection_pass.getFaceIdAtPosition(x, y))
+        picked_face_id = int(self._faces_selection_pass.getFaceIdAtPosition(x, y))
+        if picked_face_id < 0:
+            return
+
+        # Map from displayed mesh face to original mesh face
+        face_id = self._mapPickedFaceToOriginal(picked_face_id)
         if face_id < 0 or face_id >= self._face_mask.face_count:
             return
 
@@ -617,6 +631,7 @@ class BumpMeshTool(Tool):
             verts = mesh.getVertices()
             if verts is not None:
                 face_count = len(verts) // 3
+        face_count = int(face_count)
         if face_count > 0:
             self._face_mask = FaceMask(face_count)
         else:
@@ -660,12 +675,6 @@ class BumpMeshTool(Tool):
         if not self._preview_active or self._texture_data is None:
             return
         if self._getPreviewNode() is None:
-            return
-
-        # While paint mode is active, the user is painting on the original mesh.
-        # Parameter changes are queued but not previewed; the preview re-runs when
-        # paint mode is set back to Off.
-        if self._paint_mode > 0:
             return
 
         if self._state == BumpMeshTool.State.PROCESSING:

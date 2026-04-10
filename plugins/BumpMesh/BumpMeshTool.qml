@@ -630,23 +630,23 @@ Item
             {
                 text:
                 {
-                    if (paintMode === 0) return catalog.i18nc("@label", "Switch to a brush/bucket to paint faces.")
-                    if (paintMode === 1) return catalog.i18nc("@label", "Click & drag to mark faces as no-displacement.")
-                    if (paintMode === 2) return catalog.i18nc("@label", "Click & drag to restore displacement on faces.")
-                    if (paintMode === 3) return catalog.i18nc("@label", "Click a face to flood-fill exclusion (stops at sharp edges).")
-                    if (paintMode === 4) return catalog.i18nc("@label", "Click a face to flood-fill inclusion (stops at sharp edges).")
+                    if (paintMode === 0) return catalog.i18nc("@label", "Select a mode, then click faces in the viewport.")
+                    if (paintMode === 1) return catalog.i18nc("@label", "Click & drag faces to exclude from displacement. Excluded faces stay flat.")
+                    if (paintMode === 2) return catalog.i18nc("@label", "Click & drag to restore displacement on excluded faces.")
+                    if (paintMode === 3) return catalog.i18nc("@label", "Click a face to flood-fill exclude. Stops at sharp edges.")
+                    if (paintMode === 4) return catalog.i18nc("@label", "Click a face to flood-fill include. Stops at sharp edges.")
                     return ""
                 }
-                color: UM.Theme.getColor("text_inactive")
+                color: paintMode > 0 ? UM.Theme.getColor("text_default") : UM.Theme.getColor("text_inactive")
                 wrapMode: Text.WordWrap
                 width: parent.width
             }
 
             UM.Label
             {
-                visible: paintMode > 0
-                text: catalog.i18nc("@label", "Preview is paused while painting. Switch to 'Off' to see results.")
-                color: UM.Theme.getColor("warning")
+                visible: paintMode > 0 && hasTexture
+                text: catalog.i18nc("@label", "Excluded faces stay flat — that's how you see the mask.")
+                color: UM.Theme.getColor("text_inactive")
                 wrapMode: Text.WordWrap
                 width: parent.width
             }
