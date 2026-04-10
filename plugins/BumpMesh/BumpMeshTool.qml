@@ -21,6 +21,8 @@ Item
     property var hasTexture: UM.Controller.properties.getValue("HasTexture") ?? false
     property var hasUnconfirmedChanges: UM.Controller.properties.getValue("HasUnconfirmedChanges") ?? false
     property var subdivisionMode: UM.Controller.properties.getValue("SubdivisionMode") ?? 0
+    property var paintMode: UM.Controller.properties.getValue("PaintMode") ?? 0
+    property var hasFaceMask: UM.Controller.properties.getValue("HasFaceMask") ?? false
 
     ScrollView
     {
@@ -60,6 +62,34 @@ Item
                     text: catalog.i18nc("@action:button", "Auto")
                     enabled: hasTexture && currentState !== 2
                     onClicked: UM.Controller.triggerAction("autoComputeParameters")
+                }
+            }
+
+            // Built-in textures dropdown
+            Cura.ComboBox
+            {
+                id: builtinCombo
+                width: parent.width
+                enabled: currentState !== 2
+                model: [
+                    catalog.i18nc("@item:inlistbox", "— Built-in textures —"),
+                    catalog.i18nc("@item:inlistbox", "Diamond plate"),
+                    catalog.i18nc("@item:inlistbox", "Brick"),
+                    catalog.i18nc("@item:inlistbox", "Waves"),
+                    catalog.i18nc("@item:inlistbox", "Dots"),
+                    catalog.i18nc("@item:inlistbox", "Noise"),
+                    catalog.i18nc("@item:inlistbox", "Crosshatch"),
+                    catalog.i18nc("@item:inlistbox", "Hexagonal")
+                ]
+                currentIndex: 0
+                onActivated: function(index)
+                {
+                    if (index > 0)
+                    {
+                        // Setting BuiltinTexture property triggers the load on the Python side
+                        UM.Controller.setProperty("BuiltinTexture", index - 1)
+                        currentIndex = 0
+                    }
                 }
             }
 
@@ -468,6 +498,118 @@ Item
                         smoothingSlider.value.toFixed(0)
                     Layout.preferredWidth: 25
                 }
+            }
+
+            Rectangle
+            {
+                width: parent.width
+                height: UM.Theme.getSize("default_lining").height
+                color: UM.Theme.getColor("lining")
+            }
+
+            // === Section: Face Painting ===
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "Face Mask")
+                font: UM.Theme.getFont("default_bold")
+            }
+
+            Cura.ComboBox
+            {
+                id: paintModeCombo
+                width: parent.width
+                model: [
+                    catalog.i18nc("@item:inlistbox", "Off (camera)"),
+                    catalog.i18nc("@item:inlistbox", "Brush — Exclude"),
+                    catalog.i18nc("@item:inlistbox", "Brush — Include (Eraser)"),
+                    catalog.i18nc("@item:inlistbox", "Bucket — Exclude"),
+                    catalog.i18nc("@item:inlistbox", "Bucket — Include")
+                ]
+                currentIndex: paintMode
+                onCurrentIndexChanged: UM.Controller.setProperty("PaintMode", currentIndex)
+            }
+
+            UM.Label
+            {
+                text:
+                {
+                    if (paintMode === 0) return catalog.i18nc("@label", "Switch to a brush/bucket to paint faces.")
+                    if (paintMode === 1) return catalog.i18nc("@label", "Click & drag to mark faces as no-displacement.")
+                    if (paintMode === 2) return catalog.i18nc("@label", "Click & drag to restore displacement on faces.")
+                    if (paintMode === 3) return catalog.i18nc("@label", "Click a face to flood-fill exclusion (stops at sharp edges).")
+                    if (paintMode === 4) return catalog.i18nc("@label", "Click a face to flood-fill inclusion (stops at sharp edges).")
+                    return ""
+                }
+                color: UM.Theme.getColor("text_inactive")
+                wrapMode: Text.WordWrap
+                width: parent.width
+            }
+
+            UM.Label
+            {
+                visible: paintMode > 0
+                text: catalog.i18nc("@label", "Preview is paused while painting. Switch to 'Off' to see results.")
+                color: UM.Theme.getColor("warning")
+                wrapMode: Text.WordWrap
+                width: parent.width
+            }
+
+            // Bucket angle threshold (only relevant for bucket modes)
+            UM.Label
+            {
+                visible: paintMode === 3 || paintMode === 4
+                text: catalog.i18nc("@label", "Bucket Angle Threshold")
+            }
+
+            RowLayout
+            {
+                width: parent.width
+                visible: paintMode === 3 || paintMode === 4
+                UM.Slider
+                {
+                    id: bucketAngleSlider
+                    Layout.fillWidth: true
+                    indicatorVisible: false
+                    from: 5
+                    to: 90
+                    stepSize: 1
+                    value: UM.Controller.properties.getValue("BucketAngle") ?? 30
+                    onPressedChanged: function(pressed)
+                    {
+                        if (!pressed) UM.Controller.setProperty("BucketAngle", bucketAngleSlider.value)
+                    }
+                }
+                UM.Label
+                {
+                    text: bucketAngleSlider.value.toFixed(0) + "\u00B0"
+                    Layout.preferredWidth: 35
+                }
+            }
+
+            RowLayout
+            {
+                visible: hasFaceMask
+                spacing: UM.Theme.getSize("default_margin").width
+
+                Cura.SecondaryButton
+                {
+                    text: catalog.i18nc("@action:button", "Clear Mask")
+                    onClicked: UM.Controller.triggerAction("clearFaceMask")
+                }
+                Cura.SecondaryButton
+                {
+                    text: catalog.i18nc("@action:button", "Invert Mask")
+                    onClicked: UM.Controller.triggerAction("invertFaceMask")
+                }
+            }
+
+            UM.Label
+            {
+                visible: hasFaceMask
+                text: catalog.i18nc("@label", "Face mask active. Excluded faces won't be displaced.")
+                color: UM.Theme.getColor("text_inactive")
+                wrapMode: Text.WordWrap
+                width: parent.width
             }
 
             Rectangle

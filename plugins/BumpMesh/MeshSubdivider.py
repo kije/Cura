@@ -1,13 +1,20 @@
 # Copyright (c) 2025 BumpMesh Plugin
 # Released under the terms of the LGPLv3 or higher.
 
+from typing import Optional
+
 import numpy
 
 # Safety cap for adaptive subdivision
 _MAX_ADAPTIVE_TRIANGLES = 10_000_000
 
 
-def subdivide(vertices: numpy.ndarray, indices: numpy.ndarray, levels: int = 1) -> tuple:
+def subdivide(
+    vertices: numpy.ndarray,
+    indices: numpy.ndarray,
+    levels: int = 1,
+    vertex_attr: Optional[numpy.ndarray] = None,
+):
     """Perform uniform midpoint subdivision on a triangle mesh.
 
     Each triangle is split into 4 sub-triangles by inserting midpoints on each edge.
@@ -16,11 +23,65 @@ def subdivide(vertices: numpy.ndarray, indices: numpy.ndarray, levels: int = 1) 
     :param vertices: (N, 3) float32 array of vertex positions.
     :param indices: (M, 3) int32 array of triangle indices.
     :param levels: Number of subdivision iterations (each multiplies face count by 4).
-    :return: Tuple of (new_vertices, new_indices).
+    :param vertex_attr: Optional (N,) or (N, K) per-vertex attribute that will be
+        averaged at midpoints (e.g., paint mask weights).
+    :return: (vertices, indices) or (vertices, indices, vertex_attr) if attr provided.
     """
     for _ in range(levels):
-        vertices, indices = _subdivide_once(vertices, indices)
-    return vertices, indices
+        if vertex_attr is None:
+            vertices, indices = _subdivide_once(vertices, indices)
+        else:
+            vertices, indices, vertex_attr = _subdivide_once_with_attr(
+                vertices, indices, vertex_attr
+            )
+
+    if vertex_attr is None:
+        return vertices, indices
+    return vertices, indices, vertex_attr
+
+
+def _subdivide_once_with_attr(
+    vertices: numpy.ndarray, indices: numpy.ndarray, vertex_attr: numpy.ndarray
+):
+    """Single uniform subdivision pass that also interpolates a vertex attribute."""
+    num_verts = len(vertices)
+    num_faces = len(indices)
+
+    edge_pairs = numpy.stack([
+        indices[:, [0, 1]],
+        indices[:, [1, 2]],
+        indices[:, [0, 2]],
+    ], axis=1)
+    edge_pairs = numpy.sort(edge_pairs, axis=2)
+    all_edges = edge_pairs.reshape(-1, 2)
+
+    unique_edges, edge_inverse = numpy.unique(all_edges, axis=0, return_inverse=True)
+
+    midpoints = (vertices[unique_edges[:, 0]] + vertices[unique_edges[:, 1]]) * 0.5
+    # Interpolate the vertex attribute at midpoints (average of endpoints)
+    midpoint_attrs = (vertex_attr[unique_edges[:, 0]] + vertex_attr[unique_edges[:, 1]]) * 0.5
+
+    midpoint_global_indices = (num_verts + edge_inverse).astype(numpy.int32)
+    face_midpoints = midpoint_global_indices.reshape(num_faces, 3)
+
+    m01 = face_midpoints[:, 0]
+    m12 = face_midpoints[:, 1]
+    m02 = face_midpoints[:, 2]
+
+    v0 = indices[:, 0]
+    v1 = indices[:, 1]
+    v2 = indices[:, 2]
+
+    new_indices = numpy.empty((num_faces * 4, 3), dtype=numpy.int32)
+    new_indices[0::4] = numpy.column_stack([v0, m01, m02])
+    new_indices[1::4] = numpy.column_stack([m01, v1, m12])
+    new_indices[2::4] = numpy.column_stack([m02, m12, v2])
+    new_indices[3::4] = numpy.column_stack([m01, m12, m02])
+
+    all_vertices = numpy.vstack([vertices, midpoints.astype(vertices.dtype)])
+    all_attrs = numpy.concatenate([vertex_attr, midpoint_attrs.astype(vertex_attr.dtype)])
+
+    return all_vertices, new_indices, all_attrs
 
 
 def subdivide_adaptive(

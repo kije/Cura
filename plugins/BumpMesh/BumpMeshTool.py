@@ -4,14 +4,14 @@
 import os
 import weakref
 from enum import IntEnum
-from typing import Optional
+from typing import Optional, cast
 
 import numpy
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QFileDialog
 
-from UM.Event import Event
+from UM.Event import Event, MouseEvent
 from UM.Logger import Logger
 from UM.Mesh.MeshData import MeshData
 from UM.Scene.Selection import Selection
@@ -20,6 +20,7 @@ from UM.Tool import Tool
 from cura.CuraApplication import CuraApplication
 
 from .DisplacementJob import DisplacementJob
+from .FaceMask import FaceMask
 from .MeshDisplaceOperation import MeshDisplaceOperation
 
 # Maximum estimated face count before we refuse to run (prevents OOM)
@@ -27,6 +28,12 @@ _MAX_ESTIMATED_FACES = 5_000_000
 
 # Debounce delay in ms before running a preview after parameter changes
 _PREVIEW_DEBOUNCE_MS = 350
+
+# Built-in texture filenames (index matches the QML combo box order)
+_BUILTIN_TEXTURE_NAMES = [
+    "diamond.png", "brick.png", "waves.png", "dots.png",
+    "noise.png", "crosshatch.png", "hexagonal.png",
+]
 
 
 class BumpMeshTool(Tool):
@@ -79,6 +86,14 @@ class BumpMeshTool(Tool):
         self._preview_node_ref: Optional[weakref.ref] = None
         self._pending_preview: bool = False
 
+        # Face painting state
+        # 0=Off, 1=Brush Exclude, 2=Brush Include (eraser), 3=Bucket Fill Exclude, 4=Bucket Fill Include
+        self._paint_mode: int = 0
+        self._face_mask: Optional[FaceMask] = None
+        self._mouse_painting: bool = False
+        self._faces_selection_pass = None
+        self._bucket_angle: float = 30.0
+
         # Debounce timer for preview
         self._preview_timer = QTimer()
         self._preview_timer.setSingleShot(True)
@@ -91,7 +106,8 @@ class BumpMeshTool(Tool):
             "SubdivisionLevel", "SubdivisionMode", "TargetEdgeLength",
             "MaskAngle", "Smoothing",
             "State", "HasTexture", "EstimatedVertices", "ErrorMessage",
-            "HasUnconfirmedChanges"
+            "HasUnconfirmedChanges",
+            "PaintMode", "BucketAngle", "HasFaceMask", "BuiltinTexture"
         )
 
         Selection.selectionChanged.connect(self._onSelectionChanged)
@@ -217,6 +233,49 @@ class BumpMeshTool(Tool):
             self._smoothing = value
             self.propertyChanged.emit()
             self._schedulePreview()
+
+    def getPaintMode(self) -> int:
+        return int(self._paint_mode)
+
+    def setPaintMode(self, value: int) -> None:
+        value = int(value)
+        if value == self._paint_mode:
+            return
+        was_painting = self._paint_mode > 0
+        self._paint_mode = value
+        now_painting = value > 0
+
+        if now_painting and not was_painting:
+            # Entering paint mode: show the original mesh so face picking matches.
+            # The user paints on the unmodified mesh, then we re-apply the preview
+            # with the mask when they switch back to Off.
+            if self._has_unconfirmed_changes:
+                self._revertPreview()
+        elif was_painting and not now_painting:
+            # Exiting paint mode: re-run the preview with the (possibly updated) mask
+            self._schedulePreview()
+
+        self.propertyChanged.emit()
+
+    def getBucketAngle(self) -> float:
+        return self._bucket_angle
+
+    def setBucketAngle(self, value: float) -> None:
+        if value != self._bucket_angle:
+            self._bucket_angle = float(value)
+            self.propertyChanged.emit()
+
+    def getHasFaceMask(self) -> bool:
+        return self._face_mask is not None and self._face_mask.has_any_excluded()
+
+    def getBuiltinTexture(self) -> int:
+        return -1
+
+    def setBuiltinTexture(self, value: int) -> None:
+        """Setting this loads the corresponding built-in texture by index."""
+        idx = int(value)
+        if 0 <= idx < len(_BUILTIN_TEXTURE_NAMES):
+            self.loadBuiltinTexture(_BUILTIN_TEXTURE_NAMES[idx])
 
     def getState(self) -> int:
         return int(self._state)
@@ -406,15 +465,122 @@ class BumpMeshTool(Tool):
 
     # --- Event handling ---
 
+    def getRequiredExtraRenderingPasses(self) -> list:
+        """Request the face selection render pass when paint mode is active."""
+        if self._paint_mode > 0:
+            return ["selection_faces"]
+        return []
+
     def event(self, event: Event) -> bool:
         super().event(event)
 
         if event.type == Event.ToolActivateEvent:
             self._onToolActivated()
+            return False
         elif event.type == Event.ToolDeactivateEvent:
             self._onToolDeactivated()
+            return False
+
+        # Face painting mouse handling
+        if self._paint_mode > 0:
+            return self._handlePaintEvent(event)
 
         return False
+
+    def _handlePaintEvent(self, event: Event) -> bool:
+        """Handle mouse events when paint mode is active.
+
+        Returns True to consume the event (preventing camera rotation),
+        False to let camera handle it.
+        """
+        if event.type == Event.MousePressEvent:
+            mouse_evt = cast(MouseEvent, event)
+            if MouseEvent.LeftButton not in mouse_evt.buttons:
+                return False
+            self._mouse_painting = True
+            self._paintAtScreenPosition(mouse_evt.x, mouse_evt.y)
+            return True
+
+        if event.type == Event.MouseMoveEvent:
+            if not self._mouse_painting:
+                return False
+            mouse_evt = cast(MouseEvent, event)
+            # Brush modes drag-paint; bucket fill is single-click only
+            if self._paint_mode in (1, 2):
+                self._paintAtScreenPosition(mouse_evt.x, mouse_evt.y)
+            return True
+
+        if event.type == Event.MouseReleaseEvent:
+            if self._mouse_painting:
+                self._mouse_painting = False
+                # Trigger preview after release (avoid spamming during drag)
+                self._schedulePreview()
+                return True
+            return False
+
+        return False
+
+    def _paintAtScreenPosition(self, x: int, y: int) -> None:
+        """Pick a face under the cursor and apply the current paint mode."""
+        if self._face_mask is None:
+            return
+
+        # Lazy-init the selection pass
+        if self._faces_selection_pass is None:
+            try:
+                self._faces_selection_pass = (
+                    CuraApplication.getInstance().getRenderer().getRenderPass("selection_faces")
+                )
+            except Exception:
+                Logger.log("e", "BumpMesh: failed to get selection_faces render pass")
+                return
+
+        if self._faces_selection_pass is None:
+            return
+
+        face_id = int(self._faces_selection_pass.getFaceIdAtPosition(x, y))
+        if face_id < 0 or face_id >= self._face_mask.face_count:
+            return
+
+        mode = self._paint_mode
+        if mode == 1:  # Brush exclude
+            self._face_mask.exclude_face(face_id)
+        elif mode == 2:  # Brush include (eraser)
+            self._face_mask.include_face(face_id)
+        elif mode == 3 or mode == 4:  # Bucket fill
+            mesh = self._preview_original_mesh
+            if mesh is None:
+                return
+            verts = mesh.getVertices()
+            indices = mesh.getIndices()
+            if verts is None or indices is None:
+                return
+            set_value = 0.0 if mode == 3 else 1.0
+            self._face_mask.bucket_fill(
+                face_id, set_value, verts, indices, self._bucket_angle
+            )
+
+        self.propertyChanged.emit()
+
+        # During drag with brush, we DON'T schedule preview every event
+        # (would be too slow). Preview runs on mouse release.
+        # For bucket fill, schedule immediately since it's a single click.
+        if mode in (3, 4):
+            self._schedulePreview()
+
+    def clearFaceMask(self) -> None:
+        """Clear all face mask exclusions."""
+        if self._face_mask is not None:
+            self._face_mask.clear()
+            self.propertyChanged.emit()
+            self._schedulePreview()
+
+    def invertFaceMask(self) -> None:
+        """Invert the face mask."""
+        if self._face_mask is not None:
+            self._face_mask.invert()
+            self.propertyChanged.emit()
+            self._schedulePreview()
 
     # --- Internal: Preview lifecycle ---
 
@@ -424,17 +590,37 @@ class BumpMeshTool(Tool):
         if node is not None:
             self._preview_original_mesh = node.getMeshData()
             self._preview_node_ref = weakref.ref(node)
+            self._initFaceMask()
+
+    def _initFaceMask(self) -> None:
+        """Initialize an empty face mask matching the current mesh's face count."""
+        mesh = self._preview_original_mesh
+        if mesh is None:
+            self._face_mask = None
+            return
+        face_count = mesh.getFaceCount()
+        if face_count == 0:
+            verts = mesh.getVertices()
+            if verts is not None:
+                face_count = len(verts) // 3
+        if face_count > 0:
+            self._face_mask = FaceMask(face_count)
+        else:
+            self._face_mask = None
 
     def _onToolDeactivated(self) -> None:
         self._preview_timer.stop()
         self._pending_preview = False
         self._preview_active = False
+        self._mouse_painting = False
+        self._paint_mode = 0
 
         if self._has_unconfirmed_changes:
             self._revertPreview()
 
         self._preview_original_mesh = None
         self._preview_node_ref = None
+        self._face_mask = None
 
     def _revertPreview(self) -> None:
         node = self._getPreviewNode()
@@ -460,6 +646,12 @@ class BumpMeshTool(Tool):
         if not self._preview_active or self._texture_data is None:
             return
         if self._getPreviewNode() is None:
+            return
+
+        # While paint mode is active, the user is painting on the original mesh.
+        # Parameter changes are queued but not previewed; the preview re-runs when
+        # paint mode is set back to Off.
+        if self._paint_mode > 0:
             return
 
         if self._state == BumpMeshTool.State.PROCESSING:
@@ -502,6 +694,19 @@ class BumpMeshTool(Tool):
         if indices is not None:
             indices = indices.copy()
 
+        # Compute per-vertex face mask weights (if any face is excluded)
+        face_mask_weights = None
+        if (self._face_mask is not None
+                and self._face_mask.has_any_excluded()
+                and indices is not None):
+            try:
+                face_mask_weights = self._face_mask.compute_vertex_weights(
+                    indices, len(vertices)
+                ).copy()
+            except Exception:
+                Logger.logException("e", "Failed to compute face mask weights")
+                face_mask_weights = None
+
         params = {
             "projection_mode": self._projection_mode,
             "amplitude": self._amplitude,
@@ -521,7 +726,10 @@ class BumpMeshTool(Tool):
         self._error_message = ""
         self.propertyChanged.emit()
 
-        self._displacement_job = DisplacementJob(node, vertices, indices, self._texture_data, params)
+        self._displacement_job = DisplacementJob(
+            node, vertices, indices, self._texture_data, params,
+            face_mask_weights=face_mask_weights
+        )
         self._displacement_job.finished.connect(self._onPreviewFinished)
         self._displacement_job.start()
 
@@ -585,9 +793,11 @@ class BumpMeshTool(Tool):
         if node is not None and self._preview_active:
             self._preview_original_mesh = node.getMeshData()
             self._preview_node_ref = weakref.ref(node)
+            self._initFaceMask()
         else:
             self._preview_original_mesh = None
             self._preview_node_ref = None
+            self._face_mask = None
 
         self._state = BumpMeshTool.State.READY
         self._error_message = ""
