@@ -11,12 +11,21 @@ import Cura 1.0 as Cura
 // Collapsible build-plate management panel.
 // Positioned bottom-left (mirroring the Object List panel).
 //
+// Extension-point integrations wired here:
+//   • createQmlComponent  — this panel is the created component
+//   • QML Shortcut items  — Ctrl+] / Ctrl+[ / Ctrl+Shift+N
+//   • manager.canAddNewPlate — disables "+" when the active plate is empty
+//   • UM.Message toasts   — fired by the Python backend on every operation
+//
 // Features:
 //   • One collapsible section per build plate showing its objects
-//   • Click a plate header → switch to that plate
-//   • "+" button in header → add a new empty plate and switch to it
+//   • Single-click a plate header → switch to that plate and toggle expand
+//   • "+" icon button in header → add a new empty plate (disabled when plate empty)
 //   • Drag an object row onto a plate header → move it to that plate
-//   • Object count shown per plate
+//   • Guard: dropping onto the current plate is a no-op (no undo-stack pollution)
+//   • Empty-plate hint text ("Drag objects here")
+//   • Keyboard shortcuts: Ctrl+] next, Ctrl+[ previous, Ctrl+Shift+N move to new
+
 Item
 {
     id: root
@@ -26,7 +35,7 @@ Item
     // Match the width of the Object List panel.
     width: UM.Theme.getSize("objects_menu_size").width
 
-    // Only show when objects are present in the scene.
+    // Only show when objects are present in the scene (same as ObjectSelector).
     visible: CuraApplication.platformActivity
 
     // Anchor bottom-left, leaving room for the toolbar on the left and the
@@ -40,10 +49,42 @@ Item
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // Keyboard shortcuts (QML Shortcut extension point)
+    // ─────────────────────────────────────────────────────────────────────
+
+    Shortcut
+    {
+        sequence: "Ctrl+]"
+        onActivated:
+        {
+            var active = root.multiBuildPlateModel.activeBuildPlate
+            if (active < manager.pendingMaxPlate)
+                manager.setActiveBuildPlate(active + 1)
+        }
+    }
+
+    Shortcut
+    {
+        sequence: "Ctrl+["
+        onActivated:
+        {
+            var active = root.multiBuildPlateModel.activeBuildPlate
+            if (active > 0)
+                manager.setActiveBuildPlate(active - 1)
+        }
+    }
+
+    Shortcut
+    {
+        sequence: "Ctrl+Shift+N"
+        onActivated: manager.moveSelectionToNewBuildPlate()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     // Drag ghost
     // A floating visual that follows the mouse when the user drags an object
-    // row.  It lives at root level (outside the clipped ScrollView) so it
-    // is never hidden, and its Drag.active drives all DropArea hit-testing.
+    // row.  Lives at root level (outside the clipped ScrollView) so it is
+    // never hidden, and its Drag.active drives all DropArea hit-testing.
     // ─────────────────────────────────────────────────────────────────────
     Rectangle
     {
@@ -56,10 +97,10 @@ Item
         color:  UM.Theme.getColor("action_button_hovered")
         border.color: UM.Theme.getColor("primary")
         border.width: UM.Theme.getSize("default_lining").width * 2
-        opacity: 0.88
+        opacity: 0.92
 
         // The index into ObjectsModel carried by this drag operation.
-        property int  objectModelIndex: -1
+        property int    objectModelIndex: -1
         property string ghostName: ""
 
         Drag.active:    dragGhost.visible
@@ -99,8 +140,8 @@ Item
 
         anchors
         {
-            bottom:            panelRect.top
-            horizontalCenter:  parent.horizontalCenter
+            bottom:           panelRect.top
+            horizontalCenter: parent.horizontalCenter
         }
 
         contentItem: Item
@@ -114,7 +155,7 @@ Item
                 width:  UM.Theme.getSize("standard_arrow").width
                 height: UM.Theme.getSize("standard_arrow").height
                 anchors.left: parent.left
-                color:  toggleButton.hovered
+                color: toggleButton.hovered
                     ? UM.Theme.getColor("small_button_text_hover")
                     : UM.Theme.getColor("small_button_text")
                 source: root.panelOpen
@@ -124,10 +165,13 @@ Item
 
             UM.Label
             {
+                id: panelLabel
                 anchors
                 {
                     left:           toggleChevron.right
                     leftMargin:     UM.Theme.getSize("default_margin").width
+                    right:          addPlateBtn.left
+                    rightMargin:    UM.Theme.getSize("narrow_margin").width
                     verticalCenter: parent.verticalCenter
                 }
                 text:  catalog.i18nc("@label", "Build Plates")
@@ -137,7 +181,8 @@ Item
                 elide: Text.ElideRight
             }
 
-            // "+" add-plate button
+            // "+" icon add-plate button — disabled when the active plate is empty
+            // so the user cannot stack multiple consecutive empty plates.
             Button
             {
                 id: addPlateBtn
@@ -146,10 +191,11 @@ Item
                     right:          parent.right
                     verticalCenter: parent.verticalCenter
                 }
-                padding: 0
-                width:   UM.Theme.getSize("standard_arrow").height + 4
-                height:  UM.Theme.getSize("standard_arrow").height + 4
+                padding:      UM.Theme.getSize("narrow_margin").width / 2 | 0
+                width:        UM.Theme.getSize("small_button_icon").width  + padding * 2
+                height:       UM.Theme.getSize("small_button_icon").height + padding * 2
                 hoverEnabled: true
+                enabled:      manager.canAddNewPlate
 
                 onClicked:
                 {
@@ -157,27 +203,49 @@ Item
                     root.panelOpen = true
                 }
 
-                contentItem: UM.Label
+                contentItem: UM.ColorImage
                 {
-                    text:                 "+"
-                    font.bold:            true
-                    horizontalAlignment:  Text.AlignHCenter
-                    color: addPlateBtn.hovered
-                        ? UM.Theme.getColor("small_button_text_hover")
-                        : UM.Theme.getColor("small_button_text")
+                    source: UM.Theme.getIcon("Plus")
+                    width:  UM.Theme.getSize("small_button_icon").width
+                    height: UM.Theme.getSize("small_button_icon").height
+                    color: !addPlateBtn.enabled
+                        ? UM.Theme.getColor("text_disabled")
+                        : addPlateBtn.hovered
+                            ? UM.Theme.getColor("small_button_text_hover")
+                            : UM.Theme.getColor("small_button_text")
                 }
-                background: Item {}
+
+                background: Rectangle
+                {
+                    color: (addPlateBtn.hovered && addPlateBtn.enabled)
+                        ? UM.Theme.getColor("action_button_hovered")
+                        : "transparent"
+                    radius: UM.Theme.getSize("action_button_radius").width
+                }
 
                 UM.ToolTip
                 {
-                    tooltipText: catalog.i18nc("@tooltip", "Add new build plate")
-                    visible:     addPlateBtn.hovered
+                    tooltipText: addPlateBtn.enabled
+                        ? catalog.i18nc("@tooltip", "Add new build plate  (Ctrl+Shift+N to move selection)")
+                        : catalog.i18nc("@tooltip", "Add objects to the current plate before creating a new one")
+                    visible: addPlateBtn.hovered
                 }
             }
         }
 
         background: Item {}
+
         onClicked: root.panelOpen = !root.panelOpen
+
+        // Explain the feature to users who hover over the panel title.
+        UM.ToolTip
+        {
+            tooltipText: catalog.i18nc("@tooltip",
+                "Build Plates let you organize models into separate virtual print jobs.\n" +
+                "Each plate is sliced and printed independently on the same printer.\n\n" +
+                "Shortcuts:  Ctrl+]  next plate   Ctrl+[  previous plate")
+            visible: toggleButton.hovered
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -251,6 +319,9 @@ Item
                     width:  parent.width
                     height: UM.Theme.getSize("action_button").height
 
+                    // Rounded corners for a button-like appearance.
+                    radius: UM.Theme.getSize("action_button_radius").width
+
                     color: plateSection.isActive
                         ? UM.Theme.getColor("primary")
                         : headerDropArea.containsDrag
@@ -258,10 +329,13 @@ Item
                                 UM.Theme.getColor("primary").r,
                                 UM.Theme.getColor("primary").g,
                                 UM.Theme.getColor("primary").b,
-                                0.22)
+                                0.40)
                             : headerMouseArea.containsMouse
                                 ? UM.Theme.getColor("action_button_hovered")
                                 : "transparent"
+
+                    // Smooth color transitions when switching plates or hovering.
+                    Behavior on color { ColorAnimation { duration: 100 } }
 
                     // Plate name + object count
                     UM.Label
@@ -316,7 +390,8 @@ Item
                         }
                     }
 
-                    // Drop target — accepts dragged object rows
+                    // Drop target — accepts dragged object rows.
+                    // Guard: ignore drops where the object is already on this plate.
                     DropArea
                     {
                         id: headerDropArea
@@ -326,7 +401,12 @@ Item
                             var src = drag.source
                             if (src && src.objectModelIndex !== undefined && src.objectModelIndex >= 0)
                             {
-                                manager.moveObjectToBuildPlate(src.objectModelIndex, plateSection.plateNumber)
+                                // Skip if the object already lives on this plate (avoids
+                                // polluting the undo stack with a no-op operation).
+                                if (manager.getObjectPlate(src.objectModelIndex) !== plateSection.plateNumber)
+                                {
+                                    manager.moveObjectToBuildPlate(src.objectModelIndex, plateSection.plateNumber)
+                                }
                             }
                         }
                     }
@@ -337,6 +417,24 @@ Item
                 {
                     width:   parent.width
                     visible: plateSection.expanded
+
+                    // Empty-plate hint shown when no objects are on this plate.
+                    Item
+                    {
+                        width:   parent.width
+                        height:  plateSection.plateObjects.length === 0
+                                     ? UM.Theme.getSize("action_button").height
+                                     : 0
+                        visible: plateSection.plateObjects.length === 0
+
+                        UM.Label
+                        {
+                            anchors.centerIn: parent
+                            text:    catalog.i18nc("@label:empty_plate", "Drag objects here")
+                            color:   UM.Theme.getColor("text_scene")
+                            opacity: 0.45
+                        }
+                    }
 
                     Repeater
                     {
@@ -353,7 +451,7 @@ Item
                             property string objectName:       modelData.name
                             property bool   isSelected:       modelData.selected
 
-                            // Row background
+                            // Row background — selection at 0.35 opacity for clear visibility.
                             Rectangle
                             {
                                 anchors.fill: parent
@@ -362,7 +460,7 @@ Item
                                         UM.Theme.getColor("primary").r,
                                         UM.Theme.getColor("primary").g,
                                         UM.Theme.getColor("primary").b,
-                                        0.18)
+                                        0.35)
                                     : rowMouseArea.containsMouse
                                         ? UM.Theme.getColor("action_button_hovered")
                                         : "transparent"
@@ -383,7 +481,6 @@ Item
                                 text:  objectRow.objectName
                                 color: UM.Theme.getColor("text_scene")
                                 elide: Text.ElideRight
-                                opacity: 1.0
                             }
 
                             // ── Mouse / drag handling ─────────────────
@@ -440,7 +537,7 @@ Item
                                     }
                                     else
                                     {
-                                        // Tap without drag → select the object
+                                        // Tap without drag → select the object in the scene.
                                         manager.selectObject(objectRow.objectModelIndex)
                                     }
                                 }

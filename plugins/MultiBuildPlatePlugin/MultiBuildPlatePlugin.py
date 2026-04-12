@@ -2,12 +2,13 @@
 # MultiBuildPlatePlugin is released under the terms of the LGPLv3 or higher.
 
 import os
-from typing import List
+from typing import Any, Dict, List
 
 from PyQt6.QtCore import QObject, pyqtSlot, pyqtSignal, pyqtProperty
 
 from UM.Extension import Extension
 from UM.Logger import Logger
+from UM.Message import Message
 from UM.PluginRegistry import PluginRegistry
 from UM.Scene.Camera import Camera
 from UM.Scene.Selection import Selection
@@ -15,17 +16,41 @@ from UM.Scene.Selection import Selection
 from cura.CuraApplication import CuraApplication
 
 
+class BuildPlateMenuActions:
+    """Action object registered with Cura's sidebar settings context menu.
+
+    The sidebar context menu calls each method with a ``kwargs`` dict that
+    currently contains ``{"key": settingKey}`` (the setting that was
+    right-clicked).  We accept but ignore the key — our operations act on
+    the 3D-scene selection, not on a setting value.
+    """
+
+    def __init__(self, plugin: "MultiBuildPlatePlugin") -> None:
+        self._plugin = plugin
+
+    def moveToNextPlate(self, kwargs: Dict[str, Any]) -> None:
+        self._plugin._nextBuildPlate()
+
+    def moveToPreviousPlate(self, kwargs: Dict[str, Any]) -> None:
+        self._plugin._previousBuildPlate()
+
+    def moveToNewPlate(self, kwargs: Dict[str, Any]) -> None:
+        self._plugin._moveSelectionToNewBuildPlate()
+
+
 class MultiBuildPlatePlugin(QObject, Extension):
     """Extension plugin that exposes Cura's built-in multi build plate functionality.
 
     The backend (MultiBuildPlateModel, CuraSceneController, BuildPlateDecorator,
     per-plate slicing) is fully implemented in Cura but has no user-facing UI.
-    This plugin adds a collapsible Build Plate panel (similar to the Object List)
-    that lets users:
-      - See all build plates and the objects on each one
-      - Switch plates by clicking a plate header
-      - Add new empty plates with the "+" button
-      - Move objects between plates by dragging them onto a plate header
+    This plugin integrates with every available Cura UI extension point:
+
+      • Extension menu       — Next / Previous / Move to New Plate
+      • createQmlComponent   — collapsible Build Plates panel (bottom-left)
+      • Sidebar context menu — Move to Next / Previous / New Plate (right-click
+                               on any print setting)
+      • UM.Message toasts    — confirmation after every plate operation
+      • QML Shortcut items   — Ctrl+] / Ctrl+[ / Ctrl+Shift+N (in the panel QML)
     """
 
     # Emitted whenever the objects in the scene / selection change so that
@@ -35,28 +60,38 @@ class MultiBuildPlatePlugin(QObject, Extension):
     # Emitted when pendingMaxPlate changes (active plate or actual max changed).
     pendingMaxPlateChanged = pyqtSignal()
 
+    # Emitted when canAddNewPlate changes (active-plate object count changed).
+    canAddNewPlateChanged = pyqtSignal()
+
     def __init__(self, parent=None) -> None:
         QObject.__init__(self, parent)
         Extension.__init__(self)
 
         self._application = CuraApplication.getInstance()
         self._panel = None
+        self._menu_actions = BuildPlateMenuActions(self)
 
         # Mark the feature as enabled so future Cura code / scripts can gate on it.
         self._application.getPreferences().addPreference("cura/use_multi_build_plate", True)
 
+        # ── Extension menu ───────────────────────────────────────────────────
         self.setMenuName("Multi Build Plate")
-        self.addMenuItem("Next Build Plate", self._nextBuildPlate)
-        self.addMenuItem("Previous Build Plate", self._previousBuildPlate)
-        self.addMenuItem("Move Selection to New Build Plate", self._moveSelectionToNewBuildPlate)
+        self.addMenuItem("Next Build Plate",                    self._nextBuildPlate)
+        self.addMenuItem("Previous Build Plate",                self._previousBuildPlate)
+        self.addMenuItem("Move Selection to New Build Plate",   self._moveSelectionToNewBuildPlate)
 
         self._application.initializationFinished.connect(self._onInitializationFinished)
 
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
+
     def _onInitializationFinished(self) -> None:
-        """Create the persistent build plate panel once the QML engine exists."""
+        """Wire up all extension points once the QML engine and scene exist."""
         if self._panel is not None:
             return
 
+        # ── createQmlComponent — the Build Plates panel ──────────────────────
         qml_path = os.path.join(
             PluginRegistry.getInstance().getPluginPath("MultiBuildPlatePlugin"),
             "qml",
@@ -70,10 +105,37 @@ class MultiBuildPlatePlugin(QObject, Extension):
         self._application.getController().getScene().sceneChanged.connect(self._onSceneChanged)
         Selection.selectionChanged.connect(self._onSelectionChanged)
 
-        # Track active plate and actual max so pendingMaxPlate stays current.
+        # Track active-plate and max so pendingMaxPlate and canAddNewPlate stay current.
         mbp = self._application.getMultiBuildPlateModel()
         mbp.maxBuildPlateChanged.connect(self.pendingMaxPlateChanged)
+        mbp.maxBuildPlateChanged.connect(self.canAddNewPlateChanged)
         mbp.activeBuildPlateChanged.connect(self.pendingMaxPlateChanged)
+        mbp.activeBuildPlateChanged.connect(self.canAddNewPlateChanged)
+
+        # ── Sidebar context menu ─────────────────────────────────────────────
+        self._registerSidebarMenuItems()
+
+    def _registerSidebarMenuItems(self) -> None:
+        """Add three items to the print-settings right-click context menu."""
+        app = self._application
+        app.addSidebarCustomMenuItem({
+            "name":      "Move to Next Plate",
+            "icon_name": "ArrowDoubleCircleRight",
+            "actions":   ["moveToNextPlate"],
+            "menu_item": self._menu_actions,
+        })
+        app.addSidebarCustomMenuItem({
+            "name":      "Move to Previous Plate",
+            "icon_name": "ArrowReset",
+            "actions":   ["moveToPreviousPlate"],
+            "menu_item": self._menu_actions,
+        })
+        app.addSidebarCustomMenuItem({
+            "name":      "Move to New Plate",
+            "icon_name": "Plus",
+            "actions":   ["moveToNewPlate"],
+            "menu_item": self._menu_actions,
+        })
 
     # ------------------------------------------------------------------
     # Internal scene change handlers
@@ -83,25 +145,30 @@ class MultiBuildPlatePlugin(QObject, Extension):
         if isinstance(source, Camera):
             return
         self.objectsChanged.emit()
+        self.canAddNewPlateChanged.emit()
 
     def _onSelectionChanged(self) -> None:
         self.objectsChanged.emit()
 
     # ------------------------------------------------------------------
-    # Extensions menu item callbacks
+    # Extension menu item callbacks
     # ------------------------------------------------------------------
 
     def _nextBuildPlate(self) -> None:
         model = self._application.getMultiBuildPlateModel()
         active = model.activeBuildPlate
         if active < model.maxBuildPlate:
-            self._application.getCuraSceneController().setActiveBuildPlate(active + 1)
+            target = active + 1
+            self._application.getCuraSceneController().setActiveBuildPlate(target)
+            self._showSwitchToast(target)
 
     def _previousBuildPlate(self) -> None:
         model = self._application.getMultiBuildPlateModel()
         active = model.activeBuildPlate
         if active > 0:
-            self._application.getCuraSceneController().setActiveBuildPlate(active - 1)
+            target = active - 1
+            self._application.getCuraSceneController().setActiveBuildPlate(target)
+            self._showSwitchToast(target)
 
     def _moveSelectionToNewBuildPlate(self) -> None:
         if not Selection.hasSelection():
@@ -111,21 +178,48 @@ class MultiBuildPlatePlugin(QObject, Extension):
         new_plate = model.maxBuildPlate + 1
         self._application._cura_actions.setBuildPlateForSelection(new_plate)
         self._application.getCuraSceneController().setActiveBuildPlate(new_plate)
+        Message(
+            title="Build Plates",
+            text=f"Selection moved to Plate {new_plate + 1}",
+            lifetime=3,
+        ).show()
 
     # ------------------------------------------------------------------
-    # Properties & slots for QML
+    # Toast helper
+    # ------------------------------------------------------------------
+
+    def _showSwitchToast(self, plate_nr: int) -> None:
+        Message(
+            title="Build Plates",
+            text=f"Switched to Plate {plate_nr + 1}",
+            lifetime=2,
+        ).show()
+
+    # ------------------------------------------------------------------
+    # Properties & slots exposed to QML
     # ------------------------------------------------------------------
 
     @pyqtProperty(int, notify=pendingMaxPlateChanged)
     def pendingMaxPlate(self) -> int:
         """Highest plate number to show in the panel.
 
-        Equal to max(activeBuildPlate, maxBuildPlate) so that an empty plate
-        switched to via addBuildPlate() stays visible until it is populated.
+        Equal to max(activeBuildPlate, maxBuildPlate) so that a newly-added
+        empty plate remains visible until the user populates it.
         """
         model = self._application.getMultiBuildPlateModel()
         active = max(0, model.activeBuildPlate)
         return max(active, model.maxBuildPlate)
+
+    @pyqtProperty(bool, notify=canAddNewPlateChanged)
+    def canAddNewPlate(self) -> bool:
+        """False when the active plate is empty.
+
+        Prevents the user from stacking multiple consecutive empty plates by
+        clicking "+" repeatedly.  The "+" button in the QML panel binds its
+        ``enabled`` state to this property.
+        """
+        model = self._application.getMultiBuildPlateModel()
+        return len(self.getObjectsForPlate(model.activeBuildPlate)) > 0
 
     @pyqtSlot(int)
     def setActiveBuildPlate(self, plate_nr: int) -> None:
@@ -148,7 +242,6 @@ class MultiBuildPlatePlugin(QObject, Extension):
         """Return a list of {name, model_index, selected} dicts for the given plate."""
         objects_model = self._application.getObjectsModel()
         result = []
-        # getItem(i) is the public API used by CuraSceneController
         i = 0
         while True:
             item = objects_model.getItem(i)
@@ -156,12 +249,25 @@ class MultiBuildPlatePlugin(QObject, Extension):
                 break
             if item.get("buildplate_number") == plate_number:
                 result.append({
-                    "name": item.get("name", ""),
+                    "name":        item.get("name", ""),
                     "model_index": i,
-                    "selected": bool(item.get("selected", False)),
+                    "selected":    bool(item.get("selected", False)),
                 })
             i += 1
         return result
+
+    @pyqtSlot(int, result=int)
+    def getObjectPlate(self, model_index: int) -> int:
+        """Return the plate number of the object at ObjectsModel[model_index].
+
+        Used by the drop handler to guard against dropping an object onto the
+        plate it already lives on (which would create a spurious undo entry).
+        """
+        objects_model = self._application.getObjectsModel()
+        item = objects_model.getItem(model_index)
+        if not item:
+            return -1
+        return item.get("buildplate_number", -1)
 
     @pyqtSlot(int, int)
     def moveObjectToBuildPlate(self, model_index: int, plate_number: int) -> None:
@@ -183,6 +289,14 @@ class MultiBuildPlatePlugin(QObject, Extension):
         Selection.clear()
         for n in previous:
             Selection.add(n)
+
+        # Toast feedback (UM.Message extension point)
+        obj_name = item.get("name", "Object")
+        Message(
+            title="Build Plates",
+            text=f"{obj_name} moved to Plate {plate_number + 1}",
+            lifetime=2,
+        ).show()
 
     @pyqtSlot(int)
     def selectObject(self, model_index: int) -> None:
