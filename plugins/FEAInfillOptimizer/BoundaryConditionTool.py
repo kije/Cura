@@ -426,9 +426,18 @@ class BoundaryConditionTool(Tool):
                                                           length=axis_length)
         self._torque_axis_node.setPosition(center)
 
-        # Select the axis node so Cura's transform gizmos appear on it
-        Selection.clear()
+        # Select the axis node so Cura's transform gizmos appear on it.
+        # IMPORTANT: add the axis node BEFORE removing the old selection.
+        # Calling Selection.clear() while the selection is non-empty causes
+        # CuraApplication.onSelectionChanged() to detect an empty selection and
+        # call setActiveTool(None), which fires ToolDeactivateEvent.  That event
+        # handler calls _remove_torque_axis_node(), leaving self._torque_axis_node = None
+        # before we reach Selection.add() – causing an AttributeError that also
+        # corrupts the global Selection list with a None entry.
         Selection.add(self._torque_axis_node)
+        for _obj in list(Selection.getAllSelectedObjects()):
+            if _obj is not self._torque_axis_node:
+                Selection.remove(_obj)
 
         self._quick_setup_mode = "torque_set_axis"
         self._current_face_selection.clear()
