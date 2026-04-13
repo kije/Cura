@@ -359,10 +359,10 @@ def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
     # Method 1: trimesh.contains()
     try:
         result = mesh.contains(points)
-        if result.any():
-            _last_containment_method = "trimesh"
-            Logger.log("d", "FEA tet: containment via trimesh.contains()")
-            return result
+        _last_containment_method = "trimesh"
+        Logger.log("d", "FEA tet: containment via trimesh.contains() (%d/%d inside)",
+                   int(result.sum()), len(result))
+        return result
     except Exception:
         pass
 
@@ -377,11 +377,10 @@ def _points_inside_mesh(points: np.ndarray, mesh) -> np.ndarray:
             for idx in hits[1]:
                 hit_counts[idx] += 1
         result = (hit_counts % 2) == 1
-        if result.any():
-            _last_containment_method = "raycast"
-            Logger.log("d", "FEA tet: containment via ray casting (%d/%d inside)",
-                       result.sum(), len(result))
-            return result
+        _last_containment_method = "raycast"
+        Logger.log("d", "FEA tet: containment via ray casting (%d/%d inside)",
+                   int(result.sum()), len(result))
+        return result
     except Exception as e:
         Logger.log("w", "FEA tet: ray casting failed: %s", str(e))
 

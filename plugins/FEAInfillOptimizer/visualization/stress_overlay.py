@@ -13,6 +13,7 @@ from UM.Mesh.MeshBuilder import MeshBuilder
 from UM.Operations.AddSceneNodeOperation import AddSceneNodeOperation
 from UM.Operations.GroupedOperation import GroupedOperation
 from UM.Operations.RemoveSceneNodeOperation import RemoveSceneNodeOperation
+from UM.Resources import Resources
 
 _OVERLAY_NAME = "FEA Stress Overlay"
 
@@ -368,8 +369,6 @@ class StressOverlayManager:
                 )
                 return True
 
-        from UM.Resources import Resources
-
         overlay_node = _StressOverlayNode()
         overlay_node.setName(_OVERLAY_NAME)
         overlay_node.setSelectable(False)
@@ -384,7 +383,7 @@ class StressOverlayManager:
         # pattern to avoid double-transformation that causes the overlay to
         # appear below the build plate.
         # Store the parent node's id so _find_overlay can locate it.
-        overlay_node._fea_parent_node_id = id(node)
+        overlay_node._fea_parent_node_id = node.getId()
 
         op = AddSceneNodeOperation(overlay_node, scene.getRoot())
         op.push()
@@ -414,7 +413,7 @@ class StressOverlayManager:
         live_ids = set()
         for node in root.getChildren():
             if node.getName() != _OVERLAY_NAME:
-                live_ids.add(id(node))
+                live_ids.add(node.getId())
 
         # Find and remove orphaned overlays
         to_remove = []
@@ -436,7 +435,7 @@ class StressOverlayManager:
         double-transformation.  We find it by scanning scene_root's children
         for nodes named ``_OVERLAY_NAME`` that have a matching parent id tag.
         """
-        node_id = id(node)
+        node_id = node.getId()
         scene = CuraApplication.getInstance().getController().getScene()
         for child in scene.getRoot().getChildren():
             if child.getName() == _OVERLAY_NAME:

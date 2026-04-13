@@ -1058,7 +1058,7 @@ class FEAInfillExtension(QObject, Extension):
             "max_iterations": self._max_iterations,
             "mesh_resolution": self._mesh_resolution,
             "safety_factor": self._safety_factor,
-            "bonding_coeff": self._bonding_coeff / 100.0,
+            "bonding_coeff": self._bonding_coeff,
             "optimization_method": self._optimization_method,
             "volume_fraction": self._volume_fraction / 100.0,
         }

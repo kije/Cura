@@ -4,7 +4,6 @@
 from typing import Any, Dict, List
 
 from cura.CuraApplication import CuraApplication
-from cura.Operations.SetParentOperation import SetParentOperation
 from cura.Scene.BuildPlateDecorator import BuildPlateDecorator
 from cura.Scene.CuraSceneNode import CuraSceneNode
 from cura.Scene.SliceableObjectDecorator import SliceableObjectDecorator
@@ -107,8 +106,7 @@ def create_all_modifier_meshes(
                     instance.resetState()
                     settings.addInstance(instance)
 
-        grouped_op.addOperation(AddSceneNodeOperation(node, scene.getRoot()))
-        grouped_op.addOperation(SetParentOperation(node, parent_node))
+        grouped_op.addOperation(AddSceneNodeOperation(node, parent_node))
 
     grouped_op.push()
     scene.sceneChanged.emit(parent_node)

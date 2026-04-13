@@ -12,7 +12,7 @@ The algorithm is:
       (fallback).
    c. Compute von Mises stress per element.
    d. Map stress → new density field.
-   e. Apply damping: ``ρ_new = 0.5 × ρ_old + 0.5 × ρ_candidate``.
+   e. Apply damping: ``ρ_new = (1 - d) × ρ_old + d × ρ_candidate`` (d=0.5).
    f. Check convergence: ``max|ρ_new - ρ_old| < tol``.
 3. Return final density field, stress field, and diagnostic info dict.
 
@@ -493,7 +493,7 @@ class IterativeFEASolver:
             )
 
             # Adaptive damping
-            density_new = damping * density + (1.0 - damping) * density_candidate
+            density_new = (1.0 - damping) * density + damping * density_candidate
             density_new = np.clip(density_new, min_rho, max_rho)
 
             max_change = float(np.max(np.abs(density_new - density)))
@@ -504,7 +504,7 @@ class IterativeFEASolver:
             if max_change > prev_max_change:
                 oscillation_count += 1
                 if oscillation_count >= 2:
-                    damping = max(_DAMPING_MIN, damping * 0.8)
+                    damping = max(0.2, damping * 0.8)
                     Logger.log("d", "FEA EasyFEA iter %d: oscillation detected, "
                                "reducing damping to %.3f", iteration + 1, damping)
                     oscillation_count = 0
@@ -681,7 +681,7 @@ class IterativeFEASolver:
                 )
 
                 # Adaptive damping
-                density_new = damping * density + (1.0 - damping) * density_candidate
+                density_new = (1.0 - damping) * density + damping * density_candidate
                 density_new = np.clip(density_new, min_rho, max_rho)
 
             max_change = float(np.max(np.abs(density_new - density)))
@@ -693,7 +693,7 @@ class IterativeFEASolver:
             if max_change > prev_max_change:
                 oscillation_count += 1
                 if oscillation_count >= 2:
-                    damping = max(_DAMPING_MIN, damping * 0.8)
+                    damping = max(0.2, damping * 0.8)
                     Logger.log("d", "FEA iter %d: oscillation detected, "
                                "reducing damping to %.3f", iteration + 1, damping)
                     oscillation_count = 0
