@@ -84,9 +84,31 @@ def extract_trimesh(node) -> "trimesh.Trimesh":
     Logger.log("d", "FEA mesh: after merge — %d vertices, %d faces (from %d input vertices)",
                len(mesh.vertices), len(mesh.faces), len(vertices))
 
-    # Repair
+    # Repair before building the face map so fill_holes() additions are included.
     trimesh.repair.fix_normals(mesh)
     trimesh.repair.fill_holes(mesh)
+
+    # Build Cura→trimesh face index mapping.
+    # process=True reorders/merges faces so cura_face_idx != trimesh_face_idx.
+    # BC decorators store Cura face indices; we need to translate them to
+    # trimesh face indices before looking up surface_mesh.faces in the solver.
+    # Match by world-space centroid proximity (O(n log n) KDTree) against the
+    # final post-repair face set.  Hole-fill faces (no Cura counterpart) will
+    # not be selected by any BC query, so they don't need to be in the map.
+    try:
+        import scipy.spatial as _spatial
+        _cura_centroids = (
+            vertices[faces[:, 0]] + vertices[faces[:, 1]] + vertices[faces[:, 2]]
+        ) / 3.0
+        _trimesh_centroids = np.asarray(mesh.triangles_center)
+        if len(_trimesh_centroids) > 0 and len(_cura_centroids) > 0:
+            _kd = _spatial.KDTree(_trimesh_centroids)
+            _, _cura_to_trimesh = _kd.query(_cura_centroids)
+            mesh.metadata['cura_face_map'] = _cura_to_trimesh.astype(np.int32)
+            Logger.log("d", "FEA mesh: face map built — %d Cura faces → %d trimesh faces",
+                       len(_cura_centroids), len(_trimesh_centroids))
+    except Exception as _e:
+        Logger.log("w", "FEA mesh: could not build cura_face_map: %s", _e)
 
     if not mesh.is_watertight:
         Logger.log(

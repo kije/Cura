@@ -1757,7 +1757,7 @@ class BoundaryConditionTool(Tool):
         # Use cached world-space centroids when possible — avoids recomputing
         # the full vertex transform on every mouse move (O(n_verts) → O(1)).
         transform = node.getWorldTransformation().getData()
-        node_id = id(node)
+        node_id = node.getId()
         mesh_id = id(mesh_data)
         transform_bytes = transform.tobytes()
 

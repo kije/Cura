@@ -869,22 +869,49 @@ def _face_indices_to_vertex_indices(
 ) -> List[int]:
     """Expand triangle face indices to unique surface vertex indices.
 
+    Translates Cura MeshData face indices to trimesh face indices via
+    the ``cura_face_map`` stored in ``surface_mesh.metadata`` by
+    ``extract_trimesh()``.  This is needed because ``trimesh.Trimesh``
+    with ``process=True`` reorders/merges faces so that Cura face index N
+    is no longer trimesh face index N.
+
     Vectorized: uses numpy fancy indexing + np.unique instead of
     per-face Python loops. ~10-50x faster for large face sets.
 
     Args:
-        face_indices: List of triangle face indices into ``surface_mesh.faces``.
+        face_indices: List of triangle face indices into the original Cura
+            MeshData (as returned by ``_find_closest_face``).
         surface_mesh: ``trimesh.Trimesh`` surface mesh providing ``.faces``
-            (shape F×3, int).
+            (shape F×3, int) and optionally ``.metadata['cura_face_map']``.
 
     Returns:
-        Deduplicated list of vertex indices referenced by the given faces.
+        Deduplicated list of trimesh vertex indices referenced by the given faces.
     """
     if not face_indices:
         return []
     faces = np.asarray(surface_mesh.faces)  # (F, 3)
     fi_arr = np.array(face_indices, dtype=np.int64)
-    # Gather all referenced vertices: (len(face_indices), 3) → flatten → unique
+
+    # Translate Cura face indices → trimesh face indices.
+    # extract_trimesh() builds this mapping when process=True reorders faces.
+    try:
+        meta = getattr(surface_mesh, 'metadata', None)
+        cura_face_map = meta.get('cura_face_map') if meta is not None else None
+    except Exception:
+        cura_face_map = None
+
+    if cura_face_map is not None:
+        cmap = np.asarray(cura_face_map, dtype=np.int64)
+        # Drop any Cura face indices that exceed the mapping array length
+        valid_mask = fi_arr < len(cmap)
+        fi_arr = cmap[fi_arr[valid_mask]]
+
+    # Guard against out-of-range trimesh face indices
+    fi_arr = fi_arr[fi_arr < len(faces)]
+    if len(fi_arr) == 0:
+        return []
+
+    # Gather all referenced vertices: (len(fi_arr), 3) → flatten → unique
     referenced = faces[fi_arr].ravel()
     return np.unique(referenced).tolist()
 
