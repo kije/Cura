@@ -375,6 +375,49 @@ class LinearElasticitySolver:
 
         return vm_stress
 
+    def compute_element_stress_tensor(
+        self,
+        tet_mesh: TetMesh,
+        displacements: np.ndarray,
+        E_per_element: np.ndarray,
+        nu_per_element: np.ndarray,
+        *,
+        bonding_coeff: float = 1.0,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute the full stress tensor and element volumes for each element.
+
+        Returns the raw 6-component Voigt stress vector per element without
+        reducing to a scalar (von Mises / Tsai-Hill).  This is needed by the
+        shell-thickness optimizer and print-orientation optimizer which require
+        directional stress information.
+
+        Args:
+            tet_mesh: Tetrahedral mesh.
+            displacements: Nodal displacement vector, shape (ndof,).
+            E_per_element: Young's modulus per element, shape (M,).
+            nu_per_element: Poisson's ratio per element, shape (M,).
+            bonding_coeff: Layer bonding coefficient k in (0, 1].
+
+        Returns:
+            Tuple of ``(stress_tensors, volumes)`` where:
+
+            - ``stress_tensors``: ndarray (M, 6) with Voigt-ordered stress
+              components ``[σ_xx, σ_yy, σ_zz, τ_xy, τ_yz, τ_xz]``.
+              Degenerate elements are zeroed out.
+            - ``volumes``: ndarray (M,) with element volumes.
+        """
+        B_all, V_all, valid = self._get_cached_B(tet_mesh)
+        D_all = _build_D_matrices(E_per_element, nu_per_element, bonding_coeff)
+        u_e_all = _gather_element_displacements(tet_mesh.elements, displacements)
+
+        strain_all = np.einsum("mij,mj->mi", B_all, u_e_all)  # (M, 6)
+        stress_all = np.einsum("mij,mj->mi", D_all, strain_all)  # (M, 6)
+
+        # Zero out degenerate elements
+        stress_all[~valid] = 0.0
+
+        return stress_all, V_all
+
     def compute_element_compliance(
         self,
         tet_mesh: TetMesh,

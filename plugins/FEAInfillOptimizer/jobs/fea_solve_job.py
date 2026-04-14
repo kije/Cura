@@ -147,6 +147,8 @@ class FEASolveJob(Job):
             )
             iterations = info["iterations"]
             converged = info["converged"]
+            stress_tensors = info.get("stress_tensors")    # (M, 6) or None
+            element_volumes = info.get("element_volumes")  # (M,) or None
 
             # Clean up the temporary .msh file used by EasyFEA
             if tet_mesh.msh_path:
@@ -165,6 +167,55 @@ class FEASolveJob(Job):
                 rho_max=self._config.get("max_density", 1.0),
             )
 
+            # ── Step 5b: Compute shell thickness per zone ──────────── 93–95 %
+            zone_shell_settings = [None] * len(zone_objects)
+            if self._config.get("optimize_shell", True) and stress_tensors is not None:
+                try:
+                    from ..fea.surface_stress_analyzer import (
+                        identify_surface_elements,
+                        classify_surface_elements,
+                        compute_stress_gradient,
+                        compute_wall_metric,
+                        compute_tb_metric,
+                    )
+                    from ..mesh_generation.shell_thickness_mapper import compute_zone_shell_settings
+
+                    self._emit_progress(93.0)
+                    sigma_eff = self._material.yield_strength / float(
+                        self._config.get("safety_factor", 2.0))
+                    bonding_coeff = float(self._config.get(
+                        "bonding_coeff", self._material.bonding_coefficient))
+
+                    surface_mask = identify_surface_elements(tet_mesh)
+                    wall_mask, top_mask, bottom_mask = classify_surface_elements(
+                        tet_mesh, surface_mask)
+                    grad_sigma = compute_stress_gradient(
+                        tet_mesh, stress_field, surface_mask)
+                    W_wall = compute_wall_metric(
+                        stress_field, grad_sigma, wall_mask, sigma_eff)
+                    W_top, W_bottom = compute_tb_metric(
+                        stress_tensors, top_mask, bottom_mask,
+                        sigma_eff, bonding_coeff)
+
+                    zone_shell_settings = compute_zone_shell_settings(
+                        zone_objects, W_wall, W_top, W_bottom,
+                        wall_mask, top_mask, bottom_mask,
+                        line_width=float(self._config.get("line_width", 0.4)),
+                        layer_height=float(self._config.get("layer_height", 0.2)),
+                        bonding_coeff=bonding_coeff,
+                        wall_count_min=int(self._config.get("wall_count_min", 1)),
+                        wall_count_max=int(self._config.get("wall_count_max", 6)),
+                        top_layers_min=int(self._config.get("top_layers_min", 2)),
+                        top_layers_max=int(self._config.get("top_layers_max", 8)),
+                        bottom_layers_min=int(self._config.get("bottom_layers_min", 2)),
+                        bottom_layers_max=int(self._config.get("bottom_layers_max", 8)),
+                    )
+                    self._emit_progress(95.0)
+                except Exception as _shell_exc:
+                    from UM.Logger import Logger as _Logger
+                    _Logger.log("w", "FEA job: shell optimization failed (non-fatal): %s",
+                                _shell_exc)
+
             # ── Step 6: Build zone surface meshes ───────────────────── 95–100 %
             zones = []
             n_zones = len(zone_objects)
@@ -173,7 +224,11 @@ class FEASolveJob(Job):
                 self._emit_progress(progress_val)
 
                 mesh_data = build_zone_mesh(tet_mesh, zone_obj.element_indices)
-                zones.append({"density": zone_obj.density, "mesh_data": mesh_data})
+                shell = zone_shell_settings[i] if i < len(zone_shell_settings) else None
+                zone_dict = {"density": zone_obj.density, "mesh_data": mesh_data}
+                if shell is not None:
+                    zone_dict["shell"] = shell
+                zones.append(zone_dict)
 
             # Compute aggregate statistics
             from UM.Logger import Logger as _Logger
@@ -201,6 +256,8 @@ class FEASolveJob(Job):
                     "mesh_quality": tet_mesh.mesh_quality,
                     "mesh_method": tet_mesh.mesh_method,
                     "mesh_warnings": tet_mesh.warnings,
+                    "stress_tensors": stress_tensors,
+                    "element_volumes": element_volumes,
                 }
             )
 

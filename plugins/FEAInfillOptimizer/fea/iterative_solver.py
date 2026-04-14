@@ -537,10 +537,44 @@ class IterativeFEASolver:
             except Exception:
                 pass
 
+        # Compute full stress tensors for shell/orientation optimizers.
+        # EasyFEA only exposes scalar Svm — use the scipy solver kernel to
+        # recompute (M, 6) from the final EasyFEA displacement field.
+        stress_tensors = None
+        element_volumes = None
+        if _prev_simu is not None and _prev_simu.displacement is not None:
+            try:
+                _disp_easyfea = np.asarray(_prev_simu.displacement, dtype=np.float64).ravel()
+                # Map EasyFEA displacement DOFs back to our TetMesh ordering.
+                # EasyFEA may use a different node numbering, but the tet_mesh
+                # was generated from the same .msh file, so node ordering
+                # matches if the mesh was imported without reordering.
+                ndof_expected = tet_mesh.nodes.shape[0] * 3
+                if len(_disp_easyfea) == ndof_expected:
+                    _tensor_solver = LinearElasticitySolver()
+                    _n_exp = _PATTERN_EXPONENTS.get(
+                        str(config.get("infill_pattern", "gyroid")), 1.5)
+                    _E_eff = material.E_xy * np.power(density, _n_exp)
+                    _E_eff = np.maximum(_E_eff, material.E_xy * 0.01)
+                    _nu_arr = np.full(n_elems, material.nu, dtype=np.float64)
+                    _bc = float(config.get("bonding_coeff", material.bonding_coefficient))
+                    stress_tensors, element_volumes = _tensor_solver.compute_element_stress_tensor(
+                        tet_mesh, _disp_easyfea, _E_eff, _nu_arr,
+                        bonding_coeff=_bc,
+                    )
+                else:
+                    Logger.log("d", "FEA EasyFEA: displacement DOF mismatch "
+                               "(%d vs %d) — skipping stress tensor extraction",
+                               len(_disp_easyfea), ndof_expected)
+            except Exception as _exc:
+                Logger.log("w", "FEA EasyFEA: stress tensor extraction failed: %s", _exc)
+
         info: Dict[str, Any] = {
             "iterations": iteration + 1,
             "converged": converged,
             "max_change": max_change,
+            "stress_tensors": stress_tensors,
+            "element_volumes": element_volumes,
         }
         return density, stress, info
 
@@ -729,10 +763,25 @@ class IterativeFEASolver:
                                iteration + 1, max_change)
                     break
 
+        # Compute full stress tensors for shell/orientation optimizers.
+        # All variables (fea_solver, tet_mesh, displacements, E/nu arrays)
+        # are in scope from the final iteration.
+        try:
+            stress_tensors, element_volumes = fea_solver.compute_element_stress_tensor(
+                tet_mesh, displacements, E_eff_arr, nu_arr,
+                bonding_coeff=bonding_coeff,
+            )
+        except Exception as _exc:
+            Logger.log("w", "FEA scipy: stress tensor extraction failed: %s", _exc)
+            stress_tensors = None
+            element_volumes = None
+
         info: Dict[str, Any] = {
             "iterations": iteration + 1,
             "converged": converged,
             "max_change": max_change,
+            "stress_tensors": stress_tensors,
+            "element_volumes": element_volumes,
         }
         return density, stress, info
 
