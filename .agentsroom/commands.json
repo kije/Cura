@@ -1,0 +1,17 @@
+{
+  "folders": [],
+  "commands": [
+    {
+      "id": "cmd-1776308932477-181gfa",
+      "name": "Terminal",
+      "command": "",
+      "cwd": ".",
+      "kind": "process",
+      "category": "other",
+      "folderId": null,
+      "autoExec": true,
+      "position": 0,
+      "createdAt": "2026-04-16T03:08:52.477Z"
+    }
+  ]
+}
