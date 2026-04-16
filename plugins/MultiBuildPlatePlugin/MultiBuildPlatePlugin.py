@@ -69,6 +69,7 @@ class MultiBuildPlatePlugin(QObject, Extension):
 
         self._application = CuraApplication.getInstance()
         self._panel = None
+        self._navigator = None
         self._menu_actions = BuildPlateMenuActions(self)
 
         # Mark the feature as enabled so future Cura code / scripts can gate on it.
@@ -100,6 +101,19 @@ class MultiBuildPlatePlugin(QObject, Extension):
         self._panel = self._application.createQmlComponent(qml_path, {"manager": self})
         if self._panel is None:
             Logger.log("e", "MultiBuildPlatePlugin: failed to create BuildPlatePanel")
+
+        # ── saveButton additional component — prev/next navigator ────────────
+        # Appears to the left of the Slice button in ActionPanelWidget.
+        nav_qml_path = os.path.join(
+            PluginRegistry.getInstance().getPluginPath("MultiBuildPlatePlugin"),
+            "qml",
+            "BuildPlateNavigator.qml",
+        )
+        self._navigator = self._application.createQmlComponent(nav_qml_path, {"manager": self})
+        if self._navigator is not None:
+            self._application.addAdditionalComponent("saveButton", self._navigator)
+        else:
+            Logger.log("e", "MultiBuildPlatePlugin: failed to create BuildPlateNavigator")
 
         # Scene / selection changes → refresh per-plate object lists in QML.
         self._application.getController().getScene().sceneChanged.connect(self._onSceneChanged)
