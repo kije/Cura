@@ -1,0 +1,76 @@
+# Dockerfile Reference — VNC GUI Testing for AI Agents
+#
+# Extends a linuxserver.io base image with:
+#   1. x11vnc for raw VNC access (AI agent automation via mcp-vnc)
+#   2. Rosetta cache permission fix (Apple Silicon + Colima)
+#   3. s6 service definition for x11vnc (proper startup ordering)
+#
+# This is the actual Dockerfile used for the BrickLayers CuraEngine plugin
+# testing setup.
+
+FROM lscr.io/linuxserver/cura:latest
+
+# ── 1. Install x11vnc ────────────────────────────────────────────────
+# KasmVNC (built into linuxserver images) only exposes a browser-based
+# VNC on port 3000. mcp-vnc needs raw VNC protocol on port 5900.
+# x11vnc shares the existing X display over standard VNC.
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends x11vnc \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2. Fix Rosetta cache ownership (Apple Silicon) ───────────────────
+# Problem: On macOS with Apple Silicon, Colima uses Rosetta for x86_64
+# emulation. Rosetta CDI creates /config/.cache as root BEFORE the s6
+# init-adduser script runs, making the cache dir unwritable by the app
+# user (abc). This causes the app to crash on startup.
+#
+# Solution: Two-pronged fix (belt and suspenders):
+#   a) s6 init-config script (runs during s6 init phase)
+#   b) custom-cont-init.d script (linuxserver's own init pattern)
+
+# Fix via s6 init-config (may not run on all s6 versions)
+RUN printf '#!/bin/bash\nchown -R abc:abc /config/.cache 2>/dev/null || true\nmkdir -p /config/.cache/cura/5.12\nchown -R abc:abc /config/.cache/cura\n' \
+      > /etc/s6-overlay/s6-rc.d/init-config/fix-cache-perms \
+    && chmod +x /etc/s6-overlay/s6-rc.d/init-config/fix-cache-perms \
+    || true
+
+# Fix via custom-cont-init.d (linuxserver pattern, more reliable)
+RUN mkdir -p /custom-cont-init.d \
+    && printf '#!/bin/bash\nchown -R abc:abc /config/.cache 2>/dev/null || true\nmkdir -p /config/.cache/cura/5.12\nchown -R abc:abc /config/.cache/cura\n' \
+       > /custom-cont-init.d/fix-cache-perms.sh \
+    && chmod +x /custom-cont-init.d/fix-cache-perms.sh
+
+# ── 3. s6 service: x11vnc ───────────────────────────────────────────
+# Creates a proper s6 longrun service that:
+#   - Depends on svc-xorg (X server must be running first)
+#   - Polls for X to actually accept connections (dependency only
+#     means "service started", not "service ready")
+#   - Runs x11vnc with Docker-safe flags
+#
+# Directory structure created:
+#   /etc/s6-overlay/s6-rc.d/x11vnc/
+#     type                        -> "longrun"
+#     run                         -> startup script
+#     dependencies.d/svc-xorg     -> dependency declaration
+#   /etc/s6-overlay/s6-rc.d/user/contents.d/x11vnc
+#     -> registers service in default bundle
+RUN mkdir -p /etc/s6-overlay/s6-rc.d/x11vnc/dependencies.d \
+    && echo "longrun" > /etc/s6-overlay/s6-rc.d/x11vnc/type \
+    && printf '#!/bin/bash\n\n# Wait for X server to be ready\nwhile ! xdpyinfo -display :1 >/dev/null 2>&1; do sleep 1; done\nexec x11vnc -display :1 -forever -shared -nopw -rfbport 5900 -noxdamage -noshm\n' \
+       > /etc/s6-overlay/s6-rc.d/x11vnc/run \
+    && chmod +x /etc/s6-overlay/s6-rc.d/x11vnc/run \
+    && touch /etc/s6-overlay/s6-rc.d/x11vnc/dependencies.d/svc-xorg \
+    && touch /etc/s6-overlay/s6-rc.d/user/contents.d/x11vnc
+
+# ── x11vnc flags reference ───────────────────────────────────────────
+# -display :1       linuxserver runs Xorg on :1 (not :0)
+# -forever          don't exit after first client disconnects
+# -shared           allow multiple simultaneous connections
+# -nopw             no password (container-local only)
+# -rfbport 5900     standard VNC port
+# -noxdamage        disable X DAMAGE extension (avoids rendering artifacts)
+# -noshm            CRITICAL: disable MIT-SHM shared memory
+#                   Shared memory doesn't work across Docker container
+#                   boundary. Without this flag, x11vnc segfaults or
+#                   shows a black screen.

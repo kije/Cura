@@ -1,0 +1,30 @@
+services:
+  cura:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: cura-fea-test
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      # Software rendering — required in containers without a GPU
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - GALLIUM_DRIVER=llvmpipe
+    volumes:
+      # Persistent config volume
+      - cura-data:/config
+      # Pre-seeded config to suppress first-run dialogs
+      - ./docker/cura-config/cura.cfg:/config/.config/cura/5.12/cura.cfg
+      # FEA Infill Optimizer plugin sources
+      - ./plugins/FEAInfillOptimizer:/config/.local/share/cura/5.12/plugins/FEAInfillOptimizer
+    ports:
+      # KasmVNC browser access — open http://localhost:3000
+      - "3000:3000"
+      # Raw VNC for mcp-vnc AI agent access
+      - "5900:5900"
+    restart: unless-stopped
+
+volumes:
+  cura-data:

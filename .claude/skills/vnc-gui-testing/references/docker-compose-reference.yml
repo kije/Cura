@@ -1,0 +1,76 @@
+# Docker Compose Reference — VNC GUI Testing for AI Agents
+#
+# This is the actual docker-compose.yml used for the BrickLayers CuraEngine plugin
+# testing setup. It demonstrates all patterns documented in the skill.
+#
+# Usage:
+#   docker compose up -d        # Start
+#   docker compose down          # Stop
+#   docker compose build --no-cache  # Rebuild after Dockerfile changes
+
+services:
+  cura:
+    # Custom Dockerfile extends linuxserver/cura with x11vnc + Rosetta fixes.
+    # Use `image:` instead of `build:` if no customization needed.
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+
+    # linuxserver/cura is amd64-only. On Apple Silicon, Colima/Rosetta handles
+    # emulation automatically when this is set.
+    platform: linux/amd64
+
+    container_name: cura-bricklayers-test
+
+    environment:
+      # linuxserver standard: run as non-root user with these IDs
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+
+      # Software rendering — REQUIRED in containers without a GPU.
+      # Without these, Qt/OpenGL apps crash or show black screens.
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - GALLIUM_DRIVER=llvmpipe
+
+    volumes:
+      # Persistent config volume — Docker manages ownership correctly.
+      # This stores Cura preferences, profiles, and cached data.
+      - cura-data:/config
+
+      # Plugin sources overlaid into the plugin directory.
+      # Docker "most specific path wins" rule: this bind mount overlays
+      # a subdirectory of the named volume above. Changes to ./src on
+      # the host are immediately visible inside the container.
+      #
+      # IMPORTANT: Match the exact Cura version in the path (5.12 here).
+      # Using a wildcard or wrong version silently fails.
+      - ./src:/config/.local/share/cura/5.12/plugins/BrickLayers
+
+      # OPTIONAL: Pre-seeded config file to suppress first-run dialogs.
+      # Mount individual files, NOT parent directories (avoids shadowing).
+      # - ./docker/cura-config/cura.cfg:/config/.local/share/cura/5.12/cura.cfg
+
+    ports:
+      # KasmVNC browser access — open http://localhost:3000 in any browser.
+      # Built into linuxserver images. No VNC client needed.
+      # Use this for human visual debugging.
+      - "3000:3000"
+
+      # Raw VNC for mcp-vnc AI agent access.
+      # This is served by x11vnc (installed in Dockerfile).
+      # mcp-vnc connects here for screenshots, clicks, and keyboard input.
+      - "5900:5900"
+
+    restart: unless-stopped
+
+    # OPTIONAL: Resource limits (useful if app is memory-hungry)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 4g
+
+# Named volumes persist across container restarts.
+# Use `docker volume rm cura-data` to reset to clean state.
+volumes:
+  cura-data:
