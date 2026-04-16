@@ -17,5 +17,10 @@
     "isPersonal": false,
     "id": "agent-1776378594396-3bysu0",
     "provider": "claude"
+  },
+  {
+    "role": "custom",
+    "model": "sonnet",
+    "id": "agent-1776379249823-4euoai"
   }
 ]
