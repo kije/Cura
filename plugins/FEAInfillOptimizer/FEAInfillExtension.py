@@ -48,6 +48,7 @@ class FEAInfillExtension(QObject, Extension):
     phaseChanged = pyqtSignal()
     errorMessageChanged = pyqtSignal()
     stressOverlayVisibleChanged = pyqtSignal()
+    orientationStatusChanged = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         QObject.__init__(self, parent)
@@ -89,6 +90,11 @@ class FEAInfillExtension(QObject, Extension):
         self._error_message = ""
 
         # Settings
+        # Mesh cache — avoids re-tetrahedralizing when only BCs/material
+        # change.  Keyed on (vertex_bytes_hash, mesh_resolution).
+        self._mesh_cache_key = None   # (hash, resolution) or None
+        self._mesh_cache_data = None  # (surface_mesh, tet_mesh) or None
+
         self._material_name = "PLA"
         self._min_density = 10.0
         self._max_density = 80.0
@@ -100,6 +106,20 @@ class FEAInfillExtension(QObject, Extension):
         self._bonding_coeff = 0.5  # 50 % default; overridden by UI or material
         self._optimization_method = "heuristic"  # "heuristic" or "oc"
         self._volume_fraction = 50.0  # target volume % for OC method (displayed as %)
+
+        # Shell (wall/top/bottom) optimization settings
+        self._optimize_shell = True
+        self._wall_count_min = 1
+        self._wall_count_max = 6
+        self._top_layers_min = 2
+        self._top_layers_max = 8
+        self._bottom_layers_min = 2
+        self._bottom_layers_max = 8
+
+        # Orientation optimization state
+        self._orientation_status = "idle"  # idle | running | complete | unavailable
+        self._orientation_result = None  # OrientationResult or None
+        self._orientation_improvement = 0.0
 
         # Help system preferences
         CuraApplication.getInstance().getPreferences().addPreference(
@@ -268,6 +288,47 @@ class FEAInfillExtension(QObject, Extension):
     _SETTINGS_METADATA_KEY = "fea_infill_settings"
     _RESULTS_METADATA_KEY = "fea_infill_results"
 
+    # ------------------------------------------------------------------
+    # Mesh cache key
+    # ------------------------------------------------------------------
+
+    def _compute_mesh_cache_key(self, node) -> "tuple | None":
+        """Build a cache key capturing ALL inputs to mesh extraction + tet meshing.
+
+        The key covers every input that affects the output of
+        ``extract_trimesh_from_arrays`` → ``tetrahedralize``:
+
+        - **Vertex positions** — geometry shape
+        - **Face indices** — triangulation connectivity (same verts,
+          different triangulation → different surface mesh)
+        - **World transform** — position/rotation/scale on the build plate
+          (applied inside ``extract_trimesh_from_arrays``)
+        - **Mesh resolution** — controls ``element_size`` passed to
+          ``tetrahedralize`` (via ``_resolve_element_size``)
+
+        Returns ``None`` if the node has no valid mesh data.
+        """
+        import hashlib
+
+        mesh_data = node.getMeshData()
+        if mesh_data is None:
+            return None
+        raw_verts = mesh_data.getVertices()
+        if raw_verts is None:
+            return None
+
+        h = hashlib.sha256()
+        h.update(raw_verts.tobytes())
+
+        raw_indices = mesh_data.getIndices()
+        if raw_indices is not None:
+            h.update(raw_indices.tobytes())
+
+        h.update(node.getWorldTransformation().getData().tobytes())
+
+        geometry_hash = h.hexdigest()[:32]
+        return (geometry_hash, self._mesh_resolution)
+
     def _syncAllBCsToMetadata(self, *args) -> None:
         """Persist BC data, analysis settings, and results summary → node.metadata.
 
@@ -311,6 +372,13 @@ class FEAInfillExtension(QObject, Extension):
                         "bonding_coeff": node_state.get("bonding_coeff", self._bonding_coeff),
                         "optimization_method": node_state.get("optimization_method", self._optimization_method),
                         "volume_fraction": node_state.get("volume_fraction", self._volume_fraction),
+                        "optimize_shell": node_state.get("optimize_shell", self._optimize_shell),
+                        "wall_count_min": node_state.get("wall_count_min", self._wall_count_min),
+                        "wall_count_max": node_state.get("wall_count_max", self._wall_count_max),
+                        "top_layers_min": node_state.get("top_layers_min", self._top_layers_min),
+                        "top_layers_max": node_state.get("top_layers_max", self._top_layers_max),
+                        "bottom_layers_min": node_state.get("bottom_layers_min", self._bottom_layers_min),
+                        "bottom_layers_max": node_state.get("bottom_layers_max", self._bottom_layers_max),
                     }
                     node.metadata[self._SETTINGS_METADATA_KEY] = json.dumps(settings)
 
@@ -355,6 +423,13 @@ class FEAInfillExtension(QObject, Extension):
                         "bonding_coeff": self._bonding_coeff,
                         "optimization_method": self._optimization_method,
                         "volume_fraction": self._volume_fraction,
+                        "optimize_shell": self._optimize_shell,
+                        "wall_count_min": self._wall_count_min,
+                        "wall_count_max": self._wall_count_max,
+                        "top_layers_min": self._top_layers_min,
+                        "top_layers_max": self._top_layers_max,
+                        "bottom_layers_min": self._bottom_layers_min,
+                        "bottom_layers_max": self._bottom_layers_max,
                     }
                     active_node.metadata[self._SETTINGS_METADATA_KEY] = json.dumps(settings)
                     results_summary = {
@@ -512,6 +587,13 @@ class FEAInfillExtension(QObject, Extension):
             self._bonding_coeff = float(settings.get("bonding_coeff", self._bonding_coeff))
             self._optimization_method = settings.get("optimization_method", self._optimization_method)
             self._volume_fraction = float(settings.get("volume_fraction", self._volume_fraction))
+            self._optimize_shell = bool(settings.get("optimize_shell", self._optimize_shell))
+            self._wall_count_min = int(settings.get("wall_count_min", self._wall_count_min))
+            self._wall_count_max = int(settings.get("wall_count_max", self._wall_count_max))
+            self._top_layers_min = int(settings.get("top_layers_min", self._top_layers_min))
+            self._top_layers_max = int(settings.get("top_layers_max", self._top_layers_max))
+            self._bottom_layers_min = int(settings.get("bottom_layers_min", self._bottom_layers_min))
+            self._bottom_layers_max = int(settings.get("bottom_layers_max", self._bottom_layers_max))
             self.settingsChanged.emit()
             Logger.log("d", "FEA Infill: Restored settings from node '%s'", node.getName())
         except Exception:
@@ -563,6 +645,13 @@ class FEAInfillExtension(QObject, Extension):
             "bonding_coeff": self._bonding_coeff,
             "optimization_method": self._optimization_method,
             "volume_fraction": self._volume_fraction,
+            "optimize_shell": self._optimize_shell,
+            "wall_count_min": self._wall_count_min,
+            "wall_count_max": self._wall_count_max,
+            "top_layers_min": self._top_layers_min,
+            "top_layers_max": self._top_layers_max,
+            "bottom_layers_min": self._bottom_layers_min,
+            "bottom_layers_max": self._bottom_layers_max,
         }
 
     def _loadStateForNode(self, node_key: str) -> None:
@@ -589,6 +678,13 @@ class FEAInfillExtension(QObject, Extension):
         self._bonding_coeff = state.get("bonding_coeff", self._bonding_coeff)
         self._optimization_method = state.get("optimization_method", self._optimization_method)
         self._volume_fraction = state.get("volume_fraction", self._volume_fraction)
+        self._optimize_shell = state.get("optimize_shell", self._optimize_shell)
+        self._wall_count_min = state.get("wall_count_min", self._wall_count_min)
+        self._wall_count_max = state.get("wall_count_max", self._wall_count_max)
+        self._top_layers_min = state.get("top_layers_min", self._top_layers_min)
+        self._top_layers_max = state.get("top_layers_max", self._top_layers_max)
+        self._bottom_layers_min = state.get("bottom_layers_min", self._bottom_layers_min)
+        self._bottom_layers_max = state.get("bottom_layers_max", self._bottom_layers_max)
 
     def _onSelectionChanged(self) -> None:
         """Switch per-model analysis state when the user selects a different model."""
@@ -990,6 +1086,201 @@ class FEAInfillExtension(QObject, Extension):
             self._volume_fraction = value
             self.settingsChanged.emit()
 
+    # -- Shell (wall/top/bottom) optimisation settings --
+
+    @pyqtProperty(bool, notify=settingsChanged)
+    def optimizeShell(self) -> bool:
+        return self._optimize_shell
+
+    @optimizeShell.setter
+    def optimizeShell(self, value: bool) -> None:
+        if self._optimize_shell != value:
+            self._optimize_shell = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def wallCountMin(self) -> int:
+        return self._wall_count_min
+
+    @wallCountMin.setter
+    def wallCountMin(self, value: int) -> None:
+        if self._wall_count_min != value:
+            self._wall_count_min = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def wallCountMax(self) -> int:
+        return self._wall_count_max
+
+    @wallCountMax.setter
+    def wallCountMax(self, value: int) -> None:
+        if self._wall_count_max != value:
+            self._wall_count_max = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def topLayersMin(self) -> int:
+        return self._top_layers_min
+
+    @topLayersMin.setter
+    def topLayersMin(self, value: int) -> None:
+        if self._top_layers_min != value:
+            self._top_layers_min = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def topLayersMax(self) -> int:
+        return self._top_layers_max
+
+    @topLayersMax.setter
+    def topLayersMax(self, value: int) -> None:
+        if self._top_layers_max != value:
+            self._top_layers_max = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def bottomLayersMin(self) -> int:
+        return self._bottom_layers_min
+
+    @bottomLayersMin.setter
+    def bottomLayersMin(self, value: int) -> None:
+        if self._bottom_layers_min != value:
+            self._bottom_layers_min = value
+            self.settingsChanged.emit()
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def bottomLayersMax(self) -> int:
+        return self._bottom_layers_max
+
+    @bottomLayersMax.setter
+    def bottomLayersMax(self, value: int) -> None:
+        if self._bottom_layers_max != value:
+            self._bottom_layers_max = value
+            self.settingsChanged.emit()
+
+    # -- Orientation optimisation --
+
+    @pyqtProperty(str, notify=orientationStatusChanged)
+    def orientationStatus(self) -> str:
+        return self._orientation_status
+
+    @pyqtProperty(float, notify=orientationStatusChanged)
+    def orientationImprovement(self) -> float:
+        return self._orientation_improvement
+
+    @pyqtProperty(bool, notify=resultsChanged)
+    def canRunOrientationAnalysis(self) -> bool:
+        """True when all required arrays are available from the last analysis."""
+        if self._results is None:
+            return False
+        return (self._results.get("stress_tensors") is not None
+                and self._results.get("element_volumes") is not None
+                and self._results.get("stress_field") is not None)
+
+    @pyqtSlot()
+    def runOrientationOptimization(self) -> None:
+        """Launch orientation analysis using existing stress tensors."""
+        if self._orientation_status == "running":
+            return  # prevent concurrent jobs
+
+        stress_tensors = self._results.get("stress_tensors") if self._results else None
+        element_volumes = self._results.get("element_volumes") if self._results else None
+        stress_field = self._results.get("stress_field") if self._results else None
+        if stress_tensors is None or element_volumes is None or stress_field is None:
+            return
+
+        from .jobs.orientation_optimize_job import OrientationOptimizeJob
+        from .fea.material_database import MaterialDatabase
+        from UM.JobQueue import JobQueue
+
+        self._orientation_status = "running"
+        self._orientation_improvement = 0.0
+        self.orientationStatusChanged.emit()
+
+        material = MaterialDatabase.get_material(self._material_name)
+        job = OrientationOptimizeJob(
+            stress_tensors=stress_tensors,
+            element_volumes=element_volumes,
+            stress_field=stress_field,
+            bonding_coeff=self._bonding_coeff,
+            yield_strength=material.yield_strength,
+        )
+        job.finished.connect(self._onOrientationFinished)
+        self._orientation_job = job
+        JobQueue.getInstance().add(job)
+
+    def _onOrientationFinished(self, job) -> None:
+        """Handle completion of the orientation optimisation job.
+
+        The ``finished`` signal is emitted from the background thread, so we
+        marshal state updates to the main thread via ``callLater`` — matching
+        the pattern used by ``_onFEAFinished``.
+        """
+        from .fea.orientation_optimizer import OrientationResult
+
+        result = job.getResult()
+
+        def _apply() -> None:
+            if isinstance(result, Exception):
+                self._orientation_status = "error"
+                self._orientation_result = None
+                self._orientation_improvement = 0.0
+                Logger.log("e", "Orientation optimization failed: %s", result)
+            elif isinstance(result, OrientationResult):
+                self._orientation_result = result
+                self._orientation_improvement = min(result.improvement_ratio, 100.0)
+                self._orientation_status = "complete"
+                Logger.log("i", "Orientation optimization complete: improvement=%.1f%%, "
+                           "optimal_dir=[%.3f, %.3f, %.3f]",
+                           (result.improvement_ratio - 1.0) * 100.0,
+                           *result.optimal_direction)
+            else:
+                self._orientation_status = "error"
+                self._orientation_result = None
+                self._orientation_improvement = 0.0
+
+            self.orientationStatusChanged.emit()
+
+        CuraApplication.getInstance().callLater(_apply)
+
+    @pyqtSlot()
+    def applyOptimalOrientation(self) -> None:
+        """Apply the computed optimal rotation to the active scene node."""
+        if self._orientation_result is None:
+            return
+
+        node = self._getNodeById(self._active_node_key)
+        if node is None:
+            return
+
+        import numpy as np
+        from UM.Math.Matrix import Matrix
+        from UM.Math.Quaternion import Quaternion
+        from UM.Operations.RotateOperation import RotateOperation
+
+        R = self._orientation_result.rotation_matrix
+        matrix_um = Matrix()
+        matrix_um._data = np.eye(4)
+        matrix_um._data[:3, :3] = R
+        q = Quaternion.fromMatrix(matrix_um)
+
+        op = RotateOperation(node, q)
+        op.push()
+
+        from UM.Message import Message
+        Message(
+            "Model rotated for optimal layer orientation. "
+            "Force directions are defined in world frame — verify they are "
+            "still correct and re-run analysis if needed.",
+            title="Orientation Applied",
+        ).show()
+
+        # Reset orientation state since the analysis is now stale
+        self._orientation_status = "idle"
+        self._orientation_result = None
+        self._orientation_improvement = 0.0
+        self.orientationStatusChanged.emit()
+
     # -- FEA Actions --
 
     @pyqtSlot()
@@ -1061,6 +1352,13 @@ class FEAInfillExtension(QObject, Extension):
             "bonding_coeff": self._bonding_coeff,
             "optimization_method": self._optimization_method,
             "volume_fraction": self._volume_fraction / 100.0,
+            "optimize_shell": self._optimize_shell,
+            "wall_count_min": self._wall_count_min,
+            "wall_count_max": self._wall_count_max,
+            "top_layers_min": self._top_layers_min,
+            "top_layers_max": self._top_layers_max,
+            "bottom_layers_min": self._bottom_layers_min,
+            "bottom_layers_max": self._bottom_layers_max,
         }
 
         # Cancel any running analysis before starting a new one.
@@ -1070,7 +1368,27 @@ class FEAInfillExtension(QObject, Extension):
             self._active_job.requestCancel()
             Logger.log("d", "FEA Infill: Cancelled previous analysis job before starting new one")
 
-        job = FEASolveJob(node, bc_decorator, material, config)
+        # ── Mesh cache: reuse tet mesh when geometry + resolution unchanged ──
+        cache_key = self._compute_mesh_cache_key(node)
+
+        cached_mesh = None
+        if cache_key is not None and cache_key == self._mesh_cache_key:
+            cached_mesh = self._mesh_cache_data
+            Logger.log("i", "FEA Infill: mesh cache HIT — skipping tetrahedralization")
+        else:
+            Logger.log("d", "FEA Infill: mesh cache MISS — will re-tetrahedralize")
+
+        # Warm-start: use previous density field if available and mesh matches
+        initial_density = None
+        if cached_mesh is not None and self._results is not None:
+            prev_density = self._results.get("density_field")
+            if prev_density is not None:
+                initial_density = prev_density
+                Logger.log("i", "FEA Infill: warm-starting density from previous run")
+
+        job = FEASolveJob(node, bc_decorator, material, config,
+                          cached_mesh=cached_mesh,
+                          initial_density=initial_density)
         job.finished.connect(self._onFEAFinished)
         job.progress.connect(self._onFEAProgress)
         self._active_job = job
@@ -1153,6 +1471,19 @@ class FEAInfillExtension(QObject, Extension):
                     lifetime=0
                 ).show()
             else:
+                # Cache the mesh for faster re-runs when only BCs/material change
+                surface_mesh = result.get("surface_mesh")
+                tet_mesh = result.get("tet_mesh")
+                if surface_mesh is not None and tet_mesh is not None:
+                    active_node = self._get_active_node()
+                    if active_node is not None:
+                        key = self._compute_mesh_cache_key(active_node)
+                        if key is not None:
+                            self._mesh_cache_key = key
+                            self._mesh_cache_data = (surface_mesh, tet_mesh)
+                            Logger.log("i", "FEA Infill: mesh cached for re-use (%d elements)",
+                                       tet_mesh.elements.shape[0])
+
                 self._analysis_status = "complete"
                 self._phase = "review"
                 self._results = result
@@ -1166,6 +1497,16 @@ class FEAInfillExtension(QObject, Extension):
                         self.stressOverlayVisibleChanged.emit()
                     except Exception:
                         Logger.logException("w", "FEA Infill: Auto stress overlay failed")
+                # Warn user if shell optimization was requested but failed
+                if result.get("shell_optimization_failed", False):
+                    Message(
+                        i18n_catalog.i18nc("@info:warning",
+                                           "Shell thickness optimization failed. "
+                                           "Infill zones will use default wall/skin settings."),
+                        title=i18n_catalog.i18nc("@info:title", "FEA Infill Optimizer"),
+                        message_type=Message.MessageType.WARNING,
+                        lifetime=10000,
+                    ).show()
             # Save per-node state after analysis completes
             if self._active_node_key:
                 self._saveCurrentStateForNode(self._active_node_key)

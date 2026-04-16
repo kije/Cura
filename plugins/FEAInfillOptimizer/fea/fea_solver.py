@@ -213,25 +213,128 @@ class LinearElasticitySolver:
     # Solve
     # ------------------------------------------------------------------
 
-    def solve(self, K: sp.csr_matrix, f: np.ndarray) -> np.ndarray:
+    def solve(self, K: sp.csr_matrix, f: np.ndarray,
+              subprocess_solve: bool = True) -> np.ndarray:
         """Solve the linear system K u = f for nodal displacements u.
 
-        Uses spsolve (SuperLU) with a 30s timeout. Falls back to CG
-        iterative solver if SuperLU stalls on ill-conditioned matrices
-        (common in SIMP optimization with extreme density ratios).
+        When *subprocess_solve* is True (default), the solve runs in a
+        **separate OS process** so SuperLU / CG cannot starve the Qt main
+        thread's GIL.  Falls back to in-process on failure.
 
         Args:
             K: Assembled, BC-applied stiffness matrix (CSR), shape (ndof, ndof).
             f: Force vector, shape (ndof,).
+            subprocess_solve: Use subprocess isolation (default True).
 
         Returns:
             Displacement vector u, shape (ndof,), same units as f/K implies.
         """
-        import threading
         from UM.Logger import Logger
 
-        # After the first spsolve timeout, skip it for subsequent calls
-        # to avoid wasting 30s per iteration on a matrix that SuperLU can't handle.
+        if subprocess_solve:
+            u = self._solve_subprocess(K, f, Logger)
+        else:
+            u = self._solve_inprocess(K, f, Logger)
+
+        if not np.isfinite(u).all():
+            Logger.log("e", "FEA solve: non-finite displacements detected — returning zeros")
+            u = np.zeros_like(u)
+        return u
+
+    # -- subprocess path (GIL-isolated) ------------------------------------
+
+    def _solve_subprocess(self, K, f, Logger):
+        """Solve in a separate process via _solver_worker.py.
+
+        Data is exchanged via temporary .npz files.  The subprocess has its
+        own GIL so it cannot starve the Qt main thread.  On timeout the
+        process is killed (no zombie threads).
+        """
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        _SPSOLVE_TIMEOUT = 15.0
+        _CG_TIMEOUT = 30.0
+        _WORKER = os.path.join(os.path.dirname(__file__), "_solver_worker.py")
+
+        # Find a usable Python interpreter
+        python = sys.executable
+        if getattr(sys, "frozen", False):
+            # Frozen app (PyInstaller) — sys.executable is the Cura binary
+            import shutil
+            python = shutil.which("python3") or shutil.which("python") or sys.executable
+
+        def _run_worker(solver_type, timeout):
+            """Spawn worker, return (u, info) or None on failure/timeout."""
+            inp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
+            out_path = inp.name + ".out.npz"
+            try:
+                np.savez(
+                    inp, K_data=K.data, K_indices=K.indices,
+                    K_indptr=K.indptr, K_shape=np.array(K.shape), f=f,
+                )
+                inp.close()
+
+                proc = subprocess.Popen(
+                    [python, _WORKER, inp.name, out_path, solver_type],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    _, stderr = proc.communicate(timeout=timeout)
+                    if proc.returncode != 0:
+                        Logger.log("w", "FEA solve: %s subprocess failed (rc=%d): %s",
+                                   solver_type, proc.returncode,
+                                   stderr.decode(errors="replace")[:500])
+                        return None
+                    result = np.load(out_path)
+                    return result["u"], int(result["info"][0])
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    Logger.log("w", "FEA solve: %s subprocess timed out (%.0fs)",
+                               solver_type, timeout)
+                    return None
+            except Exception as exc:
+                Logger.log("w", "FEA solve: subprocess launch failed: %s", exc)
+                return None
+            finally:
+                for p in (inp.name, out_path):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
+        # Try spsolve first (unless previous timeout set _skip_spsolve)
+        if not self._skip_spsolve:
+            result = _run_worker("spsolve", _SPSOLVE_TIMEOUT)
+            if result is not None:
+                u, info = result
+                return u
+            Logger.log("w", "FEA solve: skipping spsolve for remaining iterations")
+            self._skip_spsolve = True
+
+        # CG fallback
+        Logger.log("d", "FEA solve: using CG iterative solver (subprocess)")
+        result = _run_worker("cg", _CG_TIMEOUT)
+        if result is not None:
+            u, info = result
+            if info != 0:
+                Logger.log("w", "FEA solve: CG info=%d (partial convergence)", info)
+            return u
+
+        # Both failed — fall back to in-process as last resort
+        Logger.log("w", "FEA solve: subprocess solvers both failed, falling back to in-process")
+        return self._solve_inprocess(K, f, Logger)
+
+    # -- in-process fallback ------------------------------------------------
+
+    def _solve_inprocess(self, K, f, Logger):
+        """Original daemon-thread path — fallback when subprocess fails."""
+        import threading
+
         use_direct = not self._skip_spsolve
 
         if use_direct:
@@ -246,10 +349,6 @@ class LinearElasticitySolver:
 
             t = threading.Thread(target=_direct, daemon=True)
             t.start()
-            # 15s gives spsolve a fair chance — models that SuperLU can handle
-            # typically solve in <5s. Longer timeouts just waste time on matrices
-            # that SuperLU can't factor (ill-conditioned from anisotropic materials
-            # or insufficient BCs). CG fallback handles these robustly.
             _SPSOLVE_TIMEOUT = 15.0
             t.join(timeout=_SPSOLVE_TIMEOUT)
             use_direct = not (t.is_alive() or result[0] is None or exc[0] is not None)
@@ -262,15 +361,8 @@ class LinearElasticitySolver:
 
         if not use_direct:
             Logger.log("d", "FEA solve: using CG iterative solver")
-
-            # CPython cannot kill daemon threads.  The zombie spsolve thread
-            # may keep references to the large K and f arrays.  Copy the
-            # inputs for CG so the zombie doesn't pin shared memory.
             K_cg = K.copy()
             f_cg = f.copy()
-
-            # CG with Jacobi preconditioner + timeout thread
-            # CG can also hang on near-singular matrices, so we wrap it too
             cg_result = [None]
             cg_info = [None]
 
@@ -289,19 +381,14 @@ class LinearElasticitySolver:
             if cg_thread.is_alive() or cg_result[0] is None:
                 Logger.log("e", "FEA solve: CG also timed out (30s). Matrix may be singular. "
                            "Check that boundary conditions fully constrain the model.")
-                # Return zero displacements — caller will see zero stress
-                u = np.zeros(f.shape[0], dtype=np.float64)
+                return np.zeros(f.shape[0], dtype=np.float64)
             else:
                 u = cg_result[0]
                 if cg_info[0] != 0:
                     Logger.log("w", "FEA solve: CG info=%d (partial convergence)", cg_info[0])
+                return u
         else:
-            u = result[0]
-
-        if not np.isfinite(u).all():
-            Logger.log("e", "FEA solve: non-finite displacements detected — returning zeros")
-            u = np.zeros_like(u)
-        return u
+            return result[0]
 
     # ------------------------------------------------------------------
     # Stress computation

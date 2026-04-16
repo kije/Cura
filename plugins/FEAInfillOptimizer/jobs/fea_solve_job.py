@@ -6,11 +6,12 @@ import threading
 from typing import Any, Callable, Dict
 
 import numpy
+import numpy as np
 
 from UM.Job import Job
 from UM.Signal import Signal
 
-from ..fea.mesh_extraction import extract_trimesh
+from ..fea.mesh_extraction import extract_trimesh_from_arrays
 from ..fea.tetrahedralization import tetrahedralize
 from ..fea.iterative_solver import IterativeFEASolver
 from ..mesh_generation.density_discretizer import discretize_density
@@ -46,13 +47,38 @@ class FEASolveJob(Job):
         bc_decorator: Any,
         material: Any,
         config: Dict[str, Any],
+        cached_mesh: Any = None,
+        initial_density: Any = None,
     ) -> None:
         super().__init__()
-        self._node = node
+        # Pre-capture all scene node data on the main thread.
+        # Uranium's SceneNode has no locking — accessing it from a
+        # background Job thread is a data race.
+        mesh_data = node.getMeshData()
+        if mesh_data is None:
+            raise ValueError(f"Node '{node.getName()}' has no MeshData.")
+        raw_verts = mesh_data.getVertices()
+        if raw_verts is None:
+            raise ValueError(f"Node '{node.getName()}' MeshData has no vertices.")
+        self._vertices = np.array(raw_verts, dtype=np.float64)
+        raw_indices = mesh_data.getIndices()
+        self._indices = (
+            np.array(raw_indices, dtype=np.int64).reshape(-1, 3)
+            if raw_indices is not None else None
+        )
+        self._world_transform = np.array(
+            node.getWorldTransformation().getData(), dtype=np.float64
+        )
+        self._node_name = node.getName()
         self._bc_decorator = bc_decorator
         self._material = material
         self._config = config
         self._cancel_event = threading.Event()
+
+        # Optional cached data from a previous run — avoids re-meshing
+        # when only BCs, material, or optimization settings changed.
+        self._cached_mesh = cached_mesh       # (surface_mesh, tet_mesh) or None
+        self._initial_density = initial_density  # warm-start density field or None
 
     def requestCancel(self) -> None:
         """Signal the solver to stop at the next iteration boundary."""
@@ -112,21 +138,33 @@ class FEASolveJob(Job):
         the main thread.
         """
         try:
-            # ── Step 1: Extract trimesh ──────────────────────────────── 10 %
             self._emit_progress(0.0)
-            surface_mesh = extract_trimesh(self._node)
-            self._emit_progress(10.0)
 
-            # Compute bounding-box diagonal for element size heuristic
-            verts = surface_mesh.vertices
-            bbox_min = verts.min(axis=0)
-            bbox_max = verts.max(axis=0)
-            bbox_diag = float(math.sqrt(((bbox_max - bbox_min) ** 2).sum()))
+            if self._cached_mesh is not None:
+                # ── Cache hit: skip meshing ──────────────────────── 0→30 %
+                surface_mesh, tet_mesh = self._cached_mesh
+                from UM.Logger import Logger as _CacheLog
+                _CacheLog.log("i", "FEA job: reusing cached mesh (%d elements)",
+                              tet_mesh.elements.shape[0])
+                self._emit_progress(30.0)
+            else:
+                # ── Step 1: Extract trimesh ──────────────────────── 10 %
+                surface_mesh = extract_trimesh_from_arrays(
+                    self._vertices, self._indices,
+                    self._world_transform, self._node_name,
+                )
+                self._emit_progress(10.0)
 
-            # ── Step 2: Tetrahedralize ───────────────────────────────── 30 %
-            element_size = self._resolve_element_size(bbox_diag)
-            tet_mesh = tetrahedralize(surface_mesh, element_size=element_size)
-            self._emit_progress(30.0)
+                # Compute bounding-box diagonal for element size heuristic
+                verts = surface_mesh.vertices
+                bbox_min = verts.min(axis=0)
+                bbox_max = verts.max(axis=0)
+                bbox_diag = float(math.sqrt(((bbox_max - bbox_min) ** 2).sum()))
+
+                # ── Step 2: Tetrahedralize ──────────────────────── 30 %
+                element_size = self._resolve_element_size(bbox_diag)
+                tet_mesh = tetrahedralize(surface_mesh, element_size=element_size)
+                self._emit_progress(30.0)
 
             # ── Step 3: Run iterative FEA solver ────────────────────── 30–90 %
             solver = IterativeFEASolver()
@@ -144,6 +182,7 @@ class FEASolveJob(Job):
                 progress_callback=_solver_progress_cb,
                 surface_mesh=surface_mesh,
                 cancel_check=lambda: self._cancel_event.is_set(),
+                initial_density=self._initial_density,
             )
             iterations = info["iterations"]
             converged = info["converged"]
@@ -169,6 +208,7 @@ class FEASolveJob(Job):
 
             # ── Step 5b: Compute shell thickness per zone ──────────── 93–95 %
             zone_shell_settings = [None] * len(zone_objects)
+            shell_optimization_failed = False
             if self._config.get("optimize_shell", True) and stress_tensors is not None:
                 try:
                     from ..fea.surface_stress_analyzer import (
@@ -212,9 +252,14 @@ class FEASolveJob(Job):
                     )
                     self._emit_progress(95.0)
                 except Exception as _shell_exc:
+                    import traceback as _tb
                     from UM.Logger import Logger as _Logger
+                    _Logger.log("d", "FEA job: shell optimization traceback:\n%s",
+                                _tb.format_exc())
                     _Logger.log("w", "FEA job: shell optimization failed (non-fatal): %s",
                                 _shell_exc)
+                    zone_shell_settings = [None] * len(zone_objects)
+                    shell_optimization_failed = True
 
             # ── Step 6: Build zone surface meshes ───────────────────── 95–100 %
             zones = []
@@ -253,11 +298,13 @@ class FEASolveJob(Job):
                     "stress_field": stress_field,
                     "density_field": density_field,
                     "tet_mesh": tet_mesh,
+                    "surface_mesh": surface_mesh,
                     "mesh_quality": tet_mesh.mesh_quality,
                     "mesh_method": tet_mesh.mesh_method,
                     "mesh_warnings": tet_mesh.warnings,
                     "stress_tensors": stress_tensors,
                     "element_volumes": element_volumes,
+                    "shell_optimization_failed": shell_optimization_failed,
                 }
             )
 

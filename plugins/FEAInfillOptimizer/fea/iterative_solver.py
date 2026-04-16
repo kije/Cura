@@ -106,6 +106,7 @@ class IterativeFEASolver:
         progress_callback: Optional[Callable[[float], None]] = None,
         surface_mesh: Any = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        initial_density: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Run the fixed-point density iteration.
 
@@ -211,14 +212,14 @@ class IterativeFEASolver:
             Logger.log("i", "FEA solve: using EasyFEA solver (msh=%s)", tet_mesh.msh_path)
             return self._solve_easyfea(
                 tet_mesh, boundary_conditions, material, config,
-                progress_callback, surface_mesh, cancel_check,
+                progress_callback, surface_mesh, cancel_check, initial_density,
             )
         else:
             Logger.log("i", "FEA solve: using scipy solver (EasyFEA available=%s, opt=%s)",
                        _EASYFEA_AVAILABLE, opt_method)
             return self._solve_scipy(
                 tet_mesh, boundary_conditions, material, config,
-                progress_callback, surface_mesh, cancel_check,
+                progress_callback, surface_mesh, cancel_check, initial_density,
             )
 
     # ------------------------------------------------------------------
@@ -234,6 +235,7 @@ class IterativeFEASolver:
         progress_callback: Optional[Callable[[float], None]],
         surface_mesh: Any,
         cancel_check: Optional[Callable[[], bool]] = None,
+        initial_density: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Fixed-point iteration using EasyFEA as the FEA kernel."""
         import threading as _threading
@@ -274,12 +276,16 @@ class IterativeFEASolver:
         nu = material.nu
         n_exp = _PATTERN_EXPONENTS.get(pattern, 1.5)
 
-        # Start at midpoint density (not min_rho) so the first iteration has
-        # a well-conditioned stiffness matrix.  Starting at min_rho creates
-        # extremely low element stiffness (e.g. 0.8% of full for rho=0.05,
-        # n=1.6) which causes solver timeout or singular matrix.
-        initial_rho = (min_rho + max_rho) / 2.0
-        density = np.full(n_elems, initial_rho, dtype=np.float64)
+        # Warm-start from a previous density field if available and
+        # element count matches; otherwise start at midpoint density (not
+        # min_rho) so the first iteration has a well-conditioned K matrix.
+        if (initial_density is not None
+                and initial_density.shape == (n_elems,)):
+            density = np.clip(initial_density, min_rho, max_rho).copy()
+            Logger.log("i", "FEA solve (EasyFEA): warm-starting from previous density")
+        else:
+            initial_rho = (min_rho + max_rho) / 2.0
+            density = np.full(n_elems, initial_rho, dtype=np.float64)
         stress = np.zeros(n_elems, dtype=np.float64)
         converged = False
         max_change = float("inf")
@@ -359,15 +365,19 @@ class IterativeFEASolver:
             if _prev_simu is not None:
                 try:
                     mesh._Remove_observer(_prev_simu)
-                except Exception:
-                    pass
+                except Exception as _obs_e:
+                    Logger.log("d", "FEA EasyFEA: mesh._Remove_observer failed: %s", _obs_e)
                 try:
                     _prev_simu.model._Remove_observer(_prev_simu)
-                except Exception:
-                    pass
+                except Exception as _obs_e:
+                    Logger.log("d", "FEA EasyFEA: model._Remove_observer failed: %s", _obs_e)
             _prev_simu = None  # drop ref so GC can reclaim it
 
             simu = Simulations.Elastic(mesh, mat)
+            # Defensive check: observer count should be ≤2 (simu + model)
+            _n_obs = len(getattr(mesh, '_observers', getattr(mesh, 'observers', [])))
+            if _n_obs > 2:
+                Logger.log("w", "FEA EasyFEA: mesh has %d observers (expected ≤2) — leak suspected", _n_obs)
             # Force the simulation to rebuild its stiffness matrix from scratch
             # rather than relying on the observer/Need_Update mechanism which
             # can accumulate stale state between iterations.
@@ -526,16 +536,23 @@ class IterativeFEASolver:
                            iteration + 1, max_change)
                 break
 
-        # Deregister the final simu so the mesh does not retain a stale ref.
-        if _prev_simu is not None:
+        # Deregister all simu refs so the mesh does not retain stale observers.
+        _cleanup_refs = [_prev_simu]
+        try:
+            _cleanup_refs.append(simu)
+        except NameError:
+            pass  # loop never executed
+        for _stale in _cleanup_refs:
+            if _stale is None:
+                continue
             try:
-                mesh._Remove_observer(_prev_simu)
-            except Exception:
-                pass
+                mesh._Remove_observer(_stale)
+            except Exception as _obs_e:
+                Logger.log("d", "FEA EasyFEA cleanup: mesh._Remove_observer failed: %s", _obs_e)
             try:
-                _prev_simu.model._Remove_observer(_prev_simu)
-            except Exception:
-                pass
+                _stale.model._Remove_observer(_stale)
+            except Exception as _obs_e:
+                Logger.log("d", "FEA EasyFEA cleanup: model._Remove_observer failed: %s", _obs_e)
 
         # Compute full stress tensors for shell/orientation optimizers.
         # EasyFEA only exposes scalar Svm — use the scipy solver kernel to
@@ -591,6 +608,7 @@ class IterativeFEASolver:
         progress_callback: Optional[Callable[[float], None]],
         surface_mesh: Any,
         cancel_check: Optional[Callable[[], bool]] = None,
+        initial_density: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """Fixed-point iteration using the custom scipy FEA kernel."""
         import time as _time
@@ -620,12 +638,27 @@ class IterativeFEASolver:
 
         fea_solver = LinearElasticitySolver()
 
-        initial_rho = (min_rho + max_rho) / 2.0
-        density = np.full(n_elems, initial_rho, dtype=np.float64)
+        # Warm-start from a previous density field if available and
+        # element count matches; otherwise start at midpoint density.
+        if (initial_density is not None
+                and initial_density.shape == (n_elems,)):
+            density = np.clip(initial_density, min_rho, max_rho).copy()
+            Logger.log("i", "FEA solve (scipy): warm-starting from previous density")
+        else:
+            initial_rho = (min_rho + max_rho) / 2.0
+            density = np.full(n_elems, initial_rho, dtype=np.float64)
         stress = np.zeros(n_elems, dtype=np.float64)
         converged = False
         max_change = float("inf")
         iteration = 0
+
+        # Pre-initialise variables used after the loop for stress tensor
+        # extraction.  These are overwritten on every iteration, but must
+        # exist even if the loop body never executes (max_iter=0 or
+        # immediate cancel).
+        displacements = np.zeros(tet_mesh.nodes.shape[0] * 3, dtype=np.float64)
+        E_eff_arr = np.full(n_elems, material.E_xy, dtype=np.float64)
+        nu_arr = np.full(n_elems, material.nu, dtype=np.float64)
 
         # Adaptive damping state
         damping = _DAMPING_INITIAL

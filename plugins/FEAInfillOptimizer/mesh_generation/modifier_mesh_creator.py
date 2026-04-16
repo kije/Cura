@@ -92,13 +92,34 @@ def create_all_modifier_meshes(
                 Logger.log("e", "FEA Infill: 'infill_mesh' setting definition not found. "
                            "Zone '%s' will not function as an infill modifier.", node.getName())
 
+            # Determine shell settings — use FEA-optimized values when
+            # available, otherwise fall back to zero (pure infill modifier).
+            shell = zone.get("shell")
+            if shell is not None:
+                _wall_t = shell.wall_thickness_mm
+                _top_t = shell.top_thickness_mm
+                _bottom_t = shell.bottom_thickness_mm
+                _tb_t = max(_top_t, _bottom_t)
+            else:
+                _wall_t = 0
+                _tb_t = 0
+                _top_t = 0
+                _bottom_t = 0
+
             # Second pass: companion settings required by Cura on infill meshes.
-            for key, value in [
-                ("wall_thickness", 0),
-                ("top_bottom_thickness", 0),
+            setting_pairs = [
+                ("wall_thickness", _wall_t),
+                ("top_bottom_thickness", _tb_t),
                 ("infill_sparse_density", density_pct),
                 ("infill_pattern", infill_pattern),
-            ]:
+            ]
+            # When shell optimization provides explicit top/bottom, add them
+            # so Cura uses distinct values instead of the combined max.
+            if shell is not None:
+                setting_pairs.append(("top_thickness", _top_t))
+                setting_pairs.append(("bottom_thickness", _bottom_t))
+
+            for key, value in setting_pairs:
                 definition = stack.getSettingDefinition(key)
                 if definition is not None:
                     instance = SettingInstance(definition, settings)

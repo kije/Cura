@@ -49,6 +49,7 @@ Item
     readonly property bool   hasFullResults:       toolProperties.getValue("HasFullResults")       === true || toolProperties.getValue("HasFullResults") === "true"
 
     property bool _meshesApplied: false
+    property bool _orientationApplied: false
 
     implicitWidth: 280 * screenScaleFactor
     // Use 80% of the application window height so the panel fills most of
@@ -107,7 +108,9 @@ Item
         {
             id: columnLayout
             width: bcPanel.width
-            spacing: UM.Theme.getSize("default_margin").height
+            // Use zero spacing — each phase manages its own internal spacing.
+            // This prevents invisible phases from contributing phantom gaps.
+            spacing: 0
 
             // ══════════════════════════════════════════════════════════════
             // DEFINE PHASE — all BC definition UI
@@ -116,12 +119,12 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "define"
-                Layout.preferredHeight: visible ? defineColumn.implicitHeight : 0
+                implicitHeight: defineColumn.implicitHeight
 
                 ColumnLayout
                 {
                     id: defineColumn
-                    width: parent.width
+                    anchors { left: parent.left; right: parent.right }
                     spacing: UM.Theme.getSize("default_margin").height
 
                     property int editingForceIndex: -1
@@ -134,7 +137,7 @@ Item
                     {
                         Layout.fillWidth: true
                         visible: bcPanel.supportListModel.length === 0 && bcPanel.forceListModel.length === 0 && bcPanel.torqueListModel.length === 0
-                        height: visible ? stepGuideColumn.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
+                        implicitHeight: stepGuideColumn.implicitHeight + UM.Theme.getSize("default_margin").height * 2
                         color: UM.Theme.getColor("detail_background")
                         radius: UM.Theme.getSize("default_radius").width
 
@@ -227,7 +230,7 @@ Item
                     {
                         Layout.fillWidth: true
                         visible: (toolProperties.getValue("QuickSetupMode") ?? "") !== ""
-                        height: visible ? quickModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        implicitHeight: quickModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height
                         color: Qt.rgba(UM.Theme.getColor("success").r, UM.Theme.getColor("success").g, UM.Theme.getColor("success").b, 0.15)
                         radius: UM.Theme.getSize("default_radius").width
 
@@ -530,7 +533,7 @@ Item
                                     Rectangle
                                     {
                                         width: defineColumn.width
-                                        height: supportRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
+                                        implicitHeight: supportRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
                                         color: bcPanel.activeSupportIdx === modelData.index
                                             ? UM.Theme.getColor("primary")
                                             : UM.Theme.getColor("main_background")
@@ -647,7 +650,7 @@ Item
                             {
                                 Layout.fillWidth: true
                                 visible: bcPanel.currentMode === "rotate"
-                                height: visible ? rotateModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                implicitHeight: rotateModeLabel.implicitHeight + UM.Theme.getSize("default_margin").height
                                 color: Qt.rgba(UM.Theme.getColor("primary").r, UM.Theme.getColor("primary").g, UM.Theme.getColor("primary").b, 0.15)
                                 radius: UM.Theme.getSize("default_radius").width
 
@@ -744,7 +747,7 @@ Item
                             {
                                 Layout.fillWidth: true
                                 visible: defineColumn.isForceEditMode
-                                height: visible ? editForceBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                implicitHeight: editForceBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height
                                 color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.2)
                                 radius: UM.Theme.getSize("default_radius").width
 
@@ -910,7 +913,7 @@ Item
                                     Rectangle
                                     {
                                         width: defineColumn.width
-                                        height: forceRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
+                                        implicitHeight: forceRowLabel.implicitHeight + UM.Theme.getSize("default_margin").height
                                         color: bcPanel.activeForceIdx === modelData.index
                                             ? UM.Theme.getColor("primary")
                                             : UM.Theme.getColor("main_background")
@@ -1083,7 +1086,7 @@ Item
                             {
                                 Layout.fillWidth: true
                                 visible: bcPanel.currentMode === "torque_edit"
-                                height: visible ? torqueEditColumn.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                implicitHeight: torqueEditColumn.implicitHeight + UM.Theme.getSize("default_margin").height
                                 color: Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.15)
                                 radius: UM.Theme.getSize("default_radius").width
 
@@ -1216,7 +1219,7 @@ Item
                             {
                                 Layout.fillWidth: true
                                 visible: defineColumn.isTorqueEditMode
-                                height: visible ? editTorqueBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                                implicitHeight: editTorqueBannerRow.implicitHeight + UM.Theme.getSize("default_margin").height
                                 color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.2)
                                 radius: UM.Theme.getSize("default_radius").width
 
@@ -1318,7 +1321,7 @@ Item
                                     Rectangle
                                     {
                                         width: defineColumn.width
-                                        height: torqueRowLayout.implicitHeight + UM.Theme.getSize("default_margin").height
+                                        implicitHeight: torqueRowLayout.implicitHeight + UM.Theme.getSize("default_margin").height
                                         color: bcPanel.activeTorqueIdx === modelData.index
                                             ? Qt.rgba(UM.Theme.getColor("secondary").r, UM.Theme.getColor("secondary").g, UM.Theme.getColor("secondary").b, 0.5)
                                             : defineColumn.editingTorqueIndex === modelData.index
@@ -1487,12 +1490,12 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "optimize"
-                Layout.preferredHeight: visible ? optimizeColumn.implicitHeight : 0
+                implicitHeight: optimizeColumn.implicitHeight
 
                 ColumnLayout
                 {
                     id: optimizeColumn
-                    width: parent.width
+                    anchors { left: parent.left; right: parent.right }
                     spacing: UM.Theme.getSize("default_margin").height
 
                     // Phase header
@@ -1507,7 +1510,7 @@ Item
                     Rectangle
                     {
                         Layout.fillWidth: true
-                        height: bcSummaryRow.implicitHeight + UM.Theme.getSize("default_margin").height
+                        implicitHeight: bcSummaryRow.implicitHeight + UM.Theme.getSize("default_margin").height
                         color: UM.Theme.getColor("main_background")
                         border.color: UM.Theme.getColor("lining")
                         border.width: UM.Theme.getSize("default_lining").width
@@ -1819,7 +1822,7 @@ Item
                         Rectangle
                         {
                             Layout.fillWidth: true
-                            height: advancedHeaderRow.implicitHeight + UM.Theme.getSize("default_margin").height / 2
+                            implicitHeight: advancedHeaderRow.implicitHeight + UM.Theme.getSize("default_margin").height / 2
                             color: "transparent"
                             border.color: UM.Theme.getColor("lining")
                             border.width: UM.Theme.getSize("default_lining").width
@@ -1933,7 +1936,7 @@ Item
                     {
                         Layout.fillWidth: true
                         visible: !toolProperties.getValue("DepsAvailable")
-                        height: visible ? depsLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2 : 0
+                        implicitHeight: depsLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2
                         color: Qt.rgba(UM.Theme.getColor("error").r, UM.Theme.getColor("error").g, UM.Theme.getColor("error").b, 0.2)
                         radius: UM.Theme.getSize("default_radius").width
 
@@ -1957,6 +1960,26 @@ Item
                                 onClicked: UM.Controller.setProperty("InstallDependencies", true)
                             }
                         }
+                    }
+
+                    // ── Shell (Wall/Top/Bottom) Optimization ──────────
+                    Item { height: UM.Theme.getSize("default_margin").height / 2 }
+
+                    UM.CheckBox
+                    {
+                        Layout.fillWidth: true
+                        text: catalog.i18nc("@option:check", "Optimize Wall/Shell Thickness")
+                        checked: toolProperties.getValue("OptimizeShell") ?? true
+                        onToggled: UM.Controller.setProperty("OptimizeShell", checked)
+                    }
+
+                    UM.Label
+                    {
+                        Layout.fillWidth: true
+                        text: catalog.i18nc("@info", "Adjusts wall count (1\u20136) and top/bottom layers (2\u20138) per zone based on surface stress.")
+                        font: UM.Theme.getFont("small")
+                        color: UM.Theme.getColor("text_inactive")
+                        wrapMode: Text.WordWrap
                     }
 
                     // Run button
@@ -1990,12 +2013,12 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "running"
-                Layout.preferredHeight: visible ? runningColumn.implicitHeight : 0
+                implicitHeight: runningColumn.implicitHeight
 
                 ColumnLayout
                 {
                     id: runningColumn
-                    width: parent.width
+                    anchors { left: parent.left; right: parent.right }
                     spacing: UM.Theme.getSize("default_margin").height
 
                     Item { height: UM.Theme.getSize("default_margin").height }
@@ -2085,7 +2108,7 @@ Item
                     {
                         Layout.fillWidth: true
                         visible: bcPanel.supportListModel.length > 0 || bcPanel.forceListModel.length > 0
-                        height: visible ? bcSummaryRunning.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        implicitHeight: bcSummaryRunning.implicitHeight + UM.Theme.getSize("default_margin").height
                         color: UM.Theme.getColor("main_background")
                         radius: UM.Theme.getSize("default_radius").width
                         border.color: UM.Theme.getColor("lining")
@@ -2122,7 +2145,7 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "review"
-                Layout.preferredHeight: visible ? reviewColumn.implicitHeight : 0
+                implicitHeight: reviewColumn.implicitHeight
                 onVisibleChanged:
                 {
                     if (visible) mainScrollView.contentItem.contentY = 0
@@ -2132,7 +2155,7 @@ Item
                 ColumnLayout
                 {
                     id: reviewColumn
-                    width: parent.width
+                    anchors { left: parent.left; right: parent.right }
                     spacing: UM.Theme.getSize("default_margin").height
 
                     UM.Label
@@ -2147,7 +2170,7 @@ Item
                     {
                         Layout.fillWidth: true
                         visible: bcPanel.hasResults && !bcPanel.hasFullResults
-                        height: visible ? restoredNoteLabel.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        implicitHeight: restoredNoteLabel.implicitHeight + UM.Theme.getSize("default_margin").height
                         color: Qt.rgba(UM.Theme.getColor("warning").r, UM.Theme.getColor("warning").g, UM.Theme.getColor("warning").b, 0.15)
                         radius: UM.Theme.getSize("default_radius").width
 
@@ -2173,7 +2196,7 @@ Item
                     {
                         Layout.fillWidth: true
                         visible: bcPanel.hasResults
-                        height: visible ? meshQualityRow.implicitHeight + UM.Theme.getSize("default_margin").height / 2 : 0
+                        implicitHeight: meshQualityRow.implicitHeight + UM.Theme.getSize("default_margin").height / 2
                         radius: UM.Theme.getSize("default_radius").width
                         color: {
                             var q = toolProperties.getValue("MeshQuality") ?? ""
@@ -2251,7 +2274,7 @@ Item
                     Rectangle
                     {
                         Layout.fillWidth: true
-                        height: visible ? verdictRow.implicitHeight + UM.Theme.getSize("default_margin").height : 0
+                        implicitHeight: verdictRow.implicitHeight + UM.Theme.getSize("default_margin").height
                         radius: UM.Theme.getSize("default_radius").width
                         color: {
                             var v = bcPanel.safetyVerdict
@@ -2303,7 +2326,7 @@ Item
                     Rectangle
                     {
                         Layout.fillWidth: true
-                        height: metricsGrid.implicitHeight + UM.Theme.getSize("default_margin").height
+                        implicitHeight: metricsGrid.implicitHeight + UM.Theme.getSize("default_margin").height
                         color: UM.Theme.getColor("main_background")
                         border.color: UM.Theme.getColor("lining")
                         border.width: UM.Theme.getSize("default_lining").width
@@ -2389,6 +2412,129 @@ Item
                         color: UM.Theme.getColor("success")
                         font: UM.Theme.getFont("small")
                         wrapMode: Text.WordWrap
+                    }
+
+                    // ── Print Orientation Advisor ─────────────────────────
+                    Rectangle
+                    {
+                        Layout.fillWidth: true
+                        visible: bcPanel.hasFullResults
+                        implicitHeight: orientColumn.implicitHeight + UM.Theme.getSize("default_margin").height
+                        color: Qt.rgba(UM.Theme.getColor("primary").r, UM.Theme.getColor("primary").g, UM.Theme.getColor("primary").b, 0.07)
+                        radius: UM.Theme.getSize("default_radius").width
+
+                        ColumnLayout
+                        {
+                            id: orientColumn
+                            anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; margins: UM.Theme.getSize("default_margin").width / 2 }
+                            spacing: 4
+
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                text: catalog.i18nc("@label", "Print Orientation Advisor")
+                                font: UM.Theme.getFont("default_bold")
+                            }
+
+                            // Prerequisite note — shown ABOVE the button when disabled
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                visible: !(toolProperties.getValue("CanRunOrientationAnalysis") ?? false)
+                                text: catalog.i18nc("@info", "Orientation analysis requires a fresh FEA run (not available from restored results).")
+                                font: UM.Theme.getFont("small")
+                                color: UM.Theme.getColor("text_inactive")
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Cura.SecondaryButton
+                            {
+                                Layout.fillWidth: true
+                                visible: (toolProperties.getValue("OrientationStatus") ?? "idle") === "idle" ||
+                                         (toolProperties.getValue("OrientationStatus") ?? "idle") === "error"
+                                enabled: toolProperties.getValue("CanRunOrientationAnalysis") ?? false
+                                text: catalog.i18nc("@action:button", "Analyze Orientation")
+                                onClicked:
+                                {
+                                    bcPanel._orientationApplied = false
+                                    UM.Controller.setProperty("RunOrientationOptimization", true)
+                                }
+                            }
+
+                            // Error state
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                visible: (toolProperties.getValue("OrientationStatus") ?? "idle") === "error"
+                                text: catalog.i18nc("@info:error", "Orientation analysis failed. Try re-running the FEA analysis first.")
+                                color: UM.Theme.getColor("error")
+                                font: UM.Theme.getFont("small")
+                                wrapMode: Text.WordWrap
+                            }
+
+                            // Running state — busy indicator
+                            RowLayout
+                            {
+                                Layout.fillWidth: true
+                                visible: (toolProperties.getValue("OrientationStatus") ?? "idle") === "running"
+                                spacing: 8
+
+                                UM.ColorImage
+                                {
+                                    source: UM.Theme.getIcon("ArrowDoubleCircleRight")
+                                    width: 16 * screenScaleFactor
+                                    height: 16 * screenScaleFactor
+                                    color: UM.Theme.getColor("primary")
+                                }
+
+                                UM.Label
+                                {
+                                    text: catalog.i18nc("@info", "Analyzing orientation\u2026")
+                                    font: UM.Theme.getFont("small")
+                                }
+                            }
+
+                            // Result display
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                visible: (toolProperties.getValue("OrientationStatus") ?? "idle") === "complete"
+                                text:
+                                {
+                                    var ratio = toolProperties.getValue("OrientationImprovement") ?? 0
+                                    if (ratio > 1.1)
+                                        return catalog.i18nc("@info", "~%1% estimated reduction in interlayer failure risk.").arg(Math.round((ratio - 1) * 100))
+                                    else
+                                        return catalog.i18nc("@info", "No significantly better orientation found \u2014 stress state is multi-directional. Consider increasing infill density or safety factor.")
+                                }
+                                font: UM.Theme.getFont("small")
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Cura.PrimaryButton
+                            {
+                                Layout.fillWidth: true
+                                visible: (toolProperties.getValue("OrientationStatus") ?? "idle") === "complete" &&
+                                         (toolProperties.getValue("OrientationImprovement") ?? 0) > 1.1
+                                text: catalog.i18nc("@action:button", "Apply Rotation")
+                                onClicked:
+                                {
+                                    UM.Controller.setProperty("ApplyOptimalOrientation", true)
+                                    bcPanel._orientationApplied = true
+                                }
+                            }
+
+                            // Post-apply confirmation
+                            UM.Label
+                            {
+                                Layout.fillWidth: true
+                                visible: bcPanel._orientationApplied
+                                text: catalog.i18nc("@info", "\u2713 Model rotated. Use Ctrl+Z to undo. Re-run analysis to verify.")
+                                color: UM.Theme.getColor("success")
+                                font: UM.Theme.getFont("small")
+                                wrapMode: Text.WordWrap
+                            }
+                        }
                     }
 
                     // Secondary actions
@@ -2530,12 +2676,12 @@ Item
             {
                 Layout.fillWidth: true
                 visible: bcPanel.currentPhase === "error"
-                Layout.preferredHeight: visible ? errorColumn.implicitHeight : 0
+                implicitHeight: errorColumn.implicitHeight
 
                 ColumnLayout
                 {
                     id: errorColumn
-                    width: parent.width
+                    anchors { left: parent.left; right: parent.right }
                     spacing: UM.Theme.getSize("default_margin").height
 
                     Item { height: UM.Theme.getSize("default_margin").height }
@@ -2554,7 +2700,7 @@ Item
                     Rectangle
                     {
                         Layout.fillWidth: true
-                        height: errorMsgLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2
+                        implicitHeight: errorMsgLabel.implicitHeight + UM.Theme.getSize("default_margin").height * 2
                         color: Qt.rgba(UM.Theme.getColor("error").r, UM.Theme.getColor("error").g, UM.Theme.getColor("error").b, 0.2)
                         border.color: UM.Theme.getColor("error")
                         border.width: UM.Theme.getSize("default_lining").width
