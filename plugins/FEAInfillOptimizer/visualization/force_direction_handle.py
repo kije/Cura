@@ -87,28 +87,53 @@ class ForceDirectionHandle(ToolHandle):
             color=self._x_axis_color, center=center
         )
 
-        # Axis direction line — a visible cylinder along the axis direction
-        # so the user can see what they're rotating (critical for torque editing)
+        # Axis direction line — a visible shaft along the actual axis direction
+        # so the user can see what they're rotating (critical for torque editing).
+        # Built as a manually-oriented rectangular prism because MeshBuilder.addCube
+        # is always axis-aligned.
         if axis_direction is not None:
             axis_len = outer * 2.0  # extend beyond the rings
             d = axis_direction.normalized()
             # Cyan color for the axis line (distinct from ring colors)
-            axis_color = ToolHandle.DisabledSelectionColor  # fallback
             try:
                 from UM.Math.Color import Color
                 axis_color = Color(0.0, 0.85, 0.95, 1.0)  # cyan
             except Exception:
-                pass
+                axis_color = ToolHandle.DisabledSelectionColor
+
             p1 = center + d * axis_len
             p2 = center - d * axis_len
-            mb.addCube(
-                width=width * 1.5, height=axis_len * 2, depth=width * 1.5,
-                center=center, color=axis_color,
-            )
-            # Draw small cone arrowheads at both ends
-            # Use addVertex for a simple line representation
-            # Actually, addCube stretched along the axis is simplest —
-            # but it's always axis-aligned. Use two small cubes at the tips instead.
+
+            # Build a perpendicular basis for the shaft cross-section
+            arbitrary = Vector(0.0, 1.0, 0.0) if abs(d.y) < 0.9 else Vector(1.0, 0.0, 0.0)
+            perp1 = d.cross(arbitrary).normalized()
+            perp2 = d.cross(perp1).normalized()
+            hw = width * 0.75  # shaft half-width
+
+            # 4 corner vertices at each endpoint
+            corners_p1 = [
+                p1 + perp1 * hw + perp2 * hw,
+                p1 + perp1 * hw - perp2 * hw,
+                p1 - perp1 * hw - perp2 * hw,
+                p1 - perp1 * hw + perp2 * hw,
+            ]
+            corners_p2 = [
+                p2 + perp1 * hw + perp2 * hw,
+                p2 + perp1 * hw - perp2 * hw,
+                p2 - perp1 * hw - perp2 * hw,
+                p2 - perp1 * hw + perp2 * hw,
+            ]
+            # 4 side faces (front + back triangles each for double-sided rendering)
+            for i in range(4):
+                j = (i + 1) % 4
+                sa, sb = corners_p1[i], corners_p1[j]
+                ea, eb = corners_p2[i], corners_p2[j]
+                mb.addFace(sa, ea, sb, color=axis_color)
+                mb.addFace(sb, ea, eb, color=axis_color)
+                mb.addFace(sb, ea, sa, color=axis_color)
+                mb.addFace(eb, ea, sb, color=axis_color)
+
+            # Tip markers at both ends
             tip_size = width * 3
             mb.addCube(
                 width=tip_size, height=tip_size, depth=tip_size,

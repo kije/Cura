@@ -392,10 +392,11 @@ class BoundaryConditionTool(Tool):
 
     def setQuickGravityStart(self, value) -> None:
         """Enter 'pick bottom face' mode for gravity setup."""
-        Logger.log("d", "FEA: setQuickGravityStart called with value=%s (type=%s)", value, type(value).__name__)
         if value:
             self._quick_setup_mode = "gravity_pick_bottom"
-            Logger.log("d", "FEA: Quick setup mode set to '%s'", self._quick_setup_mode)
+            self._hover_faces = []
+            self._hover_generation += 1
+            self._hover_pending = False
             self.propertyChanged.emit()
 
     def getQuickCantileverStart(self) -> bool:
@@ -405,6 +406,9 @@ class BoundaryConditionTool(Tool):
         """Enter 'pick fixed end' mode for cantilever setup."""
         if value:
             self._quick_setup_mode = "cantilever_pick_fixed"
+            self._hover_faces = []
+            self._hover_generation += 1
+            self._hover_pending = False
             self.propertyChanged.emit()
 
     def getQuickTorqueAxisStart(self) -> bool:
@@ -418,12 +422,14 @@ class BoundaryConditionTool(Tool):
         if selected is None:
             return
 
-        # Create the axis placement node at the model's bounding box center
+        # Create the axis placement node at the model's bounding box center,
+        # clamped so the lower endpoint stays at or above the build plate (y=0).
         bbox = selected.getBoundingBox()
         if bbox:
-            center = Vector(bbox.center.x, bbox.center.y, bbox.center.z)
             diag = math.sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
             axis_length = max(20.0, diag * 0.8)
+            center_y = max(bbox.center.y, axis_length / 2.0)
+            center = Vector(bbox.center.x, center_y, bbox.center.z)
         else:
             center = Vector(0, 0, 0)
             axis_length = 100.0
@@ -451,6 +457,9 @@ class BoundaryConditionTool(Tool):
 
         self._quick_setup_mode = "torque_set_axis"
         self._current_face_selection.clear()
+        self._hover_faces = []
+        self._hover_generation += 1
+        self._hover_pending = False
         self.propertyChanged.emit()
 
     def getConfirmTorqueAxis(self) -> bool:
