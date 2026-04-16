@@ -4,6 +4,7 @@
 import numpy
 
 from UM.Math.Color import Color
+from UM.Math.Matrix import Matrix
 from UM.Math.Vector import Vector
 from UM.Mesh.MeshBuilder import MeshBuilder
 from UM.Scene.ToolHandle import ToolHandle
@@ -64,8 +65,15 @@ class BCHighlightHandle(ToolHandle):
             self.setSolidMesh(mb.build())
             return
 
-        # Position the handle in world space so local-coord painting aligns.
-        self.setTransformation(node.getWorldTransformation())
+        # Transform vertices to world space so the highlight renders exactly
+        # on the model surface.  Reset the handle's own transform to identity
+        # so the renderer doesn't apply any additional offset — the world-space
+        # geometry is already correctly positioned.  This matches the pattern
+        # used by ForceDirectionHandle and StressOverlayManager.
+        self.setTransformation(Matrix())  # reset to identity
+        world_matrix = node.getWorldTransformation().getData()
+        verts_h = numpy.column_stack([verts, numpy.ones(len(verts), dtype=numpy.float32)])
+        verts = (world_matrix @ verts_h.T).T[:, :3].astype(numpy.float32)
         # setEnabled(True) is deferred until we have actual faces to paint
         # to avoid "RenderBatch.addItem without mesh" warnings on every zoom
 

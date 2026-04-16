@@ -39,6 +39,7 @@ from UM.Tool import Tool
 from cura.CuraApplication import CuraApplication
 from cura.PickingPass import PickingPass
 from cura.Scene.CuraSceneNode import CuraSceneNode
+from UM.View.SelectionPass import SelectionPass
 
 from .FEABoundaryConditionDecorator import FEABoundaryConditionDecorator
 from .operations.bc_operations import (
@@ -141,11 +142,14 @@ class BoundaryConditionTool(Tool):
         # Re-entrancy guard for hover preview
         self._hover_in_progress = False
 
-        # Centroid cache for fast face picking during hover
+        # Centroid cache for gizmo placement (force/torque centroid computation)
         self._centroid_cache = None
         self._centroid_cache_node_id = None
         self._centroid_cache_mesh_id = None
         self._centroid_cache_transform_bytes = None
+
+        # GPU face selection pass — gives exact triangle ID at cursor pixel
+        self._faces_selection_pass: Optional[SelectionPass] = None
 
         # Quick setup state
         self._quick_setup_mode = ""  # "", "gravity_pick_bottom", "cantilever_pick_fixed",
@@ -177,6 +181,7 @@ class BoundaryConditionTool(Tool):
             extension.settingsChanged.connect(self.propertyChanged.emit)
             extension.errorMessageChanged.connect(self.propertyChanged.emit)
             extension.stressOverlayVisibleChanged.connect(self.propertyChanged.emit)
+            extension.orientationStatusChanged.connect(self.propertyChanged.emit)
 
         self.setExposedProperties(
             "Mode", "ForceX", "ForceY", "ForceZ", "ForceMagnitude",
@@ -205,12 +210,17 @@ class BoundaryConditionTool(Tool):
             "ActiveNodeName", "MeshQuality", "MeshWarnings",
             "MinDensity", "MaxDensity", "NumZones", "MaxIterations", "BondingCoeff",
             "OptimizationMethod", "VolumeFraction",
+            "OptimizeShell",
             "DepsAvailable", "InstallDependencies",
             "HoverPreviewEnabled",
             "ErrorMessage",
             "StressOverlayVisible",
             "GoBackToOptimize",
             "HasFullResults",
+            # Orientation optimization
+            "OrientationStatus", "OrientationImprovement",
+            "CanRunOrientationAnalysis",
+            "RunOrientationOptimization", "ApplyOptimalOrientation",
         )
 
     # ── Properties exposed to QML ──────────────────────────────────────────
@@ -977,6 +987,54 @@ class BoundaryConditionTool(Tool):
             self._extension._volume_fraction = float(value)
         self.propertyChanged.emit()
 
+    # ── Shell optimisation ─────────────────────────────────────────────────
+
+    def getOptimizeShell(self) -> bool:
+        return self._extension._optimize_shell if self._extension else True
+
+    def setOptimizeShell(self, value) -> None:
+        if self._extension:
+            self._extension._optimize_shell = bool(value)
+        self.propertyChanged.emit()
+
+    # ── Orientation optimisation ───────────────────────────────────────────
+
+    def getOrientationStatus(self) -> str:
+        return self._extension._orientation_status if self._extension else "idle"
+
+    def setOrientationStatus(self, value) -> None:
+        pass  # read-only
+
+    def getOrientationImprovement(self) -> float:
+        return self._extension._orientation_improvement if self._extension else 0.0
+
+    def setOrientationImprovement(self, value) -> None:
+        pass  # read-only
+
+    def getCanRunOrientationAnalysis(self) -> bool:
+        if self._extension:
+            return self._extension.canRunOrientationAnalysis
+        return False
+
+    def setCanRunOrientationAnalysis(self, value) -> None:
+        pass  # read-only
+
+    def getRunOrientationOptimization(self) -> bool:
+        return False  # action slot, no persistent state
+
+    def setRunOrientationOptimization(self, value) -> None:
+        if value and self._extension:
+            self._extension.runOrientationOptimization()
+            self.propertyChanged.emit()
+
+    def getApplyOptimalOrientation(self) -> bool:
+        return False  # action slot, no persistent state
+
+    def setApplyOptimalOrientation(self, value) -> None:
+        if value and self._extension:
+            self._extension.applyOptimalOrientation()
+            self.propertyChanged.emit()
+
     # ── Dependency management ──────────────────────────────────────────────
 
     def getDepsAvailable(self) -> bool:
@@ -1329,6 +1387,13 @@ class BoundaryConditionTool(Tool):
 
         if event.type == Event.ToolActivateEvent:
             self._update_highlights()
+            # Only render the selected object in the face-ID pass so the face
+            # index returned by getFaceIdAtPosition always belongs to the
+            # selected (decorated) model — not any object under the cursor.
+            if self._faces_selection_pass is None:
+                self._faces_selection_pass = Application.getInstance().getRenderer().getRenderPass("selection_faces")
+            if self._faces_selection_pass is not None:
+                self._faces_selection_pass.setIgnoreUnselectedObjects(True)
             # Track model transforms so overlays follow the model
             selected = Selection.getSelectedObject(0)
             if selected is not None:
@@ -1344,6 +1409,10 @@ class BoundaryConditionTool(Tool):
             self._torque_captured_position = None
             self._torque_captured_direction = None
             self._centroid_cache = None  # free memory
+            # Restore the face selection pass to its default behaviour so other
+            # tools (e.g. PaintTool) are not affected.
+            if self._faces_selection_pass is not None:
+                self._faces_selection_pass.setIgnoreUnselectedObjects(False)
             self._rotating_group_index = -1
             self._editing_torque_index = -1
             self._hover_faces = []
@@ -1406,14 +1475,18 @@ class BoundaryConditionTool(Tool):
             if mesh_data is None:
                 return False
 
-            if self._picking_pass is None:
-                self._picking_pass = Application.getInstance().getRenderer().getRenderPass("picking_selected")
-                if not self._picking_pass:
+            if self._faces_selection_pass is None:
+                self._faces_selection_pass = Application.getInstance().getRenderer().getRenderPass("selection_faces")
+                if not self._faces_selection_pass:
                     return False
 
-            picked_position = self._picking_pass.getPickedPosition(event.x, event.y)
-            face_index = self._find_closest_face(picked_node, picked_position)
-            if face_index is None:
+            face_index = self._faces_selection_pass.getFaceIdAtPosition(event.x, event.y)
+            if face_index < 0:
+                return False
+
+            # Bounds-check: face_index must be a valid triangle index
+            mesh_face_count = mesh_data.getFaceCount()
+            if mesh_face_count > 0 and face_index >= mesh_face_count:
                 return False
 
             # Quick setup: if in a pick-face mode, handle it first
@@ -1973,6 +2046,10 @@ class BoundaryConditionTool(Tool):
         self._centroid_cache = None  # invalidate — positions changed
         self._update_highlights()
 
+        # Reposition the force-direction gizmo so it follows the model
+        if self._force_handle.is_visible:
+            self._reposition_force_handle()
+
         # Remove stress overlay — its world-space vertices are now wrong
         if self._extension and self._extension.stressOverlayVisible:
             node = Selection.getSelectedObject(0)
@@ -1984,6 +2061,48 @@ class BoundaryConditionTool(Tool):
                     self._extension.stressOverlayVisibleChanged.emit()
                 except Exception:
                     pass
+
+    def _reposition_force_handle(self) -> None:
+        """Reposition the force-direction gizmo to follow the model after a transform change.
+
+        The gizmo mesh is baked at world-space coordinates, so it must be rebuilt
+        whenever the model is moved or rotated.
+        """
+        node = Selection.getSelectedObject(0)
+        if node is None or not isinstance(node, CuraSceneNode):
+            return
+        bc = node.callDecoration("getBoundaryConditions")
+        if bc is None:
+            return
+        mesh_data = node.getMeshData()
+        if mesh_data is None:
+            return
+        verts = mesh_data.getVertices()
+        indices = mesh_data.getIndices()
+        if verts is None:
+            return
+
+        transform = node.getWorldTransformation().getData()
+        verts_h = numpy.column_stack([verts, numpy.ones(len(verts))])
+        verts_world = (transform @ verts_h.T).T[:, :3]
+
+        bbox = node.getBoundingBox()
+        if bbox:
+            diag = math.sqrt(bbox.width ** 2 + bbox.height ** 2 + bbox.depth ** 2)
+            scale = max(0.1, diag / 80.0)
+        else:
+            scale = 1.0
+
+        if self._mode == MODE_ROTATE and 0 <= self._rotating_group_index < len(bc.getForceGroups()):
+            fg = bc.getForceGroups()[self._rotating_group_index]
+            centroid = compute_face_centroid(verts_world, indices, fg.face_indices)
+            self._force_handle.show_at(centroid, scale=scale)
+        elif self._mode == MODE_TORQUE_EDIT and hasattr(bc, "getTorqueGroups"):
+            groups = bc.getTorqueGroups()
+            if 0 <= self._editing_torque_index < len(groups):
+                tg = groups[self._editing_torque_index]
+                centroid = compute_face_centroid(verts_world, indices, tg.face_indices)
+                self._force_handle.show_at(centroid, scale=scale, axis_direction=tg.torque_axis)
 
     def _update_highlights(self) -> None:
         # Skip highlight updates during analysis to prevent
@@ -2061,19 +2180,29 @@ class BoundaryConditionTool(Tool):
                 self._update_highlights()
             return
 
-        if self._picking_pass is None:
-            self._picking_pass = Application.getInstance().getRenderer().getRenderPass("picking_selected")
-            if not self._picking_pass:
+        if self._faces_selection_pass is None:
+            self._faces_selection_pass = Application.getInstance().getRenderer().getRenderPass("selection_faces")
+            if not self._faces_selection_pass:
                 return
 
-        picked_position = self._picking_pass.getPickedPosition(event.x, event.y)
-        face_index = self._find_closest_face(picked_node, picked_position)
-        if face_index is None:
+        face_index = self._faces_selection_pass.getFaceIdAtPosition(event.x, event.y)
+        if face_index < 0:
             if self._hover_faces:
                 self._hover_faces = []
                 self._hover_generation += 1
                 self._update_highlights()
             return
+
+        # Bounds-check: reject stale/corrupt GPU reads
+        mesh_data = picked_node.getMeshData()
+        if mesh_data is not None:
+            mesh_face_count = mesh_data.getFaceCount()
+            if mesh_face_count > 0 and face_index >= mesh_face_count:
+                if self._hover_faces:
+                    self._hover_faces = []
+                    self._hover_generation += 1
+                    self._update_highlights()
+                return
 
         # Single mode: instant highlight, no BFS needed
         if self._selection_mode == "single" or not _FACE_GROUP_ANALYZER_AVAILABLE:
@@ -2177,4 +2306,4 @@ class BoundaryConditionTool(Tool):
         thread.start()
 
     def getRequiredExtraRenderingPasses(self) -> list:
-        return ["picking_selected"]
+        return ["picking_selected", "selection_faces"]
