@@ -2,6 +2,7 @@
 # MultiBuildPlatePlugin is released under the terms of the LGPLv3 or higher.
 
 import os
+import sys
 from typing import Any, Dict, List
 
 from PyQt6.QtCore import QObject, pyqtSlot, pyqtSignal, pyqtProperty
@@ -129,6 +130,11 @@ class MultiBuildPlatePlugin(QObject, Extension):
         # ── Sidebar context menu ─────────────────────────────────────────────
         self._registerSidebarMenuItems()
 
+        # ── Temporary 3MF round-trip workaround ──────────────────────────────
+        # TODO: remove once ThreeMFWriter/ThreeMFReader are patched upstream and
+        #       the plugin ships with a proper Cura PR merged.
+        self._apply_3mf_patches()
+
     def _registerSidebarMenuItems(self) -> None:
         """Add three items to the print-settings right-click context menu."""
         app = self._application
@@ -152,12 +158,113 @@ class MultiBuildPlatePlugin(QObject, Extension):
         })
 
     # ------------------------------------------------------------------
+    # Temporary 3MF round-trip workaround
+    # ------------------------------------------------------------------
+
+    def _apply_3mf_patches(self) -> None:
+        """Monkey-patch ThreeMFWriter.write() so all build plates are saved.
+
+        TEMPORARY — for testing while awaiting a proper upstream fix in
+        ThreeMFWriter.py and ThreeMFReader.py.
+
+        Strategy (writer side):
+          Before each write, copy every node's real plate number into
+          node.metadata["buildplate_number"] and temporarily reset its
+          BuildPlateDecorator to the current active plate so the existing
+          active-plate filter passes for every node.  After write, restore
+          the original plate numbers and remove the temporary metadata.
+
+        Strategy (reader side):
+          The reader already drops unknown settings into node.metadata.
+          _applyBuildPlateMetadata() (called from _onSceneChanged) picks
+          up metadata["buildplate_number"] on any newly loaded node and
+          applies it via setBuildPlateNumber.
+        """
+        # Find the ThreeMFWriter class in the already-loaded modules.
+        writer_class = None
+        for mod in sys.modules.values():
+            klass = getattr(mod, "ThreeMFWriter", None)
+            if klass is not None and hasattr(klass, "_convertUMNodeToSavitarNode"):
+                writer_class = klass
+                break
+
+        if writer_class is None:
+            Logger.log("w", "MultiBuildPlatePlugin: ThreeMFWriter not yet loaded — "
+                            "3MF patch will not be applied")
+            return
+
+        original_write = writer_class.write
+
+        def _patched_write(writer_self, stream, nodes, *args, **kwargs):
+            from cura.CuraApplication import CuraApplication
+            from UM.Scene.Camera import Camera as _Camera
+
+            app      = CuraApplication.getInstance()
+            scene    = app.getController().getScene()
+            active   = app.getMultiBuildPlateModel().activeBuildPlate
+
+            # Collect every scene node that has a BuildPlate decorator.
+            patched_nodes: List[tuple] = []
+
+            def _collect(node) -> None:
+                if isinstance(node, _Camera):
+                    return
+                plate = node.callDecoration("getBuildPlateNumber")
+                if plate is not None:
+                    patched_nodes.append((node, plate))
+                for child in node.getChildren():
+                    _collect(child)
+
+            _collect(scene.getRoot())
+
+            # Temporarily make every node look like it lives on the active
+            # plate (so the filter in _convertUMNodeToSavitarNode passes),
+            # and stash the real plate number in metadata so the writer's
+            # existing metadata loop persists it to the 3MF file.
+            for node, plate in patched_nodes:
+                node.metadata["buildplate_number"] = str(plate)
+                node.callDecoration("setBuildPlateNumber", active)
+
+            try:
+                return original_write(writer_self, stream, nodes, *args, **kwargs)
+            finally:
+                for node, plate in patched_nodes:
+                    node.callDecoration("setBuildPlateNumber", plate)
+                    node.metadata.pop("buildplate_number", None)
+
+        writer_class.write = _patched_write
+        Logger.log("d", "MultiBuildPlatePlugin: patched ThreeMFWriter for multi-plate 3MF saving")
+
+    def _applyBuildPlateMetadata(self) -> None:
+        """After loading a 3MF, restore build plate assignments from metadata.
+
+        The ThreeMFReader stores unknown settings into node.metadata.  Our
+        patched writer saves each node's plate number as metadata key
+        "buildplate_number", so after loading we find it there and apply it.
+        """
+        scene = self._application.getController().getScene()
+        for node in scene.getRoot().getAllChildren():
+            raw = node.metadata.get("buildplate_number")
+            if raw is None:
+                continue
+            try:
+                # The reader stores the raw Savitar Setting object; real
+                # string values come from .value.  Handle both cases.
+                val = raw.value if hasattr(raw, "value") else str(raw)
+                plate_nr = int(val)
+                node.callDecoration("setBuildPlateNumber", plate_nr)
+                del node.metadata["buildplate_number"]
+            except (ValueError, TypeError, AttributeError):
+                pass
+
+    # ------------------------------------------------------------------
     # Internal scene change handlers
     # ------------------------------------------------------------------
 
     def _onSceneChanged(self, source=None) -> None:
         if isinstance(source, Camera):
             return
+        self._applyBuildPlateMetadata()
         self.objectsChanged.emit()
         self.canAddNewPlateChanged.emit()
 
