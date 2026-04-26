@@ -30,7 +30,6 @@ UM.Dialog
     property int ratioB: ratioBSpinner.value
     property string patternMode: ratioModeRadio.checked ? "ratio" : "custom"
     property string customPattern: customPatternField.text
-    property bool applyGlobally: globalCheck.checked
 
     property var availableExtruders: manager ? manager.availableExtruders : []
 
@@ -46,7 +45,6 @@ UM.Dialog
         ratioASpinner.value = 1
         ratioBSpinner.value = 1
         customPatternField.text = ""
-        globalCheck.checked = true
     }
 
     function loadFromData(data)
@@ -54,8 +52,6 @@ UM.Dialog
         nameField.text = data.name || "Mixed Filament"
         extruderACombo.currentIndex = data.filament_a || 0
         extruderBCombo.currentIndex = data.filament_b || 1
-        globalCheck.checked = data.apply_globally !== undefined ? data.apply_globally : true
-
         if (data.output_mode === "mixing")
         {
             mixingRadio.checked = true
@@ -192,32 +188,6 @@ UM.Dialog
                         }
                     }
 
-                }
-
-                // Apply globally vs per-object
-                CheckBox
-                {
-                    id: globalCheck
-                    text: catalog.i18nc("@option:check", "Apply to entire print (global)")
-                    checked: true
-                    Layout.fillWidth: true
-
-                    ToolTip.text: catalog.i18nc("@info:tooltip",
-                        "When checked, all layers will alternate filaments. " +
-                        "When unchecked, only specific objects (assigned via mesh names) will be affected.")
-                    ToolTip.visible: hovered
-                    ToolTip.delay: 500
-                }
-
-                UM.Label
-                {
-                    text: catalog.i18nc("@info", "Per-object assignment: after creating the mixed filament, " +
-                        "assign specific objects to it from the main panel.")
-                    visible: !globalCheck.checked
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                    font: UM.Theme.getFont("small")
-                    color: UM.Theme.getColor("text_inactive")
                 }
 
                 // Color preview

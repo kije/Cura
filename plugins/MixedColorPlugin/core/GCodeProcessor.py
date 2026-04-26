@@ -14,9 +14,10 @@ from .LayerAnalyzer import LayerAnalyzer, LayerInfo
 class GCodeProcessor:
     """Post-processes G-code to apply mixed filament layer dithering.
 
-    Assignment modes:
-    - Global: all layers are processed (apply_globally=True)
-    - Per-object: only layers containing ;MESH: matching assigned_meshes are processed
+    Each mixed filament has a proxy_extruder (a virtual extruder position).
+    The processor identifies layers that use the proxy extruder's Tn command
+    and rewrites them with dithered tool changes between the two physical
+    extruders.
 
     Output modes:
     - IDEX/tool-change: replaces Tn with the appropriate physical extruder
@@ -41,8 +42,13 @@ class GCodeProcessor:
         if not mixed_filaments:
             return gcode_list
 
-        active_mixes = [mf for mf in mixed_filaments if mf.enabled]
-        if not active_mixes:
+        # Build map of proxy_extruder -> MixedFilament
+        proxy_map: Dict[int, MixedFilament] = {}
+        for mf in mixed_filaments:
+            if mf.enabled and mf.proxy_extruder >= 0:
+                proxy_map[mf.proxy_extruder] = mf
+
+        if not proxy_map:
             return gcode_list
 
         # Parse layer structure
@@ -52,55 +58,38 @@ class GCodeProcessor:
 
         Logger.log("d", f"MixedColor: Found {len(layers)} layers, "
                    f"layer_height={layer_height}, "
-                   f"meshes: {analyzer.get_all_mesh_names()}")
+                   f"proxy extruders: {list(proxy_map.keys())}")
 
-        # For each mixed filament, compute and apply the schedule
-        for mf in active_mixes:
-            # Determine which layers this mixed filament applies to
-            applicable_layers = self._get_applicable_layers(mf, layers)
-            if not applicable_layers:
-                Logger.log("d", f"MixedColor: No applicable layers for '{mf.name}'")
+        # For each mixed filament, find applicable layers and compute schedule
+        for proxy_pos, mf in proxy_map.items():
+            applicable = [l for l in layers if l.active_tool == proxy_pos]
+            if not applicable:
+                Logger.log("d", f"MixedColor: No layers use proxy T{proxy_pos} for '{mf.name}'")
                 continue
 
-            Logger.log("d", f"MixedColor: '{mf.name}' applies to {len(applicable_layers)} layers")
+            Logger.log("d", f"MixedColor: '{mf.name}' (proxy T{proxy_pos}) applies to {len(applicable)} layers")
 
             # Compute Bresenham schedule
-            schedule = self._bresenham_schedule(mf, applicable_layers, layer_height)
+            schedule = self._bresenham_schedule(mf, applicable, layer_height)
 
             # Insert pre-heat commands
             if self.preheat_layers > 0 and self.extruder_temperatures and mf.output_mode == "tool_change":
-                gcode_list = self._insert_preheat_commands(gcode_list, layers, applicable_layers, schedule, mf)
+                gcode_list = self._insert_preheat_commands(gcode_list, layers, applicable, schedule, mf)
 
             # Apply tool changes
-            for layer_info, assignment in zip(applicable_layers, schedule):
+            for layer_info, assignment in zip(applicable, schedule):
                 gcode_idx = layer_info.gcode_index
-                original_gcode = gcode_list[gcode_idx]
 
                 if mf.output_mode == "tool_change":
                     target_tool = mf.filament_a if assignment == 0 else mf.filament_b
-                    modified = self._rewrite_tool_change(original_gcode, mf, target_tool)
+                    gcode_list[gcode_idx] = self._rewrite_tool_change(
+                        gcode_list[gcode_idx], mf, target_tool)
                 else:
                     ratio_a = assignment if isinstance(assignment, float) else mf.get_mix_ratio_for_layer(0, layer_info.z_height)
-                    modified = self._rewrite_mixing_hotend(original_gcode, mf, ratio_a)
-
-                gcode_list[gcode_idx] = modified
+                    gcode_list[gcode_idx] = self._rewrite_mixing_hotend(
+                        gcode_list[gcode_idx], mf, ratio_a)
 
         return gcode_list
-
-    def _get_applicable_layers(self, mf: MixedFilament, layers: List[LayerInfo]) -> List[LayerInfo]:
-        """Determine which layers a mixed filament applies to."""
-        if mf.apply_globally:
-            return list(layers)
-
-        # Per-object: only layers containing the assigned meshes
-        result = []
-        for layer in layers:
-            meshes_in_layer = layer.get_meshes()
-            for mesh_name in mf.assigned_meshes:
-                if mesh_name in meshes_in_layer:
-                    result.append(layer)
-                    break
-        return result
 
     def _bresenham_schedule(self, mf: MixedFilament, layer_list: List[LayerInfo],
                             layer_height: float) -> List:
@@ -115,7 +104,6 @@ class GCodeProcessor:
         return self._bresenham_fixed_ratio(mf, len(layer_list))
 
     def _bresenham_fixed_ratio(self, mf: MixedFilament, num_layers: int) -> List[int]:
-        """Bresenham error diffusion for a fixed ratio pattern."""
         cycle = mf.pattern.get_cycle()
         total = len(cycle)
         count_a = sum(1 for x in cycle if x == 0)
@@ -140,7 +128,6 @@ class GCodeProcessor:
         return result
 
     def _bresenham_gradient(self, mf: MixedFilament, layer_list: List[LayerInfo]) -> List[int]:
-        """Bresenham error diffusion with height-varying gradient ratio."""
         result = []
         error = 0.0
 
@@ -160,15 +147,12 @@ class GCodeProcessor:
     def _insert_preheat_commands(self, gcode_list: List[str], all_layers: List[LayerInfo],
                                   applicable_layers: List[LayerInfo],
                                   schedule: List, mf: MixedFilament) -> List[str]:
-        """Insert M104 pre-heat commands N layers before a tool change."""
-        # Build map from layer index -> position in all_layers
         layer_index_map = {l.gcode_index: i for i, l in enumerate(all_layers)}
 
         prev_tool = None
-        for sched_idx, (layer_info, assignment) in enumerate(zip(applicable_layers, schedule)):
+        for layer_info, assignment in zip(applicable_layers, schedule):
             target_tool = mf.filament_a if assignment == 0 else mf.filament_b
             if target_tool != prev_tool and prev_tool is not None:
-                # Find a layer N steps before this one in the global layer list
                 current_global_idx = layer_index_map.get(layer_info.gcode_index)
                 if current_global_idx is not None:
                     preheat_global_idx = max(0, current_global_idx - self.preheat_layers)
@@ -186,7 +170,6 @@ class GCodeProcessor:
         return gcode_list
 
     def _insert_after_layer_comment(self, gcode: str, command: str) -> str:
-        """Insert a command right after the ;LAYER: comment line."""
         lines = gcode.split("\n")
         result = []
         inserted = False
@@ -203,24 +186,19 @@ class GCodeProcessor:
 
     def _rewrite_tool_change(self, gcode: str, mf: MixedFilament,
                               target_extruder: int) -> str:
-        """Rewrite tool commands for IDEX/tool-changer mode.
-
-        Replaces ALL Tn commands in this layer with the target extruder.
-        For per-mesh mode, this is correct because each layer block
-        in Cura's gcode_list corresponds to a single layer, and the
-        mixed filament applies to the entire layer.
-        """
+        """Replace proxy extruder Tn with the target physical extruder."""
         comment = f" ;MixedColor:{mf.name}"
 
         def replace_tool(match):
-            tool_letter = match.group(1)
-            return f"{tool_letter}{target_extruder}{comment}"
+            tool_num = int(match.group(2))
+            if tool_num == mf.proxy_extruder:
+                return f"T{target_extruder}{comment}"
+            return match.group(0)
 
         return self.TOOL_CMD_PATTERN.sub(replace_tool, gcode)
 
     def _rewrite_mixing_hotend(self, gcode: str, mf: MixedFilament,
                                 ratio_a: float) -> str:
-        """Rewrite tool commands for mixing hotend mode."""
         ratio_b = 1.0 - ratio_a
         comment = f" ;MixedColor:{mf.name}"
 
@@ -232,9 +210,10 @@ class GCodeProcessor:
                                                       ratio_a, ratio_b)
 
         def replace_tool(match):
-            tool_letter = match.group(1)
-            tool_num = match.group(2)
-            return mix_commands + f"\n{tool_letter}{tool_num}{comment}"
+            tool_num = int(match.group(2))
+            if tool_num == mf.proxy_extruder:
+                return mix_commands + f"\nT{tool_num}{comment}"
+            return match.group(0)
 
         return self.TOOL_CMD_PATTERN.sub(replace_tool, gcode)
 

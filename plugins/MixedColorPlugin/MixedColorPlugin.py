@@ -19,25 +19,20 @@ from .models.DitherPattern import DitherPattern
 from .models.GradientProfile import GradientProfile
 from .core.GCodeProcessor import GCodeProcessor
 from .core.ColorBlender import ColorBlender
+from .core.VirtualExtruderManager import VirtualExtruderManager
 
 i18n_catalog = i18nCatalog("cura")
 
 METADATA_KEY = "mixed_color_filaments"
-MESH_ASSIGNMENTS_KEY = "mixed_color_mesh_assignments"
 
 
 class MixedColorPlugin(QObject, Extension):
     """Extension plugin that enables mixed-color filaments via layer dithering.
 
-    Supports both IDEX/tool-changer printers (tool change commands) and
-    mixing hotend printers (M163/M164 or M567 commands).
-
-    Features:
-    - Proxy extruder slot based assignment
-    - Per-object assignment via ;MESH: G-code comments
-    - Bresenham error diffusion for smooth gradient transitions
-    - Temperature pre-heating with configurable lookahead
-    - Save button indicator showing active mixed filaments
+    Creates runtime virtual extruders on the active machine so users can
+    assign objects to mixed colors via Cura's standard per-object extruder
+    picker. During G-code export, tool commands for virtual extruders are
+    replaced with dithered alternation between two physical extruders.
     """
 
     def __init__(self, parent=None) -> None:
@@ -52,10 +47,12 @@ class MixedColorPlugin(QObject, Extension):
         self._view = None
         self._preheat_layers: int = 3
         self._enable_preheat: bool = True
+        self._virtual_extruder_mgr = VirtualExtruderManager()
 
         self._global_container_stack = Application.getInstance().getGlobalContainerStack()
         if self._global_container_stack:
             self._restoreFromMetadata()
+            self._syncVirtualExtruders()
 
         Application.getInstance().getOutputDeviceManager().writeStarted.connect(self.execute)
         Application.getInstance().globalContainerStackChanged.connect(self._onGlobalContainerStackChanged)
@@ -66,11 +63,10 @@ class MixedColorPlugin(QObject, Extension):
     mixedFilamentsChanged = pyqtSignal()
     selectedIndexChanged = pyqtSignal()
 
-    # -- Properties exposed to QML --
+    # -- Properties --
 
     @pyqtProperty("QVariantList", notify=mixedFilamentsChanged)
     def mixedFilaments(self) -> list:
-        """Return mixed filaments as a list of dicts for QML consumption."""
         return [mf.to_dict() for mf in self._mixed_filaments]
 
     @pyqtProperty(int, notify=mixedFilamentsChanged)
@@ -85,13 +81,16 @@ class MixedColorPlugin(QObject, Extension):
     def selectedIndex(self) -> int:
         return self._selected_index
 
-    @pyqtProperty("QVariantList", constant=True)
+    @pyqtProperty("QVariantList", notify=mixedFilamentsChanged)
     def availableExtruders(self) -> list:
-        """Return available extruder info for QML dropdowns."""
+        """Return physical (non-virtual) extruder info for QML dropdowns."""
         extruders = []
         global_stack = Application.getInstance().getGlobalContainerStack()
         if global_stack:
+            physical_count = self._virtual_extruder_mgr.get_physical_extruder_count()
             for idx, extruder in enumerate(global_stack.extruderList):
+                if idx >= physical_count:
+                    break
                 color = extruder.material.getMetaDataEntry("color_code", "#808080") if extruder.material else "#808080"
                 name = extruder.material.getMetaDataEntry("material", "Unknown") if extruder.material else "Unknown"
                 extruders.append({
@@ -109,11 +108,10 @@ class MixedColorPlugin(QObject, Extension):
     def enablePreheat(self) -> bool:
         return self._enable_preheat
 
-    # -- QML Slots --
+    # -- Slots --
 
     @pyqtSlot()
     def showPanel(self) -> None:
-        """Show the mixed colors configuration dialog."""
         if self._view is None:
             self._createView()
         if self._view:
@@ -125,17 +123,14 @@ class MixedColorPlugin(QObject, Extension):
             self._selected_index = index
             self.selectedIndexChanged.emit()
 
-    @pyqtSlot(str, int, int, str, int, int, str, str, bool)
+    @pyqtSlot(str, int, int, str, int, int, str, str)
     def addMixedFilament(self, name: str, filament_a: int, filament_b: int,
                          output_mode: str,
                          ratio_a: int, ratio_b: int,
-                         pattern_mode: str, custom_pattern: str,
-                         apply_globally: bool) -> None:
-        """Add a new mixed filament definition."""
+                         pattern_mode: str, custom_pattern: str) -> None:
+        """Add a new mixed filament and create a virtual extruder for it."""
         pattern = DitherPattern(
-            mode=pattern_mode,
-            ratio_a=ratio_a,
-            ratio_b=ratio_b,
+            mode=pattern_mode, ratio_a=ratio_a, ratio_b=ratio_b,
             custom_pattern=custom_pattern
         )
         color_a = self._get_extruder_color(filament_a)
@@ -143,36 +138,27 @@ class MixedColorPlugin(QObject, Extension):
         preview = ColorBlender.blend_rgb(color_a, color_b, pattern.get_ratio_fraction())
 
         mf = MixedFilament(
-            name=name,
-            filament_a=filament_a,
-            filament_b=filament_b,
-            pattern=pattern,
-            output_mode=output_mode,
-            preview_color=preview,
-            apply_globally=apply_globally,
+            name=name, filament_a=filament_a, filament_b=filament_b,
+            pattern=pattern, output_mode=output_mode, preview_color=preview,
         )
         self._mixed_filaments.append(mf)
+        self._syncVirtualExtruders()
         self._saveToMetadata()
         self.mixedFilamentsChanged.emit()
 
-    @pyqtSlot(int, str, int, int, str, int, int, str, str, bool)
+    @pyqtSlot(int, str, int, int, str, int, int, str, str)
     def updateMixedFilament(self, index: int, name: str, filament_a: int, filament_b: int,
                             output_mode: str,
                             ratio_a: int, ratio_b: int,
-                            pattern_mode: str, custom_pattern: str,
-                            apply_globally: bool) -> None:
-        """Update an existing mixed filament at the given index."""
+                            pattern_mode: str, custom_pattern: str) -> None:
         if 0 <= index < len(self._mixed_filaments):
             mf = self._mixed_filaments[index]
             mf.name = name
             mf.filament_a = filament_a
             mf.filament_b = filament_b
             mf.output_mode = output_mode
-            mf.apply_globally = apply_globally
             mf.pattern = DitherPattern(
-                mode=pattern_mode,
-                ratio_a=ratio_a,
-                ratio_b=ratio_b,
+                mode=pattern_mode, ratio_a=ratio_a, ratio_b=ratio_b,
                 custom_pattern=custom_pattern,
             )
             color_a = self._get_extruder_color(filament_a)
@@ -187,6 +173,7 @@ class MixedColorPlugin(QObject, Extension):
             del self._mixed_filaments[index]
             if self._selected_index >= len(self._mixed_filaments):
                 self._selected_index = len(self._mixed_filaments) - 1
+            self._syncVirtualExtruders()
             self._saveToMetadata()
             self.mixedFilamentsChanged.emit()
             self.selectedIndexChanged.emit()
@@ -216,61 +203,15 @@ class MixedColorPlugin(QObject, Extension):
             self._saveToMetadata()
             self.mixedFilamentsChanged.emit()
 
-    @pyqtSlot(int, str)
-    def addMeshToFilament(self, index: int, mesh_name: str) -> None:
-        """Add a mesh name to a mixed filament's assigned_meshes list."""
-        if 0 <= index < len(self._mixed_filaments):
-            mf = self._mixed_filaments[index]
-            if mesh_name not in mf.assigned_meshes:
-                mf.assigned_meshes.append(mesh_name)
-                self._saveToMetadata()
-                self.mixedFilamentsChanged.emit()
-
-    @pyqtSlot(int, str)
-    def removeMeshFromFilament(self, index: int, mesh_name: str) -> None:
-        """Remove a mesh name from a mixed filament's assigned_meshes list."""
-        if 0 <= index < len(self._mixed_filaments):
-            mf = self._mixed_filaments[index]
-            if mesh_name in mf.assigned_meshes:
-                mf.assigned_meshes.remove(mesh_name)
-                self._saveToMetadata()
-                self.mixedFilamentsChanged.emit()
-
-    @pyqtSlot(int, bool)
-    def setApplyGlobally(self, index: int, apply_globally: bool) -> None:
-        """Set whether a mixed filament applies globally or per-mesh."""
-        if 0 <= index < len(self._mixed_filaments):
-            self._mixed_filaments[index].apply_globally = apply_globally
-            self._saveToMetadata()
-            self.mixedFilamentsChanged.emit()
-
-    @pyqtProperty("QVariantList", constant=False, notify=mixedFilamentsChanged)
-    def sceneObjectNames(self) -> list:
-        """Return names of objects in the scene for mesh assignment UI."""
-        names = []
-        try:
-            from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
-            scene = Application.getInstance().getController().getScene()
-            for node in DepthFirstIterator(scene.getRoot()):
-                if node.getMeshData() and not node.callDecoration("isGroup"):
-                    name = node.getName()
-                    if name and name not in names:
-                        names.append(name)
-        except Exception:
-            pass
-        return names
-
     @pyqtSlot(int)
     def setPreheatLayers(self, layers: int) -> None:
         self._preheat_layers = max(0, min(20, layers))
         self._saveToMetadata()
-        self.mixedFilamentsChanged.emit()
 
     @pyqtSlot(bool)
     def setEnablePreheat(self, enabled: bool) -> None:
         self._enable_preheat = enabled
         self._saveToMetadata()
-        self.mixedFilamentsChanged.emit()
 
     @pyqtSlot(str, str, float, result=str)
     def previewBlendColor(self, color_a_hex: str, color_b_hex: str, ratio_a: float) -> str:
@@ -282,7 +223,6 @@ class MixedColorPlugin(QObject, Extension):
     # -- G-code Post-Processing --
 
     def execute(self, output_device) -> None:
-        """Post-process G-code to apply mixed filament dithering."""
         scene = Application.getInstance().getController().getScene()
         if not hasattr(scene, "gcode_dict"):
             return
@@ -295,7 +235,7 @@ class MixedColorPlugin(QObject, Extension):
         if not gcode_list:
             return
 
-        active_mixes = [mf for mf in self._mixed_filaments if mf.enabled]
+        active_mixes = [mf for mf in self._mixed_filaments if mf.enabled and mf.proxy_extruder >= 0]
         if not active_mixes:
             return
 
@@ -304,7 +244,6 @@ class MixedColorPlugin(QObject, Extension):
             return
 
         try:
-            # Gather extruder temperatures for pre-heating
             extruder_temps = self._get_extruder_temperatures()
             standby_temp = self._get_standby_temperature()
 
@@ -321,10 +260,30 @@ class MixedColorPlugin(QObject, Extension):
         except Exception:
             Logger.logException("e", "Exception in Mixed Colors post-processing.")
 
-    # -- Internal Methods --
+    # -- Virtual Extruder Management --
+
+    def _syncVirtualExtruders(self) -> None:
+        """Ensure virtual extruders exist for all mixed filaments."""
+        enabled_count = len(self._mixed_filaments)
+
+        if enabled_count == 0:
+            self._virtual_extruder_mgr.remove_all_virtual_extruders()
+            return
+
+        positions = self._virtual_extruder_mgr.ensure_virtual_extruders(enabled_count)
+
+        # Assign proxy_extruder positions to mixed filaments
+        for i, mf in enumerate(self._mixed_filaments):
+            if i < len(positions):
+                mf.proxy_extruder = positions[i]
+            else:
+                mf.proxy_extruder = -1
+
+        Logger.log("i", f"MixedColor: Synced {len(positions)} virtual extruders: {positions}")
+
+    # -- Internal --
 
     def _createView(self) -> None:
-        """Create the QML dialog view and save button indicator."""
         if self._view is not None:
             return
 
@@ -339,16 +298,15 @@ class MixedColorPlugin(QObject, Extension):
             Logger.log("e", "Failed to create Mixed Colors QML view.")
             return
 
-        # Register save button indicator (same pattern as PostProcessingPlugin)
         save_button = self._view.findChild(QObject, "mixedColorSaveAreaButton")
         if save_button:
             CuraApplication.getInstance().addAdditionalComponent("saveButton", save_button)
-            Logger.log("d", "Mixed Colors save button indicator registered.")
 
     def _onGlobalContainerStackChanged(self) -> None:
         self._global_container_stack = Application.getInstance().getGlobalContainerStack()
         if self._global_container_stack:
             self._restoreFromMetadata()
+            self._syncVirtualExtruders()
         self.mixedFilamentsChanged.emit()
 
     def _saveToMetadata(self) -> None:
@@ -390,7 +348,6 @@ class MixedColorPlugin(QObject, Extension):
         return (128, 128, 128)
 
     def _get_extruder_temperatures(self) -> Dict[int, float]:
-        """Get print temperatures for each extruder from settings."""
         temps = {}
         global_stack = Application.getInstance().getGlobalContainerStack()
         if global_stack:
@@ -401,7 +358,6 @@ class MixedColorPlugin(QObject, Extension):
         return temps
 
     def _get_standby_temperature(self) -> float:
-        """Get standby temperature from settings."""
         global_stack = Application.getInstance().getGlobalContainerStack()
         if global_stack and global_stack.extruderList:
             temp = global_stack.extruderList[0].getProperty("material_standby_temperature", "value")

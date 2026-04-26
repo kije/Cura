@@ -55,14 +55,14 @@ UM.Dialog
                         manager.updateMixedFilament(
                             ed.editIndex, ed.filamentName, ed.filamentA, ed.filamentB,
                             ed.outputMode, ed.ratioA, ed.ratioB,
-                            ed.patternMode, ed.customPattern, ed.applyGlobally)
+                            ed.patternMode, ed.customPattern)
                     }
                     else
                     {
                         manager.addMixedFilament(
                             ed.filamentName, ed.filamentA, ed.filamentB,
                             ed.outputMode, ed.ratioA, ed.ratioB,
-                            ed.patternMode, ed.customPattern, ed.applyGlobally)
+                            ed.patternMode, ed.customPattern)
                     }
                 })
             }
@@ -225,7 +225,8 @@ UM.Dialog
                                     {
                                         text: "Extruder " + (modelData.filament_a + 1) +
                                               " + Extruder " + (modelData.filament_b + 1) +
-                                              "  |  Mode: " + (modelData.output_mode === "tool_change" ? "IDEX" : "Mixing")
+                                              "  |  Virtual slot: " + (modelData.proxy_extruder >= 0 ? (modelData.proxy_extruder + 1) : "—") +
+                                              "  |  " + (modelData.output_mode === "tool_change" ? "IDEX" : "Mixing")
                                         font: UM.Theme.getFont("default")
                                         color: UM.Theme.getColor("text_inactive")
                                     }
@@ -347,7 +348,7 @@ UM.Dialog
                 wrapMode: Text.WordWrap
                 text: catalog.i18nc("@info",
                     "Mixed filaments alternate layers of different physical filaments to create blended colors. " +
-                    "Assign objects to proxy extruder slots, then define which physical filaments alternate.")
+                    "Each mixed filament creates a virtual extruder — assign objects to it via the per-object extruder picker.")
                 font: UM.Theme.getFont("small")
                 color: UM.Theme.getColor("text_inactive")
             }

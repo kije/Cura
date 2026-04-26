@@ -195,7 +195,7 @@ class TestGCodeProcessorToolChange(unittest.TestCase):
             name="TestMix",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=pattern,
             output_mode="tool_change",
             enabled=True,
@@ -213,14 +213,14 @@ class TestGCodeProcessorToolChange(unittest.TestCase):
         self.assertIn("T1", result[2])
         self.assertNotIn("T2", result[2])
 
-    def test_all_layers_processed_in_global_mode(self):
-        """In global mode, even layers originally using T0 get rewritten."""
+    def test_non_proxy_layers_untouched(self):
+        """Layers not using the proxy extruder should remain unchanged."""
         mf = self._make_mix()
         gcode = [block for block in SAMPLE_GCODE]
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
-        # Layer 4 (index 5) originally had T0, but global mode rewrites it too
-        self.assertIn(";MixedColor:TestMix", result[5])
+        # Layer 4 (index 5) uses T0 not T2, should be untouched
+        self.assertNotIn(";MixedColor", result[5])
 
     def test_header_untouched(self):
         mf = self._make_mix()
@@ -261,7 +261,7 @@ class TestBresenhamDithering(unittest.TestCase):
             name="Test",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=DitherPattern(mode="ratio", ratio_a=2, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
@@ -288,7 +288,7 @@ class TestBresenhamDithering(unittest.TestCase):
             name="Test",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=DitherPattern(mode="ratio", ratio_a=2, ratio_b=3),
             output_mode="tool_change",
             enabled=True,
@@ -327,7 +327,7 @@ class TestGradientBresenham(unittest.TestCase):
             name="GradTest",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             gradient=gradient,
             output_mode="tool_change",
@@ -356,7 +356,7 @@ class TestGCodeProcessorMixingHotend(unittest.TestCase):
             name="MarlinMix",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=pattern,
             output_mode="mixing",
             mix_gcode="marlin_m163",
@@ -369,7 +369,7 @@ class TestGCodeProcessorMixingHotend(unittest.TestCase):
             name="RepRapMix",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=pattern,
             output_mode="mixing",
             mix_gcode="reprap_m567",
@@ -411,7 +411,7 @@ class TestTemperaturePreheating(unittest.TestCase):
             name="PreheatTest",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
@@ -438,7 +438,7 @@ class TestTemperaturePreheating(unittest.TestCase):
             name="NoPreheat",
             filament_a=0,
             filament_b=1,
-            apply_globally=True,
+            proxy_extruder=2,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
@@ -459,49 +459,48 @@ class TestTemperaturePreheating(unittest.TestCase):
 
 class TestPerObjectMeshAssignment(unittest.TestCase):
 
-    def test_mesh_assignment_applied(self):
-        """Per-object mesh assignments should only affect assigned meshes."""
+    def test_proxy_extruder_only_affects_matching_layers(self):
+        """Only layers using the proxy extruder's Tn should be rewritten."""
         mf = MixedFilament(
-            id="mix-cube",
-            name="CubeMix",
+            name="ProxyTest",
             filament_a=0,
             filament_b=1,
-            apply_globally=False,
-            assigned_meshes=["Cube.stl"],
+            proxy_extruder=2,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
             output_mode="tool_change",
             enabled=True,
         )
-        gcode = [block for block in SAMPLE_GCODE_MESH]
+        gcode = [block for block in SAMPLE_GCODE]
 
         processor = GCodeProcessor()
         result = processor.process(gcode, [mf])
 
-        # Layers containing Cube.stl should have mixed color processing
-        for block in result[1:]:
-            if ";MESH:Cube.stl" in block:
-                self.assertIn(";MixedColor:CubeMix", block)
+        # Layer 4 (index 5) uses T0, not T2 — should NOT be rewritten
+        self.assertNotIn(";MixedColor:ProxyTest", result[5])
+        # Layer 0 (index 1) uses T2 — should be rewritten
+        self.assertIn(";MixedColor:ProxyTest", result[1])
 
-    def test_per_mesh_only_affects_matching_layers(self):
-        """Per-mesh assignment should not affect layers without the assigned mesh."""
-        mf = MixedFilament(
-            name="OnlySphere",
-            filament_a=0,
-            filament_b=1,
-            apply_globally=False,
-            assigned_meshes=["Sphere.stl"],
+    def test_different_proxy_extruders(self):
+        """Two mixed filaments with different proxies should each affect only their layers."""
+        mf_a = MixedFilament(
+            name="MixA", filament_a=0, filament_b=1, proxy_extruder=2,
             pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
-            output_mode="tool_change",
-            enabled=True,
+            output_mode="tool_change", enabled=True,
         )
-        # Layer 2 of SAMPLE_GCODE_MESH only has Cube.stl, no Sphere.stl
-        gcode = [block for block in SAMPLE_GCODE_MESH]
+        mf_b = MixedFilament(
+            name="MixB", filament_a=0, filament_b=1, proxy_extruder=0,
+            pattern=DitherPattern(mode="ratio", ratio_a=1, ratio_b=1),
+            output_mode="tool_change", enabled=True,
+        )
+        gcode = [block for block in SAMPLE_GCODE]
 
         processor = GCodeProcessor()
-        result = processor.process(gcode, [mf])
+        result = processor.process(gcode, [mf_a, mf_b])
 
-        # Layer 2 (index 3) only has Cube.stl - should NOT be processed
-        self.assertNotIn(";MixedColor:OnlySphere", result[3])
+        # Layer 4 (index 5) uses T0 — should have MixB
+        self.assertIn(";MixedColor:MixB", result[5])
+        # Layer 0 (index 1) uses T2 — should have MixA
+        self.assertIn(";MixedColor:MixA", result[1])
 
 
 if __name__ == "__main__":
